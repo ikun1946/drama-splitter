@@ -44,8 +44,9 @@ class ProbeWorker(QThread):
 class PlanWorker(QThread):
     """生成规则草案方案。
 
-    阶段1/2 使用规则规划器；阶段4 接入多模态剧情判断后，
-    这里替换为候选图 + 动态规划，并保留规则结果作为对照基线。
+    阶段1 使用规则规划器（等分 + 帧吸附）。替换路径按方案 §16 分三步：
+    阶段3 提供候选数据库 → 阶段2 在候选上建图做动态规划 → 阶段4 加入剧情边代价。
+    规则结果届时保留为对照基线（§20.3）。
     """
 
     completed = Signal(object, object, list)  # BoundaryPlan, FeasibilityReport, list[PlanProblem]
