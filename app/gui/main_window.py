@@ -200,10 +200,12 @@ class ImportPage(QWidget):
         layout.addWidget(QLabel("① 选择一条已剪辑完成的短剧长视频"))
         layout.addLayout(row)
         layout.addWidget(self.summary)
-        layout.addWidget(self.issues, 1)
+        # 音轨选择是必填项（§17.1 多音轨时必须显式选择），放在兼容性问题表之前，
+        # 否则会被问题表格挤到页面底部，用户要滚动才能看到
         layout.addWidget(audio_group)
+        layout.addWidget(QLabel("兼容性与解码检查"))
+        layout.addWidget(self.issues, 1)
         layout.addWidget(self.status)
-        layout.addStretch(0)
 
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

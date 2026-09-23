@@ -126,6 +126,16 @@ def main() -> int:
     wait_until(app, lambda: window.import_page._worker and not window.import_page._worker.isRunning())
     pump(app)
 
+    def shot(name: str, widget) -> None:
+        pixmap = widget.grab()
+        target = OUT / name
+        pixmap.save(str(target), "PNG")
+        print(f"  {target.relative_to(ROOT)}  {pixmap.width()}×{pixmap.height()}")
+
+    print("生成截图：")
+    # 必须在切换到设置页**之前**抓导入页，否则抓到的还是设置页
+    shot("01-导入.png", window)
+
     # 设置：目标 30 秒、0% 浮动 → 4 集
     window.nav.setCurrentRow(1)
     pump(app)
@@ -135,15 +145,6 @@ def main() -> int:
     page.duration_spin.setValue(30.0)
     page.tolerance_spin.setValue(0.0)
     pump(app)
-
-    def shot(name: str, page_widget) -> None:
-        pixmap = page_widget.grab()
-        target = OUT / name
-        pixmap.save(str(target), "PNG")
-        print(f"  {target.relative_to(ROOT)}  {pixmap.width()}×{pixmap.height()}")
-
-    print("生成截图：")
-    shot("01-导入.png", window)
     shot("02-设置.png", window)
 
     # 分析
@@ -173,7 +174,25 @@ def main() -> int:
     shot("05-导出.png", window)
 
     window.review_page._player.stop()
-    print("完成。")
+
+    # 内容去重：抓错页面（例如两次都抓到同一页）会让截图表格静默变成错的，
+    # 而这种错误靠人眼看文件名是发现不了的 —— 必须用内容哈希兜住。
+    import hashlib
+
+    digests: dict[str, str] = {}
+    duplicates: list[str] = []
+    for path in sorted(OUT.glob("*.png")):
+        digest = hashlib.md5(path.read_bytes()).hexdigest()
+        if digest in digests:
+            duplicates.append(f"{digests[digest]} 与 {path.name} 内容完全相同")
+        digests[digest] = path.name
+    if duplicates:
+        print("截图内容重复：")
+        for item in duplicates:
+            print("  !! " + item)
+        return 1
+
+    print(f"完成：{len(digests)} 张截图，内容互不相同。")
     return 0
 
 
