@@ -1,0 +1,15 @@
+# 统一以 LF 存库，避免 Windows/Linux 之间产生满屏的换行符差异
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换，也不要尝试合并
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp4 binary
+*.ico binary
+*.wav binary
+
+# 这些文件在 Windows 上按 CRLF 检出更方便
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 合成测试素材：体积大且可由脚本重建，不入库
+# 重建命令：python tools/make_test_assets.py testdata --seconds 120
+# 缺失时相关测试会跳过并给出该提示，不会静默假通过
+testdata/
+
+# 运行产物
+*.part.mp4
+*.stale
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

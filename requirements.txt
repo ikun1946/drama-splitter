@@ -1,0 +1,12 @@
+# 运行依赖
+# 安装：<项目 venv>/Scripts/python.exe -m pip install -r requirements.txt
+# 国内建议加镜像：-i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 界面（只要 Essentials；Addons 约 160MB，本项目不需要）
+PySide6-Essentials>=6.8
+
+# 合成测试素材与标记解码
+numpy>=2.0
+
+# 测试
+pytest>=8.0
