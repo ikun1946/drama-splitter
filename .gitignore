@@ -5,10 +5,11 @@ __pycache__/
 .venv/
 venv/
 
-# 测试与缓存
+# 测试与缓存（cache/ 是可重建的转写与检测结果，属机器本地数据 §18.2）
 .pytest_cache/
 .coverage
 htmlcov/
+cache/
 
 # 合成测试素材：体积大且可由脚本重建，不入库
 # 重建命令：python tools/make_test_assets.py testdata --seconds 120
