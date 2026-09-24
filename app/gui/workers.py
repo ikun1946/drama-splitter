@@ -77,7 +77,7 @@ class AnalysisWorker(QThread):
     stage_started = Signal(str)
     stage_progress = Signal(str, float)          # 说明, 0-1
     stage_log = Signal(str)                      # 一行人可读的结论
-    completed = Signal(object, object, object, object)
+    completed = Signal(object, object, object, object, object)  # 方案,报告,问题,候选,整集复核
     failed = Signal(str)
 
     def __init__(self, binaries, media: MediaInfo, audio_stream_index: int | None,
@@ -184,8 +184,27 @@ class AnalysisWorker(QThread):
             # ---- 整体规划 ----------------------------------------------
             self.stage_started.emit("整体规划")
             from app.core.planner import PlanningError, plan_rule_based
+            from app.core.semantic import EventIndex, create_judge, judge_candidates
             from app.core.settings import CountPolicy, SplitMode, check_feasibility
             from app.core.solver import solve_from_candidates
+
+            index = EventIndex.build(transcript, shots.scenes)
+            self.stage_log.emit(index.describe())
+
+            # ---- 语义判断（§11，可选，带预算与降级）--------------------
+            judge = create_judge()
+            if judge is None:
+                self.stage_log.emit(
+                    "语义判断未启用（本地模型或推理栈不可用）——"
+                    "候选保持规则评分，审核状态保持 pending（§ 降级路径）。"
+                )
+            strategy = self._settings.strategy.value
+            outcome = judge_candidates(
+                candidates, index, judge, strategy=strategy, budget_requests=24
+            )
+            self.stage_log.emit(outcome.describe())
+            for note in outcome.notes:
+                self.stage_log.emit(f"  {note}")
 
             def baseline():
                 """§20.3 的规则基线（等分），用于与 DP 结果对照。"""
@@ -197,6 +216,14 @@ class AnalysisWorker(QThread):
                     self._settings.split_mode == SplitMode.TARGET_EPISODE_COUNT
                     and self._settings.count_policy == CountPolicy.EXACT
                 )
+                # 问句/叹句后的切点帧（悬念策略用，§ 策略）
+                ends_question = {
+                    point.frame_index: bool(
+                        (point.speech_before or "").strip()
+                        and (point.speech_before or "").strip()[-1] in "？！?"
+                    )
+                    for point in candidates.points
+                }
                 try:
                     plan, solution, problems, notes = solve_from_candidates(
                         candidates,
@@ -208,6 +235,8 @@ class AnalysisWorker(QThread):
                         allowed_min=report.allowed_min,
                         allowed_max=report.allowed_max,
                         baseline=baseline,
+                        strategy=strategy,
+                        ends_with_question=ends_question,
                     )
                 except Exception as exc:  # noqa: BLE001 - 含 PlanningError
                     self.failed.emit(str(exc))
@@ -237,7 +266,21 @@ class AnalysisWorker(QThread):
                 except PlanningError as exc:
                     self.failed.emit(str(exc))
                     return
-            self.completed.emit(plan, report, problems, candidates)
+            # ---- 整集复核（阶段4）--------------------------------------
+            from app.core.review import review_plan
+
+            reviews = review_plan(
+                plan, self._media, index,
+                transcript=transcript, blacks=shots.blacks,
+            )
+            grade_labels = {"pass": "通过", "warn": "留意", "block": "阻断"}
+            for review in reviews:
+                detail = "；".join(review.risks) if review.risks else "无风险"
+                self.stage_log.emit(
+                    f"  第{review.episode:02d}集复核[{grade_labels[review.grade]}]：{detail}"
+                )
+
+            self.completed.emit(plan, report, problems, candidates, reviews)
 
         except Exception as exc:  # noqa: BLE001 - 边界层必须把异常变成可读信息
             self.failed.emit(f"分析失败：{exc}")

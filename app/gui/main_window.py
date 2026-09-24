@@ -704,8 +704,18 @@ class AnalysisPage(QWidget):
         self._append(
             "帧对齐：" + ("全部落在合法帧起点" if snapping[0] else f"有 {len(snapping[1])} 处未对齐")
         )
+        if reviews:
+            self._append("整集复核（阶段4）：")
+            grade_labels = {"pass": "通过", "warn": "留意", "block": "阻断"}
+            for review in reviews:
+                detail = "；".join(review.risks) if review.risks else "无风险"
+                self._append(
+                    f"  第{review.episode:02d}集[{grade_labels[review.grade]}] {detail}"
+                )
         self._append(
-            "语义审核状态：规则草案，尚未经过剧情判断（阶段4 未接入）。"
+            "语义状态：候选已按规则评分"
+            + ("并做整集复核" if reviews else "（未接入剧情级语义判断，属阶段4 模型部分）")
+            + "。"
         )
         if problems:
             for problem in problems:

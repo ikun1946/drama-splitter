@@ -40,6 +40,9 @@ class ProjectState:
     # 阶段3 产物：候选点集合（供审核页展示与阶段2 使用）
     candidates: "object | None" = None
 
+    # 阶段4 产物：整集复核结论（供审核页展示）
+    episode_reviews: "object | None" = None
+
     # ---- 方案版本 ------------------------------------------------------
 
     @property

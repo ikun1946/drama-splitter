@@ -85,8 +85,8 @@ class TestWorkers:
         worker.stage_started.connect(lambda name: outcome.setdefault("stages", []).append(name))
         worker.stage_log.connect(lambda text: outcome.setdefault("log", []).append(text))
         worker.completed.connect(
-            lambda plan, report, problems, candidates: outcome.update(
-                plan=plan, candidates=candidates
+            lambda plan, report, problems, candidates, reviews: outcome.update(
+                plan=plan, candidates=candidates, reviews=reviews
             )
         )
         worker.failed.connect(lambda message: outcome.setdefault("failed", message))

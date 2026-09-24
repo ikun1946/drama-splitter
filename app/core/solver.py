@@ -57,7 +57,13 @@ _COLUMN_BLOCK = 512
 
 @dataclass(frozen=True)
 class SolverWeights:
-    """求解器权重。默认值是先验设定，尚未用真实短剧标定（§11.2）。"""
+    """求解器权重。默认值是先验设定，尚未用真实短剧标定（§11.2）。
+
+    三种策略（§ 策略）对应不同的权重取向：
+    - 剧情优先：边界质量与集长均衡；
+    - 悬念优先：更看重切点证据（悬念点通常就是强句末）；
+    - 时长优先：集长偏差主导，边界质量只作次要参考。
+    """
 
     duration: float = 0.7   # 集长偏离目标的权重
     boundary: float = 0.3   # 切点质量的权重
@@ -68,6 +74,36 @@ class SolverWeights:
         total = self.duration + self.boundary
         if total <= 0:
             raise ValueError("权重之和必须大于 0")
+
+    @classmethod
+    def for_strategy(cls, strategy: str) -> "SolverWeights":
+        mapping = {
+            "story": (0.6, 0.4),
+            "suspense": (0.55, 0.45),
+            "duration": (0.85, 0.15),
+        }
+        duration, boundary = mapping.get(strategy, (0.7, 0.3))
+        return cls(duration=duration, boundary=boundary)
+
+
+def strategy_boundary_bonus(
+    strategy: str,
+    cut_scores: dict[int, float],
+    ends_with_question: dict[int, bool],
+) -> dict[int, float]:
+    """按策略给切点附加奖励/惩罚（叠加在代价上，负值 = 更优）。
+
+    - 悬念优先：前一句以问号/叹号收尾的切点获得奖励——"问完就切"是短剧
+      最常用的悬念手法，这是**标点层面的机械判定**，不涉及语义理解；
+    - 剧情优先 / 时长优先：不加策略性奖惩，完全依赖候选评分与集长。
+    """
+    if strategy != "suspense":
+        return {}
+    bonus: dict[int, float] = {}
+    for frame, _score in cut_scores.items():
+        if ends_with_question.get(frame):
+            bonus[frame] = -0.15  # 负代价 = 更优
+    return bonus
 
 
 @dataclass
@@ -438,15 +474,41 @@ def solve_from_candidates(
     allowed_max: int,
     weights: SolverWeights | None = None,
     baseline: "Callable[[], BoundaryPlan] | None" = None,
+    strategy: str = "story",
+    ends_with_question: "dict[int, bool] | None" = None,
 ) -> tuple[BoundaryPlan, GraphSolution, list[PlanProblem], list[str]]:
     """从候选点求解最优边界并转成 BoundaryPlan。
 
     返回 (方案, 图解, 方案层问题, 说明)。
     `baseline` 用于 §20.3 的对照：传入规则基线的构造函数，其总代价会写进说明。
+    `strategy` 决定权重取向与策略性奖惩（§ 策略）。
+    `ends_with_question` 是「切点帧 → 前一句是否以问号/叹号结尾」的映射，
+    由调用方从事件索引算出——图节点本身不承载语义信息。
     """
     notes: list[str] = []
+    weights = weights or SolverWeights.for_strategy(strategy)
     solver = CandidateGraphSolver(candidates, media, derived, weights=weights)
     solver.build()
+
+    # 策略性奖惩：悬念优先时，问句/叹句后的切点更优（§ 策略）
+    if strategy == "suspense" and solver._cost is not None:
+        bonus = strategy_boundary_bonus(
+            strategy,
+            {node.frame: node.score for node in solver._nodes},
+            ends_with_question or {},
+        )
+        if bonus:
+            applied = 0
+            for index, node in enumerate(solver._nodes):
+                value = bonus.get(node.frame)
+                if value:
+                    # 奖励施加在"以该节点为切点"的所有边上
+                    solver._cost[:, index] = np.maximum(
+                        solver._cost[:, index] + value, -1.0
+                    )
+                    applied += 1
+            if applied:
+                notes.append(f"悬念策略：{applied} 个问句/叹句后的切点获得优先")
 
     try:
         if settings_count_exact:
