@@ -37,6 +37,9 @@ class ProjectState:
     # 已导出产物：集号 → (路径, 方案版本)，用于判断是否过期
     exported: dict[int, tuple[Path, int]] = field(default_factory=dict)
 
+    # 阶段3 产物：候选点集合（供审核页展示与阶段2 使用）
+    candidates: "object | None" = None
+
     # ---- 方案版本 ------------------------------------------------------
 
     @property

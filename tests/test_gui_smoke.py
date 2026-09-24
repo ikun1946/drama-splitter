@@ -19,7 +19,13 @@ from fractions import Fraction  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
-from app.core.settings import CountPolicy, RangeMode, SplitMode  # noqa: E402
+from app.core.settings import (
+    CountPolicy,
+    RangeMode,
+    RangeSpec,
+    SplitMode,
+    SplitSettings,
+)  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +58,84 @@ class TestWindowConstruction:
         window.state.reset_media()
         ok, message = window.import_page.can_continue()
         assert not ok and "导入" in message
+
+
+class TestWorkers:
+    """工作线程的构造参数与信号契约。
+
+    AnalysisWorker 一度漏传 settings，等到界面点「开始分析」才炸出来——
+    那是用户最不想看到报错的地方。这里直接调用 run()（不经过 QThread.start），
+    在同一线程内同步执行，异常不会丢失。
+    """
+
+    def test_analysis_worker_completes_and_emits_plan(self, binaries, assets):
+        from fractions import Fraction
+
+        from app.gui.workers import AnalysisWorker
+
+        media = probe_media(binaries, assets["cfr"])
+        settings = SplitSettings(
+            split_mode=SplitMode.TARGET_DURATION,
+            target_duration_seconds=Fraction(30),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(0)),
+        )
+        worker = AnalysisWorker(binaries, media, 0, settings)
+        outcome: dict = {}
+
+        worker.stage_started.connect(lambda name: outcome.setdefault("stages", []).append(name))
+        worker.stage_log.connect(lambda text: outcome.setdefault("log", []).append(text))
+        worker.completed.connect(
+            lambda plan, report, problems, candidates: outcome.update(
+                plan=plan, candidates=candidates
+            )
+        )
+        worker.failed.connect(lambda message: outcome.setdefault("failed", message))
+
+        worker.run()  # 同步执行，异常不会被线程吞掉
+
+        assert "failed" not in outcome, f"分析线程失败：{outcome['failed']}"
+        assert "plan" in outcome, f"未产出方案：{outcome.get('stages')}"
+        assert outcome["candidates"] is not None
+        assert "字幕解析" in outcome["stages"]
+        assert "语音转写" in outcome["stages"]
+        assert "候选点" in outcome["stages"]
+
+    def test_analysis_worker_reports_missing_model_as_log_not_crash(
+        self, binaries, assets, monkeypatch
+    ):
+        """模型缺失是可恢复状态：应作为日志说明跳过转写，而不是让分析失败。
+
+        §7.2 要求"无音轨时跳过 ASR、启用画面分析和人工审核"——模型缺失同理。
+        """
+        import app.core.asr as asr_module
+        from fractions import Fraction
+
+        from app.gui.workers import AnalysisWorker
+
+        media = probe_media(binaries, assets["cfr"])
+        settings = SplitSettings(
+            split_mode=SplitMode.TARGET_DURATION,
+            target_duration_seconds=Fraction(30),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(0)),
+        )
+        worker = AnalysisWorker(binaries, media, 0, settings)
+        outcome: dict = {}
+
+        def refuse(*args, **kwargs):
+            raise RuntimeError("模型未下载（测试模拟）")
+
+        monkeypatch.setattr(asr_module.AsrEngine, "transcribe_cached", refuse)
+        worker.stage_log.connect(lambda text: outcome.setdefault("log", []).append(text))
+        worker.failed.connect(lambda message: outcome.setdefault("failed", message))
+        worker.completed.connect(
+            lambda plan, report, problems, candidates: outcome.update(plan=plan)
+        )
+
+        worker.run()
+
+        assert "failed" not in outcome, "模型缺失不应让分析失败"
+        assert any("跳过语音转写" in line for line in outcome.get("log", []))
+        assert "plan" in outcome
 
 
 class TestSettingsPageBehaviour:

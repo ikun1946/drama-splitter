@@ -66,7 +66,7 @@ from ..core.settings import (
 from ..core.timebase import format_seconds_brief, format_timecode
 from .frame_source import DecodeError, FrameDecoder, StreamPlayer
 from .state import ProjectState
-from .workers import ExportWorker, PlanWorker, ProbeWorker
+from .workers import AnalysisWorker, ExportWorker, PlanWorker, ProbeWorker
 
 __all__ = ["MainWindow"]
 
@@ -569,10 +569,10 @@ class SettingsPage(QWidget):
 
 class AnalysisPage(QWidget):
     STAGES = [
-        "媒体探测",
-        "音频与字幕",
-        "镜头分析",
-        "剧情分析",
+        "字幕解析",
+        "语音转写",
+        "镜头与黑场",
+        "候选点",
         "整体规划",
         "边界审核",
         "导出",
@@ -581,7 +581,7 @@ class AnalysisPage(QWidget):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
-        self._worker: PlanWorker | None = None
+        self._worker: AnalysisWorker | None = None
 
         self.stage_list = QListWidget()
         self.stage_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -636,37 +636,63 @@ class AnalysisPage(QWidget):
         if problems:
             QMessageBox.warning(self, "参数不完整", problems[0])
             return
+        if self.state.binaries is None:
+            QMessageBox.warning(self, "缺少 FFmpeg", "尚未定位到 FFmpeg。")
+            return
 
         self.log.clear()
         self.progress.setValue(0)
-        self._render_stages(current=4, done=1)
-        self._append("阶段1 媒体探测：已完成（导入时执行）。")
-        self._append("阶段2 音频与字幕：当前版本尚未接入 ASR，跳过。")
-        self._append("阶段3 镜头分析：当前版本尚未接入镜头检测，跳过。")
-        self._append("阶段4 剧情分析：当前版本尚未接入模型接口，跳过。")
-        self._append("阶段5 整体规划：使用规则规划器生成草案并校验约束…")
+        self._render_stages(current=0, done=0)
 
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
-        self._worker = PlanWorker(self.state.media, settings, self)
+        self._worker = AnalysisWorker(
+            self.state.binaries,
+            self.state.media,
+            self.state.audio_stream_index,
+            settings,
+            self,
+        )
+        self._worker.stage_started.connect(self._on_stage)
+        self._worker.stage_progress.connect(self._on_progress)
+        self._worker.stage_log.connect(self._append)
         self._worker.completed.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
+    def _on_stage(self, name: str) -> None:
+        index = self.STAGES.index(name) if name in self.STAGES else 0
+        self._render_stages(current=index, done=index)
+        self._append(f"—— {name} ——")
+
+    def _on_progress(self, text: str, ratio: float) -> None:
+        self.progress.setValue(int(ratio * 100))
+        self.progress.setFormat(f"{text}（{int(ratio * 100)}%）")
+
     def _cancel(self) -> None:
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+            self._worker.cancel()
+            self._worker.wait(3000)
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self._append("已取消。")
         self.progress.setValue(0)
 
-    def _on_done(self, plan: BoundaryPlan, report, problems) -> None:
+    def _on_done(self, plan: BoundaryPlan, report, problems, candidates) -> None:
         self.state.add_plan(plan)
+        self.state.candidates = candidates
         self.progress.setValue(100)
         self._render_stages(done=5)
+
+        self._append(f"候选点：{candidates.describe()}")
+        for note in candidates.limitations:
+            self._append(f"  限流：{note}")
+        if candidates.points:
+            top = candidates.top(3)
+            self._append("评分最高的候选点：")
+            for point in top:
+                self._append(f"  {point.describe()}")
 
         durations = [float(d) for d in plan.durations()]
         self._append(
@@ -695,7 +721,7 @@ class AnalysisPage(QWidget):
         self.progress.setValue(0)
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        QMessageBox.warning(self, "无法生成方案", message)
+        QMessageBox.warning(self, "无法完成分析", message)
 
     def can_continue(self) -> tuple[bool, str]:
         if self.state.current_plan is None:

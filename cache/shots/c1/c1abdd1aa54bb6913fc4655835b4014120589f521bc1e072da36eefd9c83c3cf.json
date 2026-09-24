@@ -1,0 +1,11 @@
+{
+ "__key__": "c1abdd1aa54bb6913fc4655835b4014120589f521bc1e072da36eefd9c83c3cf",
+ "__schema__": 1,
+ "__namespace__": "shots",
+ "payload": {
+  "threshold": 27.0,
+  "detector": "content",
+  "scenes": [],
+  "blacks": []
+ }
+}

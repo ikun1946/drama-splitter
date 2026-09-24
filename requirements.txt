@@ -1,12 +1,37 @@
 # 运行依赖
 # 安装：<项目 venv>/Scripts/python.exe -m pip install -r requirements.txt
 # 国内建议加镜像：-i https://pypi.tuna.tsinghua.edu.cn/simple
+# （本机 pypi.org 只有 15 kB/s，清华镜像实测 67 MB/s）
 
 # 界面（只要 Essentials；Addons 约 160MB，本项目不需要）
 PySide6-Essentials>=6.8
 
-# 合成测试素材与标记解码
+# 合成测试素材、包络计算、字幕对齐
 numpy>=2.0
+
+# ---- 阶段3：字幕 / 转写 / 镜头检测（可选但强烈建议）--------------------
+# 缺失时对应能力自动跳过并在界面注明原因，不会让分析失败。
+
+# 字幕解析：SRT/VTT 用内置解析器（实测 pysubs2 会把 VTT 的 00:00:01.50
+# 解析成 1.05s），这里只用于 ASS/SSA 的复杂样式语法
+pysubs2>=1.8
+
+# 语音转写（faster-whisper 1.2.x）
+# 模型需另行下载：python tools/fetch_whisper_model.py small
+# 注意：本机 huggingface.co 不可达，脚本会自动走 hf-mirror.com；
+# 且必须绕开 huggingface_hub 的符号链接机制（本机账户无该权限，
+# 会产出 0 字节文件），详见 tools/fetch_whisper_model.py 的说明。
+faster-whisper>=1.2
+
+# 繁简转换。提示词能显著减少繁体输出但无法保证（实测句尾仍出现繁体），
+# 必须有确定性转换兜底，否则字幕落库会是繁体
+zhconv>=1.4
+
+# 镜头切换检测（含 opencv）
+scenedetect[opencv]>=0.7
+
+# SAPI 中文语音合成：仅用于生成带标准答案的 ASR 测试素材
+comtypes>=1.4
 
 # 测试
 pytest>=8.0

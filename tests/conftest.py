@@ -48,3 +48,48 @@ def binaries():
     found = locate_ffmpeg()
     check_encoders(found)
     return found
+
+
+SPEECH_WAV = "speech_16k.wav"
+SPEECH_TRUTH = "speech_ground_truth.json"
+
+
+@pytest.fixture(scope="session")
+def speech_asset() -> Path:
+    """中文语音测试素材（带转写标准答案）。
+
+    由 `python tools/make_speech_asset.py testdata` 生成，依赖系统中文 SAPI 引擎。
+    缺失时跳过而不是失败——它替不了 ASR 正确性验证，只能替代"没有真实素材"。
+    """
+    path = TESTDATA / SPEECH_WAV
+    if not path.exists():
+        pytest.skip(
+            "缺少语音测试素材，请先运行：\n"
+            "  python tools/make_speech_asset.py testdata"
+        )
+    return path
+
+
+@pytest.fixture(scope="session")
+def speech_truth() -> dict:
+    import json
+
+    path = TESTDATA / SPEECH_TRUTH
+    if not path.exists():
+        pytest.skip("缺少语音标准答案，请先运行 tools/make_speech_asset.py")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def whisper_model_or_skip(tier: str = "small"):
+    """定位 whisper 模型；缺失时跳过并给出下载命令。"""
+    from app.core.asr import locate_model
+
+    info = locate_model(tier)
+    if info is None:
+        pytest.skip(
+            f"未下载 {tier} 模型（models/ 下）。下载命令：\n"
+            f"  python tools/fetch_whisper_model.py {tier}\n"
+            "注意本机 huggingface.co 不可达，脚本会自动走 hf-mirror 镜像，"
+            "并绕开 huggingface_hub 的符号链接机制（本机账户无该权限，会产出 0 字节文件）。"
+        )
+    return info
