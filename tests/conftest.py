@@ -80,6 +80,38 @@ def speech_truth() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.fixture(scope="session")
+def speech_video(binaries) -> Path:
+    """把合成语音铺到视频上，得到**有真实对白**的测试素材。
+
+    阶段3/2 的端到端验证需要候选点非空，而纯色视频没有语音也没有镜头切换，
+    候选恒为空、DP 主路径永远走不到。这里用合成语音 + 纯色画面构造素材：
+    画面虽然没有信息量，但对白是真实的（SAPI 合成），足以驱动
+    转写 → 句末候选 → 候选图 → 动态规划 全链路。
+    """
+    import subprocess
+
+    wav = TESTDATA / SPEECH_WAV
+    if not wav.exists():
+        pytest.skip("缺少语音素材，请先运行 tools/make_speech_asset.py")
+    target = TESTDATA / "speech_video.mp4"
+    if target.exists() and target.stat().st_size > 1024:
+        return target
+
+    cmd = [
+        str(binaries.ffmpeg), "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=25",
+        "-i", str(wav),
+        "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k", "-y", str(target),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+    if proc.returncode != 0:
+        pytest.skip(f"无法合成语音视频：{(proc.stderr or '')[-200:]}")
+    return target
+
+
 def whisper_model_or_skip(tier: str = "small"):
     """定位 whisper 模型；缺失时跳过并给出下载命令。"""
     from app.core.asr import locate_model

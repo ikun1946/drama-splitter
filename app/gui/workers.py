@@ -184,12 +184,59 @@ class AnalysisWorker(QThread):
             # ---- 整体规划 ----------------------------------------------
             self.stage_started.emit("整体规划")
             from app.core.planner import PlanningError, plan_rule_based
+            from app.core.settings import CountPolicy, SplitMode, check_feasibility
+            from app.core.solver import solve_from_candidates
 
-            try:
-                plan, report, problems = plan_rule_based(self._media, self._settings)
-            except PlanningError as exc:
-                self.failed.emit(str(exc))
-                return
+            def baseline():
+                """§20.3 的规则基线（等分），用于与 DP 结果对照。"""
+                return plan_rule_based(self._media, self._settings)[0]
+
+            report = check_feasibility(self._settings, self._media.timeline_duration)
+            if not candidates.is_empty and not report.blocking and report.derived is not None:
+                exact = (
+                    self._settings.split_mode == SplitMode.TARGET_EPISODE_COUNT
+                    and self._settings.count_policy == CountPolicy.EXACT
+                )
+                try:
+                    plan, solution, problems, notes = solve_from_candidates(
+                        candidates,
+                        self._media,
+                        report.derived,
+                        settings_count_exact=exact,
+                        target_episode_count=self._settings.target_episode_count
+                        or report.allowed_min,
+                        allowed_min=report.allowed_min,
+                        allowed_max=report.allowed_max,
+                        baseline=baseline,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 含 PlanningError
+                    self.failed.emit(str(exc))
+                    return
+
+                blocking = [p for p in problems if p.is_blocking]
+                if blocking:
+                    # §4.2：无解必须明确报错，不能把空方案当结果交给用户。
+                    # 典型成因：对白句末不落在目标时长允许的窗口内（§10.4）。
+                    self.failed.emit(
+                        blocking[0].message + " " + blocking[0].describe()
+                    )
+                    return
+
+                self.stage_log.emit("边界由候选图动态规划求得（阶段2 §10.2）。")
+                for note in notes:
+                    self.stage_log.emit(f"  {note}")
+            else:
+                if candidates.is_empty:
+                    reason = "候选点为空，回退到规则等分方案（§6.1 兜底路径）。"
+                else:
+                    first = report.issues[0] if report.issues else None
+                    reason = f"参数无解（{first.message if first else '未知'}），跳过动态规划。"
+                self.stage_log.emit(reason)
+                try:
+                    plan, report, problems = plan_rule_based(self._media, self._settings)
+                except PlanningError as exc:
+                    self.failed.emit(str(exc))
+                    return
             self.completed.emit(plan, report, problems, candidates)
 
         except Exception as exc:  # noqa: BLE001 - 边界层必须把异常变成可读信息
