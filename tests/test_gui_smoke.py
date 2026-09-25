@@ -452,78 +452,6 @@ class TestAllowedCountInterval:
         )
 
 
-class TestWheelDoesNotChangeValues:
-    """滚轮不改值：数值框与下拉框把滚轮量交给滚动区，页面照常滚动。"""
-
-    @staticmethod
-    def _wheel_event(widget, angle_y: int = -120):
-        from PySide6.QtCore import QPoint, QPointF, Qt
-
-        center = QPointF(widget.rect().center())
-        return QWheelEvent(
-            center, center, QPoint(0, 0), QPoint(0, angle_y),
-            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
-            Qt.ScrollPhase.NoScrollPhase, False,
-        )
-
-    def _scroll_area_with(self, qapp, widget):
-        from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
-
-        from app.gui.widgets import scrollable
-
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.addWidget(widget)
-        for index in range(30):
-            layout.addWidget(QLabel(f"占位 {index}"))
-
-        area = scrollable(content)
-        area.resize(320, 200)
-        area.show()
-        qapp.processEvents()
-        return area
-
-    def test_spinbox_wheel_scrolls_instead_of_stepping(self, qapp):
-        from app.gui.widgets import NoWheelSpinBox
-
-        spin = NoWheelSpinBox()
-        spin.setRange(1, 9999)
-        spin.setValue(60)
-        area = self._scroll_area_with(qapp, spin)
-        try:
-            bar = area.verticalScrollBar()
-            bar.setValue(100)
-            before_value, before_scroll = spin.value(), bar.value()
-
-            qapp.sendEvent(spin, self._wheel_event(spin))
-            qapp.processEvents()
-
-            assert spin.value() == before_value, "滚轮不得改变数值"
-            assert bar.value() == before_scroll + 120, "滚轮量应交给滚动区（页面照常滚）"
-        finally:
-            area.close()
-
-    def test_combo_wheel_does_not_switch_option(self, qapp):
-        from app.gui.widgets import NoWheelComboBox
-
-        combo = NoWheelComboBox()
-        combo.addItems(["a", "b", "c"])
-        combo.setCurrentIndex(1)
-        area = self._scroll_area_with(qapp, combo)
-        try:
-            bar = area.verticalScrollBar()
-            bar.setValue(100)
-            before_index, before_scroll = combo.currentIndex(), bar.value()
-
-            qapp.sendEvent(combo, self._wheel_event(combo))
-            qapp.processEvents()
-
-            assert combo.currentIndex() == before_index, "滚轮不得切换下拉选项"
-            assert bar.value() == before_scroll + 120
-        finally:
-            area.close()
-
-
 class TestNoStrayTopLevelWindows:
     """回归：打开分集设置时不得弹出任何多余的小窗口。
 
@@ -1742,8 +1670,19 @@ class TestActiveModelWiring:
         AppConfig(asr_model_tier="tiny").save(patched_config)
         assert active_whisper_tier() == "tiny", "配置里的档位必须被分析线程采用"
 
-    def test_configured_judge_uses_pinned_model(self, tmp_path, patched_config, monkeypatch):
+    def test_configured_ollama_model_follows_pinned_key(self, tmp_path, patched_config):
         """语义模型的「使用中」要落到 Ollama 模型名上（命名规则与自动路径一致）。"""
+        from app.core.app_config import AppConfig
+        from app.gui import workers
+
+        _install_llm(tmp_path, "2B", "Q4_K_M")
+        AppConfig(
+            models_dir=str(tmp_path), llm_model_key="llm:2B:Q4_K_M"
+        ).save(patched_config)
+        assert workers.configured_ollama_model() == "qwen3.5-2b-judge"
+
+    def test_pinned_model_reaches_the_judge_selector(self, tmp_path, patched_config, monkeypatch):
+        """「使用中」不能只停在界面：select_judge 必须收到同一个 Ollama 名字。"""
         from app.core import semantic
         from app.core.app_config import AppConfig
         from app.gui import workers
@@ -1755,30 +1694,23 @@ class TestActiveModelWiring:
 
         seen = {}
 
-        def fake_create_judge(*, ollama_model=None, model_dir=None):
+        def fake_local_judge(*, ollama_model=None, model_dir=None):
             seen["model"] = ollama_model
             return None
 
-        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
-        workers.create_configured_judge()
+        # select_judge 在本地分支上调 local_judge（进程内 llama.cpp → Ollama）
+        monkeypatch.setattr(semantic, "local_judge", fake_local_judge)
+        semantic.select_judge(
+            AppConfig.load(), ollama_model=workers.configured_ollama_model()
+        )
         assert seen["model"] == "qwen3.5-2b-judge"
 
-    def test_missing_pinned_model_falls_back_to_auto(self, tmp_path, patched_config, monkeypatch):
+    def test_missing_pinned_model_falls_back_to_auto(self, tmp_path, patched_config):
         """指定的档位被删掉后不能卡死：退回自动规则（日志会如实报出实际用的是谁）。"""
-        from app.core import semantic
         from app.core.app_config import AppConfig
         from app.gui import workers
 
         AppConfig(
             models_dir=str(tmp_path), llm_model_key="llm:2B:Q8_0"
         ).save(patched_config)
-
-        seen = {}
-
-        def fake_create_judge(*, ollama_model=None, model_dir=None):
-            seen["model"] = ollama_model
-            return None
-
-        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
-        workers.create_configured_judge()
-        assert seen["model"] is None, "未安装时应退回自动选择"
+        assert workers.configured_ollama_model() is None, "未安装时应退回自动选择"

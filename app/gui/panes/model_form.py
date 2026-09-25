@@ -1,4 +1,4 @@
-"""模型表单：按用途分组的下载 / 删除 / 「使用中」切换。
+﻿"""模型表单：按用途分组的下载 / 删除 / 「使用中」切换。
 
 界面为什么这样组织
 ------------------
@@ -881,12 +881,6 @@ class ModelForm(QWidget):
         prefs[capability] = backend
         self._config.backend_prefs = prefs
         self._save_config()
-
-    def _save_config(self) -> None:
-        try:
-            self._config.save()
-        except OSError as exc:
-            self._append(f"配置写入失败：{exc}", "error")
 
     def _refresh_cloud_hint(self) -> None:
         profile = self._cloud_profile()

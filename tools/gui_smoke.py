@@ -328,9 +328,10 @@ def main() -> int:
     assert len([row for row in rows if row["in_use"] and row["kind"] == "llm"]) <= 1, (
         "语义组「使用中」最多一个"
     )
-    print(f"  使用中：{models.asr_status.text()}")
+    # 标签文本自带"使用中：/语义判断后端："前缀，这里不要再加一次
+    print(f"  {models.asr_status.text()}")
     print(f"          {models.llm_status.text()}")
-    print(f"  推理栈：{models.stack_label.text()}")
+    print(f"  {models.stack_label.text()}")
     installed = [row["label"] for row in rows if row["installed"]]
     if installed:
         print(f"  已安装模型：{'、'.join(installed)}")
