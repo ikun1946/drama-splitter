@@ -78,7 +78,7 @@ def export_episode_subtitles(
                 EpisodeSubtitleResult(
                     episode=episode.index,
                     path=None,
-                    notes=["无转写数据，未产出字幕（素材无对白或转写被跳过）"],
+                    notes=["素材无对白或转写被跳过，未产出字幕"],
                 )
             )
         return results

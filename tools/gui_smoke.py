@@ -134,6 +134,19 @@ def main() -> int:
         label="方案生成",
     )
     assert ok, "未生成方案"
+
+    # 断言日志内容，而不是只看 current_plan：
+    # 槽函数中途抛异常时方案仍已入状态，但日志会缺行、按钮不复位。
+    # （真实案例：签名漏了第 5 个参数，函数体引用 reviews 抛 NameError，
+    #   后面的日志与按钮复位全部没执行，而当时的断言完全看不出来。）
+    log_text = window.analysis_page.log.toPlainText()
+    for required in ("候选点：", "整集复核", "覆盖校验：", "方案层校验："):
+        assert required in log_text, (
+            f"分析页日志缺少「{required}」——完成回调可能中途失败。"
+            f"日志尾部：\n{log_text[-600:]}"
+        )
+    assert window.analysis_page.btn_start.isEnabled(), "分析结束后「开始分析」按钮未复位"
+
     plan = window.state.current_plan
     print(f"  方案 v{plan.version}：{plan.episode_count} 集，"
           f"边界 {len(plan.boundary_ticks)} 个")
@@ -286,6 +299,17 @@ def main() -> int:
     models._refresh()
     app.processEvents()
     print("  模型页刷新正常")
+
+    # 字幕接线必须被执行：该素材无对白，应明确报"未生成"，而不是静默跳过。
+    # （真实案例：属性名写错导致整段字幕逻辑抛异常被跳过，界面上完全看不出来。）
+    export_dialog = [text for kind, title, text in DIALOGS if title == "导出结束"]
+    assert export_dialog, "未记录到导出结束对话框"
+    assert "字幕" in export_dialog[-1], (
+        f"导出结束后应汇报字幕状态，实际：{export_dialog[-1]}"
+    )
+    print("  字幕状态已汇报：", [
+        line for line in export_dialog[-1].splitlines() if line.startswith("字幕")
+    ])
 
     print("\n对话框记录：")
     for kind, title, text in DIALOGS:

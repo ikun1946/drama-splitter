@@ -173,6 +173,20 @@ def main() -> int:
     pump(app, 0.4)
     shot("05-导出.png", window)
 
+    # 模型页：选中一个"未安装"的模型，让截图里能看到选择与状态的区别
+    window.nav.setCurrentRow(5)
+    pump(app)
+    models = window.model_page
+    uninstalled = [
+        row for row in range(models.table.rowCount())
+        if "未安装" in models.table.item(row, 2).text()
+    ]
+    if uninstalled:
+        models.table.selectRow(uninstalled[0])
+    models._append("模型页：可直接选择并下载所需模型，无需命令行。")
+    pump(app)
+    shot("06-模型.png", window)
+
     window.review_page._player.stop()
 
     # 内容去重：抓错页面（例如两次都抓到同一页）会让截图表格静默变成错的，

@@ -687,9 +687,22 @@ class AnalysisPage(QWidget):
         self._append("已取消。")
         self.progress.setValue(0)
 
-    def _on_done(self, plan: BoundaryPlan, report, problems, candidates) -> None:
+    def _on_done(
+        self, plan: BoundaryPlan, report, problems, candidates, reviews=None
+    ) -> None:
+        """分析完成回调。
+
+        `reviews` 必须带默认值：completed 信号传 5 个参数，而脚本与测试可能按
+        旧签名直接调用（4 个参数），两种方式都要能用。
+
+        踩过的坑：签名漏了第 5 个参数，而函数体里引用了 `reviews` →
+        槽函数在引用处抛 NameError 中断，**前面的 add_plan 生效、后面的日志与
+        按钮复位全部没执行**。冒烟测试当时只等 current_plan，所以没抓到——
+        现在冒烟测试会断言日志内容。
+        """
         self.state.add_plan(plan)
         self.state.candidates = candidates
+        self.state.episode_reviews = reviews
         # 转写由分析线程挂在自身属性上（避免再加宽 completed 信号），
         # 单集字幕导出需要它
         worker = self.sender()
@@ -1347,14 +1360,24 @@ class ExportPage(QWidget):
         if batch.plan_layer_problems:
             text += "\n计划层问题：\n" + "\n".join(batch.plan_layer_problems)
 
-        # 单集字幕（§7.2 以 SRT 为主）：仅在导出成功时生成
-        if batch.success:
+        # 单集字幕（§7.2 以 SRT 为主）：只要有成功导出的集就生成。
+        # 注意 ExportBatchResult 上**没有** `success` 属性（只有
+        # succeeded / failed / all_succeeded），写错会在这里抛 AttributeError，
+        # 导致整段字幕逻辑被跳过——而且不报给用户，只在控制台留一行异常。
+        if batch.succeeded:
             worker = self.sender()
             if worker is not None and hasattr(worker, "_export_subtitles"):
                 worker._export_subtitles()
                 results = getattr(worker, "subtitle_results", [])
                 written = [r for r in results if r.success]
-                text += f"\n字幕：已生成 {len(written)} 集 SRT"
+                if written:
+                    text += f"\n字幕：已生成 {len(written)} 集 SRT"
+                else:
+                    reason = next(
+                        (r.notes[0] for r in results if r.notes),
+                        "未产出字幕文件",
+                    )
+                    text += f"\n字幕：未生成（{reason}）"
                 for result in results:
                     if not result.success and result.notes:
                         text += f"\n  第{result.episode:02d}集未生成字幕：{result.notes[0]}"
