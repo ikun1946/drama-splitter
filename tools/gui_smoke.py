@@ -257,6 +257,36 @@ def main() -> int:
     print(f"  音画同步：{measurement.describe(float(media.video.nominal_fps))}")
     assert measurement.within(1.0 / float(media.video.nominal_fps)), measurement.describe()
 
+    print("[页6] 模型页：清单、状态、目录…")
+    window.nav.setCurrentRow(5)
+    app.processEvents()
+    models = window.model_page
+    print(f"  表格行数：{models.table.rowCount()}")
+    assert models.table.rowCount() > 0, "模型清单不应为空"
+    rows = []
+    for row in range(models.table.rowCount()):
+        label = models.table.item(row, 0).text()
+        status = models.table.item(row, 2).text()
+        rows.append((label, status))
+        print(f"    {label:34s} {status}")
+    assert any("已安装" in status for _, status in rows), "测试机上至少应有一个已安装模型"
+    print(f"  模型目录：{models.dir_edit.text()}")
+    print(f"  {models.free_label.text()}")
+
+    uninstalled = [
+        row for row in range(models.table.rowCount())
+        if "未安装" in models.table.item(row, 2).text()
+    ]
+    if uninstalled:
+        models.table.selectRow(uninstalled[0])
+        app.processEvents()
+        spec = models._selected_spec()
+        print(f"  选中未安装模型：{spec.label}｜目标目录 {spec.target_dir(models._models_root())}")
+        assert spec is not None
+    models._refresh()
+    app.processEvents()
+    print("  模型页刷新正常")
+
     print("\n对话框记录：")
     for kind, title, text in DIALOGS:
         print(f"  [{kind}] {title}｜{text.splitlines()[0][:80] if text else ''}")

@@ -17,11 +17,45 @@
 | 分析 | [03-分析](docs/screenshots/03-分析.png) |
 | 审核 | [04-审核](docs/screenshots/04-审核.png) |
 | 导出 | [05-导出](docs/screenshots/05-导出.png) |
+| 模型 | 选择并下载模型（见下节） |
 
 ![审核页](docs/screenshots/04-审核.png)
 
 审核页要求「连看切点前后」，因此提供三种检视方式：播放整集、播放切点前后 ±3 秒、
 以及**用已导出的成片连看相邻两集**（后者能发现编码层面的衔接问题，前者只能验证规划）。
+
+## 模型下载（界面内完成）
+
+应用内置"模型"页，用户可直接在界面里选择并下载所需模型，**不需要命令行**。
+
+| 类别 | 可选档位 | 用途 |
+|---|---|---|
+| 语音转写 | whisper tiny / base / small / medium / large-v3 | 对白转写与句末候选 |
+| 语义判断 | Qwen3.5-2B / 4B / 9B × 各量化档位（档位列表从远端发现，不写死） | 切点语义判断 |
+
+界面提供：
+
+- **每个模型的实测体积与安装状态**（已安装 / 不完整 / 未安装）；
+- **模型目录可更改并记住**（默认 exe/项目根下的 `models/`；环境变量
+  `DRAMA_MODELS_DIR` 优先级更高）；
+- **磁盘可用空间提示**，下载前再检查一次，空间不足会明确拒绝而不是写到一半失败；
+- **实时进度**（按已下载字节），取消后清理临时文件；
+- **删除**只删该模型自己的目录。
+
+两类模型相互独立，可只装其一；未安装时对应能力自动跳过并在日志中说明原因。
+
+### 下载链路上的三个硬约束（都是实测踩出来的）
+
+1. **必须用 curl，不能用 Python 的 urllib** —— hf-mirror 会 403 拒绝
+   `Python-urllib` 的 User-Agent。
+2. **不能用 huggingface_hub 的缓存** —— 它的缓存依赖符号链接，本机账户没有
+   该权限，会产出 0 字节占位文件。因此直接下载真实文件到普通目录。
+3. **取远端体积必须解析 `Content-Length` 头**，不能用 curl 的
+   `%{size_download}` —— HEAD 请求按定义不下载响应体，该值恒为 0，
+   表现为"总大小永远未知"、进度条与磁盘预检静默失效。
+
+下载逻辑只有一份实现（`app/core/model_manager.py`），
+`tools/fetch_whisper_model.py` 与 `tools/fetch_llm.py` 是它的命令行入口。
 
 ## 打包与部署
 
@@ -31,8 +65,13 @@
 python tools/build_package.py
 
 # 产物自检（无界面，可用于装机验收）
-dist/drama-splitter/drama-splitter.exe --self-check
+dist/drama-splitter/drama-splitter.exe --self-check    # 运行前提
+dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 ```
+
+`--ui-smoke` 是**必需**的一项：`--self-check` 根本不碰界面，漏打 Qt 插件或
+界面模块时它照样"通过"，而用户双击才崩。`--ui-smoke` 会离屏构建整个界面
+并走一遍模型页。
 
 自检会逐项报出：FFmpeg / FFprobe 路径、可用的硬件编码器、转写模型、
 语义模型与推理栈状态。任一项缺失都给出可操作的下一步命令。

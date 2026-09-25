@@ -45,8 +45,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.app_config import AppConfig, default_models_root
 from ..core.export import ExportPreset, Exporter
 from ..core.ffmpeg import check_encoders, locate_ffmpeg
+from ..core.model_manager import (
+    MODEL_CATALOG,
+    delete_model,
+    free_space_bytes,
+    installed_state,
+    spec_by_key,
+)
 from ..core.plan import BoundaryPlan
 from ..core.probe import (
     LEVEL_BLOCK,
@@ -66,7 +74,7 @@ from ..core.settings import (
 from ..core.timebase import format_seconds_brief, format_timecode
 from .frame_source import DecodeError, FrameDecoder, StreamPlayer
 from .state import ProjectState
-from .workers import AnalysisWorker, ExportWorker, PlanWorker, ProbeWorker
+from .workers import AnalysisWorker, ExportWorker, ModelDownloadWorker, PlanWorker, ProbeWorker
 
 __all__ = ["MainWindow"]
 
@@ -1368,12 +1376,285 @@ class ExportPage(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# 模型管理页（第 6 页）
+# ---------------------------------------------------------------------------
+
+
+class ModelPage(QWidget):
+    """模型选择与下载。
+
+    这是唯一一个"不导入素材也能用"的页面——用户装完应用先把模型下下来，
+    比导入素材后才发现缺模型要顺手得多。
+    """
+
+    def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.state = state
+        self._worker: "ModelDownloadWorker | None" = None
+        self._config = AppConfig.load()
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["模型", "体积", "状态", "用途"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        self.quant_combo = QComboBox()
+        self.btn_discover = QPushButton("获取可用量化档位")
+        self.btn_discover.clicked.connect(self._discover_quants)
+
+        self.dir_edit = QLineEdit(str(self._config.resolved_models_dir()))
+        self.btn_pick_dir = QPushButton("更改目录…")
+        self.btn_pick_dir.clicked.connect(self._pick_dir)
+        self.free_label = QLabel("")
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+
+        self.btn_download = QPushButton("下载选中模型")
+        self.btn_delete = QPushButton("删除选中模型")
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setEnabled(False)
+        self.btn_download.clicked.connect(self._start_download)
+        self.btn_delete.clicked.connect(self._delete_selected)
+        self.btn_cancel.clicked.connect(self._cancel)
+
+        dir_row = QHBoxLayout()
+        dir_row.addWidget(QLabel("模型目录"))
+        dir_row.addWidget(self.dir_edit, 1)
+        dir_row.addWidget(self.btn_pick_dir)
+
+        quant_row = QHBoxLayout()
+        quant_row.addWidget(QLabel("语义模型量化档位"))
+        quant_row.addWidget(self.quant_combo, 1)
+        quant_row.addWidget(self.btn_discover)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.btn_download)
+        buttons.addWidget(self.btn_delete)
+        buttons.addWidget(self.btn_cancel)
+        buttons.addStretch(1)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "选择并下载所需的模型。语音转写模型与语义判断模型相互独立，"
+                "可只装其一；未安装时对应能力自动跳过并在日志中说明。"
+            )
+        )
+        layout.addLayout(dir_row)
+        layout.addWidget(self.free_label)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(self.progress)
+        layout.addLayout(quant_row)
+        layout.addLayout(buttons)
+        layout.addWidget(QLabel("日志"))
+        layout.addWidget(self.log, 1)
+
+        self._refresh()
+
+    # ---- 刷新 ----------------------------------------------------------
+
+    def _models_root(self):
+        return Path(self.dir_edit.text().strip() or str(default_models_root()))
+
+    def _refresh(self) -> None:
+        self.table.setRowCount(0)
+        for spec in MODEL_CATALOG:
+            state = installed_state(spec, self._models_root())
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(spec.label))
+            size = f"{spec.approx_mb} MB" if spec.approx_mb else "未知（下载时探测）"
+            self.table.setItem(row, 1, QTableWidgetItem(size))
+            item = QTableWidgetItem(state.describe())
+            if not state.ready:
+                item.setForeground(QColor("#9a6700"))
+            self.table.setItem(row, 2, item)
+            self.table.setItem(row, 3, QTableWidgetItem(spec.note))
+            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, spec.key)
+        self.table.resizeColumnsToContents()
+
+        free = free_space_bytes(self._models_root())
+        if free is None:
+            self.free_label.setText("磁盘可用空间：未知")
+        else:
+            self.free_label.setText(
+                f"磁盘可用空间：{free / 1024 / 1024 / 1024:.1f} GB"
+                "（下载前会再检查一次，空间不足会明确拒绝）"
+            )
+
+        installed = [s.key for s in MODEL_CATALOG if installed_state(s, self._models_root()).ready]
+        if self._config.last_download_key in installed:
+            self.quant_combo.setCurrentText(self._config.last_download_key)
+
+    def _selected_spec(self):
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not rows:
+            return None
+        key = self.table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        return spec_by_key(key)
+
+    # ---- 目录选择 ------------------------------------------------------
+
+    def _pick_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "选择模型目录", str(self._models_root())
+        )
+        if not chosen:
+            return
+        self.dir_edit.setText(chosen)
+        self._config.models_dir = chosen
+        try:
+            self._config.save()
+            self._append(f"模型目录已改为 {chosen}（已记住，重启后仍生效）")
+        except OSError as exc:
+            self._append(f"目录已切换，但保存配置失败（重启后需重新选择）：{exc}")
+        self._refresh()
+
+    # ---- 量化档位发现 --------------------------------------------------
+
+    def _discover_quants(self) -> None:
+        """从远端列出可用的 GGUF 量化档位，而不是在代码里写死清单。"""
+        from app.core.model_manager import LLM_SIZES, list_remote_gguf
+
+        size = "2B"
+        if self.quant_combo.count():
+            current = self.quant_combo.currentText()
+            for candidate, _ in LLM_SIZES:
+                if candidate in current:
+                    size = candidate
+                    break
+        repo = f"unsloth/Qwen3.5-{size}-GGUF"
+        self._append(f"查询 {repo} 可用量化档位…")
+        names = list_remote_gguf(repo)
+        if not names:
+            self._append("查询失败或无结果（网络/镜像不可达）。可先下载默认的 Q4_K_M。")
+            return
+        quants = []
+        for name in names:
+            stem = name.rsplit(".", 1)[0]
+            parts = stem.split("-")
+            if len(parts) >= 3:
+                quants.append(parts[-1])
+        self.quant_combo.clear()
+        self.quant_combo.addItems(sorted(set(quants)))
+        self._append(f"发现 {len(quants)} 个档位：{'、'.join(sorted(set(quants)))}")
+
+    def _spec_from_quant(self) -> list:
+        """把"量化档位"选择翻译成具体可下载的模型清单。"""
+        from app.core.model_manager import LLM_SIZES, llm_spec
+
+        quant = self.quant_combo.currentText().strip() or "Q4_K_M"
+        specs = []
+        for size, _ in LLM_SIZES:
+            if size in quant:
+                # 档位名里带尺寸（如 Qwen3.5-4B-Q4_K_M）
+                clean = quant.split(f"{size}-")[-1]
+                specs.append(llm_spec(size, clean))
+                return specs
+        return [llm_spec("2B", quant)]
+
+    # ---- 下载 / 删除 ---------------------------------------------------
+
+    def _start_download(self) -> None:
+        specs = []
+        spec = self._selected_spec()
+        if spec is not None:
+            specs.append(spec)
+        else:
+            # 没选行时按量化档位下拉框决定（面向"我只想下语义模型"的用户）
+            specs.extend(self._spec_from_quant())
+        if not specs:
+            QMessageBox.information(self, "未选择", "请先在表格里选中要下载的模型。")
+            return
+
+        self.btn_download.setEnabled(False)
+        self.btn_delete.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.progress.setValue(0)
+        self._worker = ModelDownloadWorker(
+            specs[0], self._models_root(), endpoint=self._config.endpoint, parent=self
+        )
+        self._worker.progress.connect(self._on_progress)
+        self._worker.log.connect(self._append)
+        self._worker.finished_with.connect(self._on_finished)
+        self._worker.start()
+
+    def _on_progress(self, done: int, total: int, name: str, index: int, count: int) -> None:
+        if total > 0:
+            self.progress.setValue(int(done / total * 100))
+            self.progress.setFormat(
+                f"{name}（{index}/{count}）{done / 1024 / 1024:.0f}/"
+                f"{total / 1024 / 1024:.0f} MB"
+            )
+        else:
+            # 总大小探测不到时不要编一个百分比，如实显示已下载量
+            self.progress.setRange(0, 0)
+            self.progress.setFormat(f"{name} 已下载 {done / 1024 / 1024:.0f} MB（总大小未知）")
+
+    def _on_finished(self, result) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100 if result.ok else 0)
+        self.btn_download.setEnabled(True)
+        self.btn_delete.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        if result.ok:
+            self._config.last_download_key = result.spec.key
+            try:
+                self._config.save()
+            except OSError:
+                pass
+            self._refresh()
+            QMessageBox.information(
+                self, "下载完成", f"{result.describe()}\n\n即可直接使用，无需重启。"
+            )
+        elif result.cancelled:
+            self._append("已取消，临时文件已清理。")
+        else:
+            QMessageBox.warning(self, "下载未完成", result.describe())
+
+    def _cancel(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+        self.btn_cancel.setEnabled(False)
+
+    def _delete_selected(self) -> None:
+        spec = self._selected_spec()
+        if spec is None:
+            QMessageBox.information(self, "未选择", "请先选中要删除的模型。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"删除 {spec.label}？\n目录：{spec.target_dir(self._models_root())}\n"
+            "只删除该模型自己的目录，不影响其他模型。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        ok, message = delete_model(spec, self._models_root())
+        self._append(message)
+        self._refresh()
+
+    # ---- 辅助 ----------------------------------------------------------
+
+    def _append(self, text: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.log.append(f"[{stamp}] {text}")
+
+    def can_continue(self) -> tuple[bool, str]:
+        return True, ""
+
+
+# ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
 
 
 class MainWindow(QMainWindow):
-    PAGES = ["导入", "设置", "分析", "审核", "导出"]
+    PAGES = ["导入", "设置", "分析", "审核", "导出", "模型"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -1394,12 +1675,14 @@ class MainWindow(QMainWindow):
         self.analysis_page = AnalysisPage(self.state)
         self.review_page = ReviewPage(self.state)
         self.export_page = ExportPage(self.state)
+        self.model_page = ModelPage(self.state)
         for page in (
             self.import_page,
             self.settings_page,
             self.analysis_page,
             self.review_page,
             self.export_page,
+            self.model_page,
         ):
             self.stack.addWidget(page)
 

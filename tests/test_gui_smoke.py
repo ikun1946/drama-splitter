@@ -45,9 +45,9 @@ def window(qapp):
 
 
 class TestWindowConstruction:
-    def test_five_pages_are_present(self, window):
-        assert window.stack.count() == 5
-        assert window.PAGES == ["导入", "设置", "分析", "审核", "导出"]
+    def test_all_pages_are_present(self, window):
+        assert window.stack.count() == 6
+        assert window.PAGES == ["导入", "设置", "分析", "审核", "导出", "模型"]
 
     def test_navigation_starts_at_import(self, window):
         assert window.stack.currentIndex() == 0

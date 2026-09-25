@@ -127,12 +127,33 @@ def model_search_roots() -> list[Path]:
     if override:
         roots.append(Path(override))
 
+    # 用户在界面上指定的模型目录（配置文件持久化）——优先级仅次于环境变量，
+    # 因为那是最明确的用户意图表达
+    try:
+        from .app_config import AppConfig
+
+        configured = AppConfig.load().resolved_models_dir()
+        if configured:
+            roots.append(configured)
+    except Exception:  # noqa: BLE001 - 配置读取失败不应影响模型定位
+        pass
+
     if getattr(_sys, "frozen", False):
         exe_dir = Path(_sys.executable).resolve().parent
         roots.append(exe_dir / "models")
         roots.append(exe_dir.parent / "models")
     roots.append(Path(__file__).resolve().parent.parent.parent / "models")
-    return roots
+
+    # 去重但保持优先级顺序
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = str(root).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
 
 
 def model_root() -> Path:

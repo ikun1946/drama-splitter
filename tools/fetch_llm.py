@@ -127,6 +127,50 @@ def fetch(repo: str, quant: str, *, endpoint: str, force: bool = False) -> Path 
 
 
 def main() -> int:
+    """命令行入口：委托给 core 的模型下载服务。"""
+    import argparse
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from app.core.model_manager import download_model, installed_state, list_remote_gguf, llm_spec
+
+    parser = argparse.ArgumentParser(description="下载本地 LLM（GGUF）用于语义判断")
+    parser.add_argument("spec", nargs="?", default="2B:Q4_K_M", help="尺寸:量化，如 2B:Q4_K_M")
+    parser.add_argument("--endpoint", default="https://hf-mirror.com")
+    parser.add_argument("--list", action="store_true", help="列出远端可用量化档位")
+    args = parser.parse_args()
+
+    root = _Path(__file__).resolve().parent.parent / "models"
+    if args.list:
+        size = args.spec.split(":")[0]
+        for name in list_remote_gguf(f"unsloth/Qwen3.5-{size}-GGUF", args.endpoint):
+            print(" ", name)
+        return 0
+
+    if ":" not in args.spec:
+        print("格式应为 尺寸:量化，如 2B:Q4_K_M")
+        return 2
+    size, quant = args.spec.split(":", 1)
+    spec = llm_spec(size, quant)
+    print(f"目标：{spec.target_dir(root)}")
+
+    last = {"pct": -1}
+
+    def show(done: int, total: int, name: str, index: int, count: int) -> None:
+        if total:
+            pct = int(done / total * 100)
+            if pct != last["pct"]:
+                last["pct"] = pct
+                print(f"  [{pct:3d}%] {done // 1048576} MB / {total // 1048576} MB", flush=True)
+
+    result = download_model(spec, root, endpoint=args.endpoint, on_progress=show)
+    print()
+    print(result.describe())
+    return 0 if result.ok else 1
+
+
+def _legacy_main() -> int:
     parser = argparse.ArgumentParser(description="下载本地 LLM（GGUF）用于语义切点判断")
     parser.add_argument("spec", nargs="?", default=f"{DEFAULT_REPO}:{DEFAULT_QUANT}",
                         help="仓库名:量化，如 unsloth/Qwen3.5-2B-GGUF:Q4_K_M")

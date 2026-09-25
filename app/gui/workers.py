@@ -353,3 +353,47 @@ class ExportWorker(QThread):
             self.completed.emit(batch)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"导出失败：{exc}")
+
+
+class ModelDownloadWorker(QThread):
+    """模型下载（后台线程，可取消，进度按已下载字节回报）。
+
+    为什么不做成同步调用：whisper large-v3 是 3GB，同步会冻结界面几分钟。
+    """
+
+    progress = Signal(int, int, str, int, int)  # 已下载字节, 总字节, 当前文件, 第几个, 共几个
+    log = Signal(str)
+    finished_with = Signal(object)  # DownloadResult
+
+    def __init__(self, spec, models_root, *, endpoint: str = "https://hf-mirror.com",
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._spec = spec
+        self._models_root = models_root
+        self._endpoint = endpoint
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:  # noqa: D102
+        from app.core.model_manager import download_model
+
+        try:
+            result = download_model(
+                self._spec,
+                self._models_root,
+                endpoint=self._endpoint,
+                on_progress=lambda done, total, name, index, count: self.progress.emit(
+                    done, total, name, index, count
+                ),
+                cancel_check=lambda: self._cancel,
+            )
+        except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
+            from app.core.model_manager import DownloadResult
+
+            result = DownloadResult(
+                spec=self._spec, ok=False, message=f"下载过程异常：{exc}"
+            )
+        self.log.emit(result.describe())
+        self.finished_with.emit(result)

@@ -106,17 +106,23 @@ def main() -> int:
     print(f"产物：{exe}")
     print(f"目录体积：{size_mb:.0f} MB")
 
-    # 无界面自检：这是打包版能否真正工作的判据
-    print()
-    print("运行产物自检：")
-    check = subprocess.run(
-        [str(exe), "--self-check"], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=180,
-    )
-    print(check.stdout or "")
-    if check.stderr:
-        print("stderr:", check.stderr[:500])
-    return 0 if check.returncode == 0 else 1
+    # 两项自检：运行前提（--self-check）与界面完整性（--ui-smoke）。
+    # 后者是必须的：`--self-check` 根本不碰界面，漏打 Qt 插件或界面模块时
+    # 它照样"通过"，而用户双击才崩。
+    ok = True
+    for flag, title in (("--self-check", "运行前提自检"), ("--ui-smoke", "界面完整性自检")):
+        print()
+        print(f"{title}：")
+        check = subprocess.run(
+            [str(exe), flag], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
+        )
+        print(check.stdout or "")
+        if check.stderr:
+            print("stderr:", check.stderr[:500])
+        if check.returncode != 0:
+            ok = False
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

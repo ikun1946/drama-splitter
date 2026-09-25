@@ -1,4 +1,12 @@
-"""从镜像下载 faster-whisper 模型（绕开 huggingface_hub 的符号链接机制）。
+"""从镜像下载 faster-whisper 模型（命令行入口）。
+
+**实现已统一到 `app/core/model_manager.py`**：界面里的"模型"页与这个脚本
+调用同一份下载逻辑，避免两处漂移。这里只做参数解析与进度显示。
+
+用法：
+    python tools/fetch_whisper_model.py small
+    python tools/fetch_whisper_model.py --list
+
 
 为什么要自己写下载器
 --------------------
@@ -190,6 +198,53 @@ def list_models() -> None:
 
 
 def main() -> int:
+    """命令行入口：委托给 core 的模型下载服务。"""
+    import argparse
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from app.core.model_manager import (
+        MODEL_CATALOG,
+        download_model,
+        installed_state,
+        whisper_spec,
+    )
+
+    parser = argparse.ArgumentParser(description="下载 faster-whisper 模型（走镜像）")
+    parser.add_argument("tier", nargs="?", help="tiny/base/small/medium/large-v3")
+    parser.add_argument("--endpoint", default="https://hf-mirror.com")
+    parser.add_argument("--list", action="store_true")
+    args = parser.parse_args()
+
+    root = _Path(__file__).resolve().parent.parent / "models"
+    if args.list or not args.tier:
+        for spec in MODEL_CATALOG:
+            if spec.kind != "whisper":
+                continue
+            state = installed_state(spec, root)
+            print(f"  {spec.key:22s} {spec.describe():32s} {state.describe()}")
+        return 0
+
+    spec = whisper_spec(args.tier)
+    last = {"pct": -1}
+
+    def show(done: int, total: int, name: str, index: int, count: int) -> None:
+        if total:
+            pct = int(done / total * 100)
+            if pct != last["pct"]:
+                last["pct"] = pct
+                print(f"  [{pct:3d}%] {name} ({index}/{count})", flush=True)
+        else:
+            print(f"  {name} 已下载 {done // 1048576} MB", flush=True)
+
+    result = download_model(spec, root, endpoint=args.endpoint, on_progress=show)
+    print()
+    print(result.describe())
+    return 0 if result.ok else 1
+
+
+def _legacy_main() -> int:
     parser = argparse.ArgumentParser(description="下载 faster-whisper 模型（走镜像，绕开符号链接）")
     parser.add_argument("model", nargs="?", help=f"模型档位：{', '.join(MODEL_SIZES_MB)}")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help=f"镜像地址，默认 {DEFAULT_ENDPOINT}")

@@ -4,6 +4,7 @@
     python run.py               启动界面
     python run.py --version     输出版本与运行环境（打包后用于无界面自检）
     python run.py --self-check   检查 FFmpeg / 模型 / 缓存等运行前提
+    python run.py --ui-smoke     离屏构建界面并自检（打包后验证界面是否完整）
 """
 
 from __future__ import annotations
@@ -89,9 +90,54 @@ def _force_utf8_console() -> None:
             continue
 
 
+def _ui_smoke() -> int:
+    """离屏构建整个界面并自检。
+
+    打包版的界面问题（漏打模块、缺 Qt 插件）无法靠 `--self-check` 发现——
+    那个入口根本不碰界面。这里把界面构建一遍并走一遍模型页，因此可以作为
+    "打包产物是否完整"的验收手段。
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from app.gui.main_window import MainWindow
+
+    window = MainWindow()
+    app.processEvents()
+    print(f"界面构建成功：{window.stack.count()} 页")
+    for index, name in enumerate(window.PAGES):
+        print(f"  {index + 1}. {name}")
+
+    page = window.model_page
+    print(f"模型清单：{page.table.rowCount()} 项")
+    for row in range(page.table.rowCount()):
+        print(
+            f"  {page.table.item(row, 0).text():34s} "
+            f"{page.table.item(row, 2).text()}"
+        )
+    print(f"模型目录：{page.dir_edit.text()}")
+    page._refresh()
+    app.processEvents()
+
+    if window.stack.count() != len(window.PAGES):
+        print("界面自检失败：页面数与导航项不一致")
+        return 1
+    if page.table.rowCount() == 0:
+        print("界面自检失败：模型清单为空")
+        return 1
+    print("界面自检通过")
+    return 0
+
+
 def main() -> int:
     if "--version" in sys.argv or "--self-check" in sys.argv:
         _force_utf8_console()
+    if "--ui-smoke" in sys.argv:
+        _force_utf8_console()
+        return _ui_smoke()
     if "--version" in sys.argv:
         return _print_version()
     if "--self-check" in sys.argv:
