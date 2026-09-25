@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,6 +29,7 @@ from ...core.ffmpeg import check_encoders, locate_ffmpeg
 from ...core.probe import check_compatibility, describe_media
 from ..state import ProjectState
 from ..widgets import Card
+from ..widgets import NoWheelComboBox
 from ..widgets import message
 from ..workers import ProbeWorker
 from ._common import register_worker
@@ -79,7 +79,7 @@ class ImportPane(QWidget):
         self._info_card = info_card
 
         # ---- 主对白音轨 ----
-        self.audio_combo = QComboBox()
+        self.audio_combo = NoWheelComboBox()
         self.audio_combo.currentIndexChanged.connect(self._audio_changed)
         self.audio_hint = QLabel("导入后列出可选音轨。")
         self.audio_hint.setProperty("role", "muted")

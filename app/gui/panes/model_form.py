@@ -12,7 +12,6 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -46,6 +45,7 @@ from ..state import ProjectState
 from ..widgets import (
     Card,
     LogPanel,
+    NoWheelComboBox,
 )
 from ..widgets import message
 from ..workers import (
@@ -77,7 +77,7 @@ class ModelForm(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
 
-        self.quant_combo = QComboBox()
+        self.quant_combo = NoWheelComboBox()
         self.btn_discover = QPushButton("🔍  获取可用量化档位")
         self.btn_discover.clicked.connect(self._discover_quants)
 
@@ -135,7 +135,7 @@ class ModelForm(QWidget):
         # 「启用」不是随手勾的开关——必须点「保存并测试连通性」通过之后才允许，
         # 否则会出现"以为通了、真正分析时才回退本地"。
         cloud_card = Card("云端模型（厂商 API）", parent=self, body_layout=QVBoxLayout())
-        self.cloud_combo = QComboBox()
+        self.cloud_combo = NoWheelComboBox()
         self.cloud_combo.currentIndexChanged.connect(self._on_cloud_profile_changed)
         self.cloud_base_url = QLineEdit()
         self.cloud_model = QLineEdit()

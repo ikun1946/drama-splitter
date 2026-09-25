@@ -11,7 +11,6 @@ from pathlib import Path
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -35,6 +33,8 @@ from ..state import ProjectState
 from ..widgets import (
     Card,
     LabeledField,
+    NoWheelComboBox,
+    NoWheelSpinBox,
 )
 from ..widgets import message
 from ..workers import (
@@ -111,14 +111,14 @@ class ExportForm(QWidget):
         # 由对话框注入它的 request_precheck，测试则直接覆写对话框的方法。
         self.precheck = precheck or self._default_precheck
 
-        self.crf_spin = QSpinBox()
+        self.crf_spin = NoWheelSpinBox()
         self.crf_spin.setRange(0, 51)
         self.crf_spin.setValue(18)
-        self.preset_combo = QComboBox()
+        self.preset_combo = NoWheelComboBox()
         for name in ("ultrafast", "veryfast", "faster", "medium", "slow"):
             self.preset_combo.addItem(name)
         self.preset_combo.setCurrentText("medium")
-        self.audio_bitrate_combo = QComboBox()
+        self.audio_bitrate_combo = NoWheelComboBox()
         for value in ("128k", "192k", "256k"):
             self.audio_bitrate_combo.addItem(value)
         self.audio_bitrate_combo.setCurrentText("192k")

@@ -16,6 +16,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界�
 
 from fractions import Fraction  # noqa: E402
 
+from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
@@ -745,6 +746,84 @@ class TestSettingsDialogRollback:
 
         dialog.reject()
         assert window.state.settings.target_duration_seconds == Fraction(30)
+
+
+class TestWheelDoesNotChangeValues:
+    """滚轮不改值：数值框与下拉框把滚轮量交给滚动区，页面照常滚动。
+
+    回归用例：主题里 QLineEdit 与 QComboBox 外观一致，用户以为停在"文本框"
+    上滚页面，实际停在值控件上。Qt 默认让 QComboBox / QAbstractSpinBox 用滚轮
+    改值并**吞掉**事件，于是页面既滚不动、值还被悄悄改掉。NoWheel* 三个子类
+    把滚轮量直接写进最近的滚动区。
+    """
+
+    @staticmethod
+    def _wheel_event(widget, angle_y: int = -120):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+
+        center = QPointF(widget.rect().center())
+        return QWheelEvent(
+            center, center, QPoint(0, 0), QPoint(0, angle_y),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+
+    def _scroll_area_with(self, qapp, widget):
+        from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+        from app.gui.widgets import scrollable
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(widget)
+        for index in range(30):
+            layout.addWidget(QLabel(f"占位 {index}"))
+
+        area = scrollable(content)
+        area.resize(320, 200)
+        area.show()
+        qapp.processEvents()
+        return area
+
+    def test_spinbox_wheel_scrolls_instead_of_stepping(self, qapp):
+        from app.gui.widgets import NoWheelSpinBox
+
+        spin = NoWheelSpinBox()
+        spin.setRange(1, 9999)
+        spin.setValue(60)
+        area = self._scroll_area_with(qapp, spin)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_value, before_scroll = spin.value(), bar.value()
+
+            qapp.sendEvent(spin, self._wheel_event(spin))
+            qapp.processEvents()
+
+            assert spin.value() == before_value, "滚轮不得改变数值"
+            assert bar.value() == before_scroll + 120, "滚轮量应交给滚动区（页面照常滚）"
+        finally:
+            area.close()
+
+    def test_combo_wheel_does_not_switch_option(self, qapp):
+        from app.gui.widgets import NoWheelComboBox
+
+        combo = NoWheelComboBox()
+        combo.addItems(["a", "b", "c"])
+        combo.setCurrentIndex(1)
+        area = self._scroll_area_with(qapp, combo)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_index, before_scroll = combo.currentIndex(), bar.value()
+
+            qapp.sendEvent(combo, self._wheel_event(combo))
+            qapp.processEvents()
+
+            assert combo.currentIndex() == before_index, "滚轮不得切换下拉选项"
+            assert bar.value() == before_scroll + 120
+        finally:
+            area.close()
 
 
 class TestExportDialogContracts:

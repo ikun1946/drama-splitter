@@ -6,13 +6,10 @@ from fractions import Fraction
 
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QRadioButton,
-    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -30,6 +27,9 @@ from ..state import ProjectState
 from ..widgets import (
     Card,
     LabeledField,
+    NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelSpinBox,
     StatusPill,
 )
 
@@ -60,14 +60,14 @@ class SettingsForm(QWidget):
         self._mode_card = mode_card
 
         # ---- 目标数值 ----
-        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin = NoWheelDoubleSpinBox()
         self.duration_spin.setRange(1.0, 3600.0)
         self.duration_spin.setDecimals(3)
         self.duration_spin.setValue(120.0)
         self.duration_spin.setSuffix(" 秒")
         self.duration_spin.valueChanged.connect(self._refresh)
 
-        self.count_spin = QSpinBox()
+        self.count_spin = NoWheelSpinBox()
         self.count_spin.setRange(1, 9999)
         self.count_spin.setValue(60)
         self.count_spin.valueChanged.connect(self._refresh)
@@ -75,10 +75,10 @@ class SettingsForm(QWidget):
         self.policy_exact = QRadioButton("严格集数：必须恰好 N 集，无解就明确报错")
         self.policy_flexible = QRadioButton("弹性集数：在允许区间内比较方案")
         self.policy_exact.setChecked(True)
-        self.allowed_min = QSpinBox()
+        self.allowed_min = NoWheelSpinBox()
         self.allowed_min.setRange(1, 9999)
         self.allowed_min.setValue(58)
-        self.allowed_max = QSpinBox()
+        self.allowed_max = NoWheelSpinBox()
         self.allowed_max.setRange(1, 9999)
         self.allowed_max.setValue(62)
         for w in (self.policy_exact, self.policy_flexible):
@@ -111,15 +111,15 @@ class SettingsForm(QWidget):
         self.range_manual = QRadioButton("手动上下限")
         self.range_percent = QRadioButton("按目标时长百分比浮动")
         self.range_percent.setChecked(True)
-        self.min_spin = QDoubleSpinBox()
+        self.min_spin = NoWheelDoubleSpinBox()
         self.min_spin.setRange(0.1, 3600.0)
         self.min_spin.setDecimals(3)
         self.min_spin.setValue(96.0)
-        self.max_spin = QDoubleSpinBox()
+        self.max_spin = NoWheelDoubleSpinBox()
         self.max_spin.setRange(0.1, 3600.0)
         self.max_spin.setDecimals(3)
         self.max_spin.setValue(144.0)
-        self.tolerance_spin = QDoubleSpinBox()
+        self.tolerance_spin = NoWheelDoubleSpinBox()
         self.tolerance_spin.setRange(0.0, 99.0)
         self.tolerance_spin.setDecimals(2)
         self.tolerance_spin.setValue(20.0)
@@ -155,7 +155,7 @@ class SettingsForm(QWidget):
         self._range_card = range_card
 
         # ---- 策略 ----
-        self.strategy_combo = QComboBox()
+        self.strategy_combo = NoWheelComboBox()
         self.strategy_combo.addItem("剧情优先", Strategy.STORY.value)
         self.strategy_combo.addItem("悬念优先", Strategy.SUSPENSE.value)
         self.strategy_combo.addItem("时长优先", Strategy.DURATION.value)
