@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -24,6 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.export import ExportPreset
+from ...core.plan import BoundaryPlan
+from ...core.settings import SplitSettings
 from ...core.timebase import format_seconds_brief
 from ..state import ProjectState
 from ..widgets import (
@@ -38,10 +41,34 @@ from ._common import (
 )
 
 
-__all__ = ["ExportPage"]
+__all__ = ["ExportPage", "export_precheck"]
+
+
+def export_precheck(
+    plan: BoundaryPlan,
+    settings: SplitSettings | None = None,
+) -> tuple[list, list, int]:
+    """§37 导出前置检查：返回 (硬约束问题, 警告, 未审核切点数)。
+
+    硬约束必须拦住；警告与未审核只提示、不禁止——用户可能有意忽略。
+    与审核页「方案层校验」用同一套 ``plan.validate(settings)`` 入参，
+    保证「返回审核」后用户看到的问题清单与导出前检查一致。
+    """
+    problems = plan.validate(settings, None)
+    blocking = [p for p in problems if p.is_blocking]
+    warnings = [p for p in problems if not p.is_blocking]
+    unreviewed = (
+        0
+        if plan.semantic_review_status == "confirmed"
+        else max(0, plan.episode_count - 1)   # 首尾是片头片尾，不算切点
+    )
+    return blocking, warnings, unreviewed
 
 
 class ExportPage(QWidget):
+    # §37：用户在导出前置检查中选择「返回审核」时发出，由主窗口负责切页
+    review_requested = Signal()
+
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
@@ -190,7 +217,7 @@ class ExportPage(QWidget):
             QMessageBox.warning(self, "缺少输出目录", "请先选择输出目录。")
             return
 
-        blocking = [p for p in plan.validate() if p.is_blocking]
+        blocking, warnings, unreviewed = export_precheck(plan, self.state.settings)
         if blocking:
             QMessageBox.warning(
                 self,
@@ -198,6 +225,13 @@ class ExportPage(QWidget):
                 "存在硬约束问题：\n" + "\n".join(p.describe() for p in blocking),
             )
             return
+
+        # §37 导出前置检查：非阻断问题不禁止导出——用户可能有意忽略。
+        # 给「继续导出」与「返回审核」两条路，让用户自己决定。
+        if warnings or unreviewed:
+            if not self._confirm_precheck(warnings, unreviewed):
+                self.review_requested.emit()
+                return
 
         self.progress.setValue(0)
         self.btn_start.setEnabled(False)
@@ -220,6 +254,30 @@ class ExportPage(QWidget):
         self._worker.failed.connect(self._on_failed)
         register_worker(self, "export", self._worker)
         self._worker.start()
+
+    def _confirm_precheck(self, warnings: list, unreviewed: int) -> bool:
+        """§37 前置检查对话框。返回 True=继续导出，False=返回审核。
+
+        单独提方法而不是内联弹窗：自动化环境（tools/gui_smoke.py）覆写它
+        即可绕过模态——QMessageBox 实例的 exec() 无法通过拦截静态方法替代，
+        离屏跑链路时会永久阻塞（实测踩过）。
+        """
+        parts = []
+        if unreviewed:
+            parts.append(f"还有 {unreviewed} 个切点未审核")
+        if warnings:
+            parts.append(f"方案层校验有 {len(warnings)} 条警告")
+        box = QMessageBox(self)
+        box.setWindowTitle("导出前置检查")
+        box.setText("；".join(parts) + "。是否继续？")
+        informative = "返回审核处理后再导出更稳妥；也可以选择继续导出（自行承担风险）。"
+        if warnings:
+            informative += "\n\n警告：\n" + "\n".join(p.describe() for p in warnings)
+        box.setInformativeText(informative)
+        box.addButton("继续导出", QMessageBox.ButtonRole.AcceptRole)
+        btn_back = box.addButton("返回审核", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is not btn_back
 
     def _retry(self) -> None:
         plan = self.state.current_plan

@@ -51,6 +51,16 @@ def _install_dialog_recorders() -> None:
     mw.QMessageBox.warning = record("warn")
     mw.QMessageBox.critical = record("critical")
 
+    # §37 前置检查是 QMessageBox 实例 + exec()，拦截静态方法拦不到，
+    # 离屏环境会永久阻塞（实测踩过）。覆写决策方法模拟用户选「继续导出」。
+    from app.gui.pages.export_page import ExportPage
+
+    def auto_continue(self, warnings, unreviewed):
+        print(f"  [前置检查] 自动选择「继续导出」（未审核 {unreviewed} / 警告 {len(warnings)}）")
+        return True
+
+    ExportPage._confirm_precheck = auto_continue
+
 
 def wait_until(app: QApplication, predicate, timeout: float = 180.0, label: str = "") -> bool:
     deadline = time.time() + timeout

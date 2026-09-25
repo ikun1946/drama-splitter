@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
@@ -151,6 +152,11 @@ class MainWindow(QMainWindow):
         # analysis_page 指向真正的 AnalysisPage，二者都挂在工作台内部。
         self.import_page = self.workbench_page.import_view
         self.analysis_page = self.workbench_page.analysis_view
+
+        # 检查器「查看」→ 切到审核页并定位到问题时间点（方案 §二十四 / §54）
+        self.workbench_page.inspector.jump_requested.connect(self._jump_to_issue)
+        # 导出前置检查中选「返回审核」→ 切回审核页（方案 §37）
+        self.export_page.review_requested.connect(lambda: self.nav.setCurrentRow(2))
 
         for page in (self.workbench_page, self.review_page, self.export_page):
             self.stack.addWidget(page)
@@ -519,6 +525,15 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Space"), self, activated=self._space_pressed)
         QShortcut(QKeySequence("K"), self, activated=lambda: self.review_page.preview.btn_next_frame.click())
         QShortcut(QKeySequence("J"), self, activated=lambda: self.review_page.preview.btn_prev_frame.click())
+        # 导出（方案 §54）：切到导出页并直接走前置检查
+        QShortcut(QKeySequence("Ctrl+E"), self, activated=self._start_export)
+        # 审核页回车确认当前集（方案 §54）；挂在审核页上，其他页不受影响
+        QShortcut(QKeySequence("Return"), self.review_page, activated=self.review_page._confirm_episode)
+        QShortcut(QKeySequence("Enter"), self.review_page, activated=self.review_page._confirm_episode)
+        # 检查器问题巡航（方案 §54）：N 下一个问题 / P 上一个问题
+        # 跳转会切到审核页，因此不限定当前页，保证连续按 N 能逐条走完
+        QShortcut(QKeySequence("N"), self, activated=lambda: self._cycle_issue(1))
+        QShortcut(QKeySequence("P"), self, activated=lambda: self._cycle_issue(-1))
 
     def _space_pressed(self) -> None:
         if self.stack.currentWidget() is self.review_page:
@@ -526,6 +541,27 @@ class MainWindow(QMainWindow):
                 self.review_page.preview.btn_stop.click()
             else:
                 self.review_page.preview.btn_play.click()
+
+    def _start_export(self) -> None:
+        """Ctrl+E：切到导出页再启动（前置检查的提示框需要导出页可见才不突兀）。"""
+        self.nav.setCurrentRow(3)
+        self.export_page._start(None)
+
+    def _cycle_issue(self, delta: int) -> None:
+        """N/P：在检查器问题清单里按顺序巡航跳转（方案 §54）。"""
+        self.workbench_page.inspector.cycle_issue(delta)
+
+    def _jump_to_issue(self, target_ms: int) -> None:
+        """检查器「查看」：切到审核页，选中问题所在集并定位到该时间点。"""
+        self.nav.setCurrentRow(2)
+        seconds = Fraction(int(target_ms), 1000)
+        plan = self.state.current_plan
+        if plan is not None:
+            for row, episode in enumerate(plan.episodes()):
+                if episode.start_seconds <= seconds < episode.end_seconds:
+                    self.review_page.episode_table.selectRow(row)
+                    break
+        self.review_page._goto(seconds)
 
     # ---- 导航 ---------------------------------------------------------
 

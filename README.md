@@ -118,6 +118,8 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §9.3 完整帧表（VFR 地基） | `app/core/probe.py` | 完成（生成与核验；导出仍要求 CFR） |
 | §15 硬件编码器探测 | `app/core/ffmpeg.py` | 完成 |
 | § 任务恢复（项目快照）+ §五十五/五十六 保存 / 打开 / 自动保存 | `app/gui/state.py`、`app/gui/main_window.py` | 完成 |
+| §37 导出前置检查（未审核切点不禁止：继续导出 / 返回审核） | `app/gui/pages/export_page.py::export_precheck` | 完成 |
+| §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航） | `app/gui/main_window.py::_install_shortcuts` | 完成 |
 | §15 打包与部署自检 | `tools/build_package.py` + `run.py --self-check` | 完成 |
 
 已知限制（不静默蒙混，都在界面上如实说明）：
@@ -271,13 +273,13 @@ app/gui/           界面（PySide6-Essentials）
     import_page.py     导入区（工作台上半，媒体就绪后拖放区收为一行）
     analysis_page.py   分析区（工作台下半，日志镜像到检查器）
     settings_page.py   设置（抽屉）
-    review_page.py     审核
-    export_page.py     导出
+    review_page.py     审核（切点操作两列网格 + 显式最小高度，右列滚动兜底）
+    export_page.py     导出（§37 前置检查：未审核切点可继续或返回审核）
     model_page.py      模型（抽屉）
   state.py           项目状态与方案版本链（快照 payload + 原子落盘）
   workers.py         后台工作线程（BaseWorker + 探测/规划/分析/导出/下载）
   frame_source.py    帧级预览（单帧解码 + 流式播放）
-  main_window.py     主窗口与装配（页面切换、顶栏、抽屉、快捷键）
+  main_window.py     主窗口与装配（页面切换、顶栏、抽屉、快捷键 §54、检查器跳转）
 tools/             开发与验证工具
   markers.py         帧号条码与声音标记规范
   verify.py          帧号读回、提示音检测、音画偏差测量
@@ -289,7 +291,7 @@ tools/             开发与验证工具
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             336 项自动化测试（13 个文件）
+tests/             359 项自动化测试（13 个文件：330 通过 / 29 按环境跳过）
 testdata/          合成素材（不入版本库）
 ```
 

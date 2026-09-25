@@ -16,7 +16,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界�
 
 from fractions import Fraction  # noqa: E402
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
 from app.core.settings import (
@@ -495,3 +495,265 @@ class TestSettingsPageBehaviour:
         derived = settings.derive(Fraction(120))
         assert derived.min_duration == Fraction(24)
         assert derived.max_duration == Fraction(36)
+
+
+class _FakeDialog:
+    """录制型 QMessageBox 替身。
+
+    类方法拦截 warning/information/critical 并记录入参；实例方法支持
+    addButton/exec/clickedButton，供导出前置检查对话框（§37）的流程测试。
+    """
+
+    calls: list[tuple] = []
+    ButtonRole = QMessageBox.ButtonRole
+
+    @classmethod
+    def warning(cls, *args):
+        cls.calls.append(("warning",) + args)
+
+    @classmethod
+    def information(cls, *args):
+        cls.calls.append(("information",) + args)
+
+    @classmethod
+    def critical(cls, *args):
+        cls.calls.append(("critical",) + args)
+
+    def __init__(self, *args, **kwargs):
+        self.text_value = ""
+        self.informative = ""
+        self.buttons: list[tuple] = []
+        self.clicked = None
+
+    def setWindowTitle(self, title):
+        pass
+
+    def setText(self, text):
+        self.text_value = text
+
+    def setInformativeText(self, text):
+        self.informative = text
+
+    def addButton(self, text, role):
+        token = (text, role)
+        self.buttons.append(token)
+        return token
+
+    def exec(self):
+        pass
+
+    def clickedButton(self):
+        return self.clicked
+
+
+class _FakeSignal:
+    def connect(self, slot):
+        pass
+
+
+class _FakeWorker:
+    """ExportWorker 替身：记录实例化入参，start() 不启动真线程。"""
+
+    instances: list["_FakeWorker"] = []
+    episode_done = _FakeSignal()
+    completed = _FakeSignal()
+    failed = _FakeSignal()
+    finished_ok = _FakeSignal()
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        _FakeWorker.instances.append(self)
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        pass
+
+    def isRunning(self):
+        return False
+
+    def wait(self, ms=0):
+        pass
+
+
+class TestStep5Refinement:
+    """第 5 步：导出前置检查（§37）、快捷键（§54）、检查器跳转、按钮压扁回归。"""
+
+    def _seed(self, window, binaries, assets):
+        """给共享的 module 级窗口塞一份干净的 4 集方案现场。"""
+        window.state.reset_media()
+        window.state.plans = []
+        window.state.plan_cursor = 0
+        window.state.exported = {}
+        window.state.output_root = None
+        media = probe_media(binaries, assets["cfr"])
+        plan = TestProjectPersistence._build_plan(media, [30, 60, 90])
+        window.state.media = media
+        window.state.binaries = binaries
+        window.state.add_plan(plan)
+        return media, plan
+
+    def test_export_precheck_counts_unreviewed_cuts(self, window, binaries, assets):
+        """§37：未确认方案 → 未审核切点数 = 集数 - 1（首尾是片头片尾）。"""
+        from app.gui.pages.export_page import export_precheck
+
+        _, plan = self._seed(window, binaries, assets)
+        blocking, warnings, unreviewed = export_precheck(plan, window.state.settings)
+        assert blocking == []
+        assert warnings == []
+        assert unreviewed == 3
+
+        plan.semantic_review_status = "confirmed"
+        _, _, unreviewed = export_precheck(plan, window.state.settings)
+        assert unreviewed == 0
+
+    def test_precheck_dialog_back_to_review(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
+        """§37：前置检查弹「继续导出 / 返回审核」，选返回 → 切审核页、不导出。"""
+        from app.gui.pages import export_page as ep
+
+        _, plan = self._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+        assert plan.semantic_review_status == "pending"
+
+        captured = {}
+        window.export_page.review_requested.connect(lambda: captured.update(fired=True))
+
+        _FakeDialog.calls = []
+        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        def choose_back(self_dialog):
+            self_dialog.clicked = self_dialog.buttons[-1]   # 「返回审核」
+
+        monkeypatch.setattr(_FakeDialog, "exec", choose_back)
+        window.export_page._start(None)
+
+        assert captured.get("fired"), "选择「返回审核」应发出 review_requested"
+        assert window.nav.currentRow() == 2, "应切回审核页"
+        assert not _FakeWorker.instances, "不应启动导出线程"
+
+    def test_precheck_dialog_continue_exports(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
+        """§37：选「继续导出」→ 走到启动导出（用户有意忽略未审核项）。"""
+        from app.gui.pages import export_page as ep
+
+        self._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+
+        _FakeDialog.calls = []
+        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        def choose_continue(self_dialog):
+            self_dialog.clicked = self_dialog.buttons[0]    # 「继续导出」
+
+        monkeypatch.setattr(_FakeDialog, "exec", choose_continue)
+        window.export_page._start(None)
+
+        assert len(_FakeWorker.instances) == 1, "继续导出应启动一次导出线程"
+        worker = _FakeWorker.instances[0]
+        assert worker.kwargs.get("only_episodes") is None
+
+    def test_hard_constraints_still_block_export(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
+        """§37：硬约束问题仍直接拦截，不给「继续导出」的选项。"""
+        from app.gui.pages import export_page as ep
+
+        _, plan = self._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+        # 破坏硬约束：起点不再从 0 开始 → NOT_START_AT_ZERO（阻断）
+        plan.boundary_ticks = [plan.boundary_ticks[0] + 1000, plan.boundary_ticks[-1]]
+
+        _FakeDialog.calls = []
+        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        window.export_page._start(None)
+
+        assert any(call[0] == "warning" for call in _FakeDialog.calls), "硬约束应弹警告"
+        assert not _FakeWorker.instances, "硬约束问题必须拦住导出"
+
+    def test_shortcut_sequences_registered(self, window):
+        """§54：Ctrl+E / Enter / N / P 必须注册成快捷键。"""
+        from PySide6.QtGui import QShortcut
+
+        sequences = {sc.key().toString() for sc in window.findChildren(QShortcut)}
+        for expected in ("Ctrl+E", "N", "P", "Return", "Enter", "Space", "Ctrl+S"):
+            assert expected in sequences, f"缺少快捷键 {expected}（现有：{sorted(sequences)}）"
+
+    def test_ctrl_e_navigates_and_warns_without_plan(self, window, qapp, monkeypatch):
+        """Ctrl+E：无方案时切到导出页并弹「请先完成导入、分析与审核」。"""
+        from app.gui.pages import export_page as ep
+
+        window.state.reset_media()
+        window.state.plans = []
+        window.state.plan_cursor = 0
+        window.nav.setCurrentRow(0)
+
+        _FakeDialog.calls = []
+        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
+
+        window._start_export()
+        assert window.nav.currentRow() == 3
+        assert any("请先完成导入、分析与审核" in str(call) for call in _FakeDialog.calls)
+
+    def test_return_confirms_episode_on_review_page(self, window, qapp, binaries, assets):
+        """§54：回车 = 确认当前集（挂在审核页上，仅审核页内触发）。"""
+        from PySide6.QtGui import QShortcut
+
+        _, plan = self._seed(window, binaries, assets)
+        assert plan.semantic_review_status == "pending"
+        window.nav.setCurrentRow(2)
+
+        return_shortcuts = [
+            sc for sc in window.findChildren(QShortcut)
+            if sc.parent() is window.review_page and sc.key().toString() == "Return"
+        ]
+        assert len(return_shortcuts) == 1, "Return 快捷键应唯一且挂在审核页上"
+        return_shortcuts[0].activated.emit()
+
+        assert plan.semantic_review_status == "confirmed", "回车应触发确认当前集"
+
+    def test_inspector_cycles_jumpable_issues(self, window):
+        """N/P 巡航：只走有定位的问题项，N/P 方向相反且可循环。"""
+        from app.gui.widgets import InspectorIssue
+
+        inspector = window.workbench_page.inspector
+        got = []
+        inspector.jump_requested.connect(got.append)
+        inspector.set_issues([
+            InspectorIssue(title="a", target_ms=1000),
+            InspectorIssue(title="b", target_ms=2000),
+            InspectorIssue(title="c"),   # 无定位 → 巡航跳过
+        ])
+
+        window._cycle_issue(1)
+        window._cycle_issue(1)
+        window._cycle_issue(-1)
+        assert got == [1000, 2000, 1000], f"巡航顺序错误：{got}"
+
+    def test_jump_requested_opens_review_page_at_position(self, window, qapp, binaries, assets):
+        """检查器「查看」：切到审核页、选中所在集、定位到问题时间点。"""
+        window.nav.setCurrentRow(0)
+        self._seed(window, binaries, assets)
+
+        window._jump_to_issue(45_000)
+        assert window.nav.currentRow() == 2
+        assert window.review_page._current_episode == 2, "45s 应落在第 2 集（30-60s）"
+        assert window.review_page._position == Fraction(45)
+
+    def test_review_ops_buttons_have_hard_minimums(self, window):
+        """回归：QSS min-height 不进 minimumSizeHint，按钮曾被布局压成细条、
+        文字互相叠印（docs/screenshots/04-审核.png 缺陷）。"""
+        page = window.review_page
+        for btn in (
+            page.btn_set_boundary,
+            page.btn_lock,
+            page.btn_unlock,
+            page.btn_confirm,
+            page.btn_snap,
+        ):
+            assert btn.minimumHeight() >= 32, f"「{btn.text()}」缺少显式最小高度"

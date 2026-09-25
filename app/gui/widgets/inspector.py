@@ -174,6 +174,7 @@ class Inspector(QFrame):
 
         self._issues: list[InspectorIssue] = []
         self._rows: list[_IssueRow] = []
+        self._issue_cursor = -1   # N/P 巡航位置：-1 表示尚未开始，首次 N 落到第一条
 
         # ---- 标签切换 ----
         self._tabs: list[QPushButton] = []
@@ -277,6 +278,7 @@ class Inspector(QFrame):
             unique.append(issue)
 
         self._issues = unique
+        self._issue_cursor = -1   # 清单整体换过，巡航从头开始
 
         # 清空旧行（保留末尾的 stretch）
         while self._problem_layout.count() > 1:
@@ -315,6 +317,21 @@ class Inspector(QFrame):
             row.jump_requested.connect(self.jump_requested.emit)
             self._advice_layout.insertWidget(self._advice_layout.count() - 1, row)
         self._advice_empty.setVisible(not advice)
+
+    def cycle_issue(self, delta: int) -> InspectorIssue | None:
+        """在可定位的问题之间循环巡航（N=下一个 / P=上一个，方案 §54）。
+
+        没有目标位置（target_ms 为 None）的问题无法跳转，直接跳过；
+        清单为空或全部不可定位时返回 None、不发信号。返回发出的问题。
+        """
+        jumpable = [issue for issue in self._issues if issue.target_ms is not None]
+        if not jumpable:
+            return None
+        self._issue_cursor = (self._issue_cursor + (1 if delta >= 0 else -1)) % len(jumpable)
+        issue = jumpable[self._issue_cursor]
+        self.set_tab(0)   # 让用户回头能对上「刚跳的是哪条」
+        self.jump_requested.emit(issue.target_ms)
+        return issue
 
     def append_log(self, text: str, level: str = "info") -> None:
         self._log.append(text, level)

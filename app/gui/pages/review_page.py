@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,6 +30,7 @@ from ..widgets import (
     MediaPreview,
     StatusPill,
 )
+from ._common import scrollable
 
 
 __all__ = ["ReviewPage"]
@@ -65,11 +67,16 @@ class ReviewPage(QWidget):
 
         # ---- 预览 ----
         self.preview = MediaPreview()
+        # 审核页右列要同时放下预览 / 当前集 / 切点操作 / 方案层校验四张卡，
+        # 预览最小高度给 190，900px 高的窗口即可完整展示（画面按比例缩放）
+        self.preview.view.setMinimumHeight(190)
 
         # ---- 当前集卡片 ----
         self.card = QTextEdit()
         self.card.setReadOnly(True)
-        self.card.setMinimumHeight(140)
+        # 96px 起步即可：QTextEdit 自带滚动，最小高度给小些能让右列在
+        # 900px 高的窗口里完整放下（含切点操作卡），不出纵向滚动条
+        self.card.setMinimumHeight(96)
 
         self._review_pill = StatusPill("未审核", tone="muted")
 
@@ -83,7 +90,7 @@ class ReviewPage(QWidget):
         # ---- 方案层校验 ----
         self.problem_box = QTextEdit()
         self.problem_box.setReadOnly(True)
-        self.problem_box.setMinimumHeight(80)
+        self.problem_box.setMinimumHeight(56)
         self._problem_pill = StatusPill("无问题", tone="success")
 
         problem_card = Card("方案层校验", parent=self)
@@ -115,6 +122,11 @@ class ReviewPage(QWidget):
             self.btn_snap,
         ):
             w.setToolTip(w.text())
+            # QSS 的 min-height 不进 minimumSizeHint：可用高度不足时按钮会被
+            # 布局压成一条细线、文字互相叠印（docs/screenshots 04-审核 缺陷）。
+            # 显式最小高度 + 两列网格 + 右列滚动容器三重保险，任何窗口尺寸下
+            # 按钮都保持可读。
+            w.setMinimumHeight(32)
 
         self.btn_set_boundary.clicked.connect(self._set_boundary)
         self.btn_lock.clicked.connect(lambda: self._lock(True))
@@ -123,22 +135,30 @@ class ReviewPage(QWidget):
         self.btn_snap.clicked.connect(lambda: self._goto(self._position))
 
         ops_card = Card("切点操作", parent=self)
-        for w in (
-            self.btn_set_boundary,
-            self.btn_lock,
-            self.btn_unlock,
-            self.btn_confirm,
-            self.btn_snap,
-        ):
-            ops_card.body_layout.addWidget(w)
+        ops_grid = QGridLayout()
+        ops_grid.setContentsMargins(0, 0, 0, 0)
+        ops_grid.setHorizontalSpacing(8)
+        ops_grid.setVerticalSpacing(8)
+        ops_grid.addWidget(self.btn_set_boundary, 0, 0, 1, 2)
+        ops_grid.addWidget(self.btn_lock, 1, 0)
+        ops_grid.addWidget(self.btn_unlock, 1, 1)
+        ops_grid.addWidget(self.btn_confirm, 2, 0)
+        ops_grid.addWidget(self.btn_snap, 2, 1)
+        ops_card.body_layout.addLayout(ops_grid)
 
         # 右侧：preview + 当前集 + 切点操作 + 方案层校验
         right_col = QVBoxLayout()
-        right_col.setSpacing(12)
+        right_col.setSpacing(10)
         right_col.addWidget(self.preview, 2)
         right_col.addWidget(card_card, 1)
         right_col.addWidget(ops_card)
         right_col.addWidget(problem_card, 1)
+
+        right_widget = QWidget()
+        right_widget.setLayout(right_col)
+        # 右列最小高度之和可能超过可用高度（同工作台 §13.1 的问题），
+        # 套一层滚动容器：空间不够时出滚动条，而不是把按钮压扁
+        right_holder = scrollable(right_widget)
 
         # 装配
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -146,11 +166,9 @@ class ReviewPage(QWidget):
         left_widget.setLayout(QVBoxLayout())
         left_widget.layout().setContentsMargins(0, 0, 0, 0)
         left_widget.layout().addWidget(list_card)
-        right_widget = QWidget()
-        right_widget.setLayout(right_col)
 
         splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
+        splitter.addWidget(right_holder)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([420, 920])
