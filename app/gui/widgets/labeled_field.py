@@ -39,8 +39,9 @@ class LabeledField(QWidget):
         outer.setSpacing(4)
         outer.addWidget(self._title)
         outer.addLayout(self._row)
-        if self._help.isVisible():
-            outer.addWidget(self._help)
+        # 始终加入布局（无文案时不可见、不占位）：原先只在构造时可见才加，
+        # 于是事后 set_help() 的文字虽然写进去了却永远不会显示。
+        outer.addWidget(self._help)
 
     def attach(self, widget: QWidget) -> QWidget:
         """把输入控件接到字段行；如有 suffix 则控件后贴一个后缀。"""
@@ -48,6 +49,10 @@ class LabeledField(QWidget):
         if self._suffix_lbl.isVisible():
             self._row.addWidget(self._suffix_lbl)
         return widget
+
+    def set_label(self, text: str) -> None:
+        """改标题文案（设置表单里同一个字段在两种模式下含义不同）。"""
+        self._title.setText(text)
 
     def set_help(self, text: str) -> None:
         self._help.setText(text)

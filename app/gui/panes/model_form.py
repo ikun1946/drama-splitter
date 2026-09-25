@@ -11,7 +11,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -36,6 +35,7 @@ from ..state import ProjectState
 from ..widgets import (
     Card,
     LogPanel,
+    NoWheelComboBox,
 )
 from ..widgets import message
 from ..workers import (
@@ -67,7 +67,7 @@ class ModelForm(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
 
-        self.quant_combo = QComboBox()
+        self.quant_combo = NoWheelComboBox()
         self.btn_discover = QPushButton("🔍  获取可用量化档位")
         self.btn_discover.clicked.connect(self._discover_quants)
 

@@ -1,18 +1,25 @@
-"""页 2 设置：分集参数（模式 / 集数 / 时长 / 浮动 / 策略）与可行性实时反馈。"""
+"""设置：分集参数（模式 / 集数 / 时长 / 浮动 / 策略）与可行性实时反馈。
+
+两种模式下"用户输入哪个、哪个是算出来的"是相反的：
+
+- 按目标时长：时长可编辑，**集数只读并实时反算**（N = round(T/D)，夹到可行区间）
+- 按目标集数：集数可编辑，**时长只读并实时反算**（D = T/N）
+
+派生值只作展示与确认，不反向影响内核：``SplitSettings.derive()`` 在该模式下
+本来就用另一个字段（模式B 用 ``Fraction(T, N)``，模式A 用用户输入的目标时长）。
+"""
 
 from __future__ import annotations
 
 from fractions import Fraction
 
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QRadioButton,
-    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -25,11 +32,14 @@ from ...core.settings import (
     Strategy,
     check_feasibility,
 )
-from ...core.timebase import format_seconds_brief, format_timecode
+from ...core.timebase import format_seconds_brief, format_timecode, round_half_up
 from ..state import ProjectState
 from ..widgets import (
     Card,
     LabeledField,
+    NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelSpinBox,
     StatusPill,
 )
 
@@ -41,9 +51,10 @@ class SettingsForm(QWidget):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
-        # 本页会被装进 420px 宽的抽屉里。默认尺寸策略下，双栏布局的最小
-        # 宽度之和会把版面挤成"一列 90px"，文字被迫竖排并溢出卡片——
-        # 因此显式给出能容纳双栏的最小宽度，并允许横向滚动兜底。
+        # 反算写回派生控件时会再次触发 _refresh，用它挡住递归
+        self._syncing = False
+        # 本表单由设置对话框承载（对话框正文套滚动容器）。显式给出能容纳双栏的
+        # 最小宽度，窄窗口下横向滚动兜底，而不是把两栏压成"一列 90px"。
         self.setMinimumWidth(640)
 
         # ---- 模式 ----
@@ -60,14 +71,14 @@ class SettingsForm(QWidget):
         self._mode_card = mode_card
 
         # ---- 目标数值 ----
-        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin = NoWheelDoubleSpinBox()
         self.duration_spin.setRange(1.0, 3600.0)
         self.duration_spin.setDecimals(3)
         self.duration_spin.setValue(120.0)
         self.duration_spin.setSuffix(" 秒")
         self.duration_spin.valueChanged.connect(self._refresh)
 
-        self.count_spin = QSpinBox()
+        self.count_spin = NoWheelSpinBox()
         self.count_spin.setRange(1, 9999)
         self.count_spin.setValue(60)
         self.count_spin.valueChanged.connect(self._refresh)
@@ -75,10 +86,10 @@ class SettingsForm(QWidget):
         self.policy_exact = QRadioButton("严格集数：必须恰好 N 集，无解就明确报错")
         self.policy_flexible = QRadioButton("弹性集数：在允许区间内比较方案")
         self.policy_exact.setChecked(True)
-        self.allowed_min = QSpinBox()
+        self.allowed_min = NoWheelSpinBox()
         self.allowed_min.setRange(1, 9999)
         self.allowed_min.setValue(58)
-        self.allowed_max = QSpinBox()
+        self.allowed_max = NoWheelSpinBox()
         self.allowed_max.setRange(1, 9999)
         self.allowed_max.setValue(62)
         for w in (self.policy_exact, self.policy_flexible):
@@ -94,13 +105,15 @@ class SettingsForm(QWidget):
         flexible_row.addStretch(1)
 
         count_card = Card("目标集数 / 时长", parent=self)
-        # 用 LabeledField 风格
+        # 同一个框在两种模式下含义不同：手里的输入 vs 系统算出来的值
         dfield = LabeledField("目标时长", suffix="秒")
         dfield.attach(self.duration_spin)
         count_card.body_layout.addWidget(dfield)
-        nfield = LabeledField("目标集数 N")
+        nfield = LabeledField("预计集数（自动）")
         nfield.attach(self.count_spin)
         count_card.body_layout.addWidget(nfield)
+        self._duration_field = dfield
+        self._count_field = nfield
         count_card.body_layout.addSpacing(4)
         count_card.body_layout.addWidget(self.policy_exact)
         count_card.body_layout.addWidget(self.policy_flexible)
@@ -111,15 +124,15 @@ class SettingsForm(QWidget):
         self.range_manual = QRadioButton("手动上下限")
         self.range_percent = QRadioButton("按目标时长百分比浮动")
         self.range_percent.setChecked(True)
-        self.min_spin = QDoubleSpinBox()
+        self.min_spin = NoWheelDoubleSpinBox()
         self.min_spin.setRange(0.1, 3600.0)
         self.min_spin.setDecimals(3)
         self.min_spin.setValue(96.0)
-        self.max_spin = QDoubleSpinBox()
+        self.max_spin = NoWheelDoubleSpinBox()
         self.max_spin.setRange(0.1, 3600.0)
         self.max_spin.setDecimals(3)
         self.max_spin.setValue(144.0)
-        self.tolerance_spin = QDoubleSpinBox()
+        self.tolerance_spin = NoWheelDoubleSpinBox()
         self.tolerance_spin.setRange(0.0, 99.0)
         self.tolerance_spin.setDecimals(2)
         self.tolerance_spin.setValue(20.0)
@@ -155,7 +168,7 @@ class SettingsForm(QWidget):
         self._range_card = range_card
 
         # ---- 策略 ----
-        self.strategy_combo = QComboBox()
+        self.strategy_combo = NoWheelComboBox()
         self.strategy_combo.addItem("剧情优先", Strategy.STORY.value)
         self.strategy_combo.addItem("悬念优先", Strategy.SUSPENSE.value)
         self.strategy_combo.addItem("时长优先", Strategy.DURATION.value)
@@ -277,11 +290,13 @@ class SettingsForm(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
+        if self._syncing:
+            # 反算写回派生控件会再次触发刷新，直接跳过，避免递归
+            return
         settings = self.collect_settings()
 
         by_count = settings.split_mode == SplitMode.TARGET_EPISODE_COUNT
-        self.duration_spin.setEnabled(not by_count)
-        self.count_spin.setEnabled(by_count)
+        self._sync_editable_fields(by_count)
         self.policy_exact.setEnabled(by_count)
         self.policy_flexible.setEnabled(by_count)
         self.allowed_min.setEnabled(by_count and settings.count_policy == CountPolicy.FLEXIBLE)
@@ -294,6 +309,7 @@ class SettingsForm(QWidget):
         lines: list[str] = []
         total = self.state.total_seconds
         if total is None:
+            self._set_derived_help(by_count, "导入源片后自动计算")
             lines.append("尚未导入源片，无法检查可行性。")
             self.feasibility.setPlainText("\n".join(lines))
             self._feas_pill.set_text("就绪")
@@ -302,6 +318,7 @@ class SettingsForm(QWidget):
 
         problems = settings.validate()
         if problems:
+            self._set_derived_help(by_count, "参数不完整，暂不反算")
             lines.append("【参数不完整】")
             lines.extend(f"  · {text}" for text in problems)
             self.feasibility.setPlainText("\n".join(lines))
@@ -310,6 +327,7 @@ class SettingsForm(QWidget):
             return
 
         report = check_feasibility(settings, total)
+        self._apply_derived(settings, total, report, by_count)
 
         lines.append(f"源片总时长：{format_timecode(total)}")
         if report.derived is not None:
@@ -365,6 +383,79 @@ class SettingsForm(QWidget):
                 self._feas_pill.set_tone("success")
 
         self.feasibility.setPlainText("\n".join(lines))
+
+    # ---- 自动反算（派生字段只读） --------------------------------------
+
+    def _sync_editable_fields(self, by_count: bool) -> None:
+        """源字段可编辑、派生字段只读；标题随模式说明哪个是算出来的。
+
+        只读字段去掉步进箭头（``NoButtons``）：既避免误触，也不给它"可以改"
+        的暗示；控件保持 enabled 以便正常读出数值。
+        """
+        self.duration_spin.setReadOnly(by_count)
+        self.count_spin.setReadOnly(not by_count)
+        self.duration_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+            if by_count
+            else QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        )
+        self.count_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.UpDownArrows
+            if by_count
+            else QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self._duration_field.set_label("预计目标时长（自动）" if by_count else "目标时长")
+        self._count_field.set_label("目标集数 N" if by_count else "预计集数（自动）")
+
+    def _set_derived_help(self, by_count: bool, text: str) -> None:
+        field = self._duration_field if by_count else self._count_field
+        field.set_help(text)
+
+    def _apply_derived(self, settings, total, report, by_count: bool) -> None:
+        """把派生目标值写回只读控件：模式A 反算集数，模式B 反算时长。"""
+        if by_count:
+            count = settings.target_episode_count or 0
+            if count <= 0:
+                self._duration_field.set_help("目标集数未设置，无法反算时长")
+                return
+            self._set_value(self.duration_spin, float(Fraction(total, count)))
+            self._duration_field.set_help(
+                "由总时长 ÷ 目标集数自动计算（内部全精度，界面显示才取整）"
+            )
+            return
+
+        target = settings.target_duration_seconds
+        if target is None or target <= 0:
+            self._count_field.set_help("目标时长未设置，无法反算集数")
+            return
+        if report.min_episodes > report.max_episodes:
+            # 无解时不猜值：保留上一次的数值，理由交给可行性面板说清楚
+            self._count_field.set_help("当前参数无解，无法反算集数")
+            return
+
+        nominal = round_half_up(Fraction(total) / target)
+        clamped = max(report.min_episodes, min(nominal, report.max_episodes))
+        self._set_value(self.count_spin, clamped)
+        if report.min_episodes == report.max_episodes:
+            self._count_field.set_help(
+                f"由总时长 ÷ 目标时长自动计算（只读）：{report.min_episodes} 集"
+            )
+        else:
+            self._count_field.set_help(
+                "由总时长 ÷ 目标时长自动计算（只读）；求解器可在 "
+                f"{report.min_episodes}–{report.max_episodes} 集间择优"
+            )
+
+    def _set_value(self, spin, value) -> None:
+        """写派生控件：置 _syncing 挡递归，临时断信号防多余的刷新。"""
+        previous = self._syncing
+        self._syncing = True
+        try:
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        finally:
+            self._syncing = previous
 
     def can_continue(self) -> tuple[bool, str]:
         settings = self.collect_settings()

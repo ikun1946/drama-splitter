@@ -457,7 +457,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_project)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_project)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._start_export)
-        # 播放控制：空格播放/停止，J/K 逐帧，←/→ 逐秒
+        # 播放控制：空格播放/暂停（与预览区按钮同一条路径），J/K 逐帧，←/→ 逐秒
         QShortcut(QKeySequence("Space"), self, activated=self._space_pressed)
         QShortcut(QKeySequence("K"), self, activated=lambda: stage_view.step_frames(-1))
         QShortcut(QKeySequence("J"), self, activated=lambda: stage_view.step_frames(1))
@@ -476,11 +476,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Esc"), self, activated=self._escape_pressed)
 
     def _space_pressed(self) -> None:
-        player = self.workbench.stage_view.player
-        if player.is_playing():
-            player.stop()
-        else:
-            self.workbench.stage_view.play_episode()
+        """空格与预览区的「播放/暂停」键完全等价（一个键两态）。"""
+        self.workbench.stage_view.toggle_playback()
 
     def _cycle_issue(self, delta: int) -> None:
         self.workbench.inspector.cycle_issue(delta)

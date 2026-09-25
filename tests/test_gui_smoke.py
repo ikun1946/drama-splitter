@@ -16,6 +16,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界�
 
 from fractions import Fraction  # noqa: E402
 
+from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
@@ -143,6 +144,330 @@ class TestWindowConstruction:
         assert any(kind == "warning" for kind, *_ in message_recorder), (
             "没有素材时应弹「尚未导入」而不是静默失败"
         )
+
+
+class TestPlayback:
+    """回归：播放按钮曾完全没有反应。
+
+    根因是 ``StreamPlayer`` 里实例属性 ``self._frame_size = (0, 0)`` 与同名方法
+    ``_frame_size()`` 撞名，属性把方法遮蔽，``self._frame_size()`` 抛 TypeError；
+    异常发生在 Qt 槽里被打印后吞掉，界面上只表现为"点了没反应"。这段代码从最早
+    的提交起就是这样，而当时的测试只调用单帧解码 ``frame_at``，从没真播过。
+    """
+
+    def test_frame_size_cache_and_source_switch(self, qapp):
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("a.mp4", size=(1920, 1080))
+        assert player._frame_size() == (960, 540), "已知分辨率时应直接算出输出尺寸"
+
+        player.set_source("b.mp4", size=(640, 360))
+        assert player._frame_size() == (640, 360), "换源必须清掉尺寸缓存，否则按旧尺寸解码"
+
+        player.set_source(None)
+        assert player._frame_size() == (0, 0)
+
+    def test_play_streams_frames_and_advances(self, qapp, binaries, assets):
+        """真播放 1.2 秒：必须产出画面且位置推进（不靠目测）。"""
+        from PySide6.QtCore import QTimer
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source(assets["cfr"], size=(320, 180))
+        player.set_fps(Fraction(25))
+        frames: list = []
+        errors: list[str] = []
+        positions: list[float] = []
+        player.frame_ready.connect(frames.append)
+        player.error.connect(errors.append)
+        player.position_changed.connect(positions.append)
+        player.set_range(0.0, 2.0)
+        player.play()
+
+        QTimer.singleShot(1200, qapp.quit)
+        qapp.exec()
+        playing_position = player.position    # stop() 会把位置复位到起点，先记下来
+        player.stop()
+
+        assert not errors, f"播放不应报错：{errors}"
+        assert frames, "播放应产出真实解码帧（此前一次都没有）"
+        assert positions, "播放头位置应有回调（时间轴/底栏靠它刷新）"
+        assert playing_position > 0.4, f"播放位置应推进，实际 {playing_position:.3f}s"
+        assert max(positions) > playing_position - 0.2, "位置回调应覆盖播放过程"
+
+
+def _import_and_wait(window, qapp, path, timeout: float = 30.0) -> None:
+    """走真实的导入路径并等探针线程结束（离屏测试没有事件循环，只能手动泵）。"""
+    import time
+
+    window.workbench.import_pane.probe(str(path))
+    worker = window.workbench.import_pane.worker
+    deadline = time.time() + timeout
+    while time.time() < deadline and worker.isRunning():
+        qapp.processEvents()
+        time.sleep(0.02)
+    qapp.processEvents()
+
+
+class TestPreviewAfterImport:
+    """回归：导入完成后预览区必须立刻有画面，且播放头在片头。
+
+    此前 ``StageView.set_project()`` 只换了解码器/播放器源与时间轴，没有解一帧，
+    画面区一直停在「尚未选择源文件」的占位文字上；要等用户点「下一帧」「−1s」
+    或拖时间轴触发 ``goto()`` 才第一次出图——用户看到的就是"导入后必须点下一帧
+    才显示视频画面"。这里直接复现导入路径并断言首帧已渲染。
+    """
+
+    @staticmethod
+    def _clean(window):
+        window.state.reset_media()
+        window.workbench.refresh()
+
+    def test_first_frame_rendered_without_stepping(self, window, qapp, binaries, assets):
+        window.state.binaries = binaries
+        self._clean(window)
+        try:
+            _import_and_wait(window, qapp, assets["cfr"])
+
+            assert window.workbench.stage is Stage.READY, "前置：探测完成后应进入就绪态"
+            preview = window.workbench.stage_view.preview
+            assert preview._image is not None, (
+                "导入完成后应立刻解出首帧，而不是等用户点「下一帧」"
+            )
+            assert preview.view.text() == "", "画面区不应仍显示占位文字"
+            assert preview._frame_index == 0, "首帧应定位到第 0 帧"
+        finally:
+            # 窗口是 module 级共享的：导入会改变顶栏标题，必须复位，
+            # 否则后面的用例（顶栏标题）会拿到被污染的初始值。
+            self._clean(window)
+
+    def test_switching_source_rewinds_playhead(self, window, qapp, binaries, assets):
+        """换一部片子后播放头必须回到片头。
+
+        回归：``StageView.position`` 原先跨换片保留，新片子会在上一部片子的
+        播放头位置起播——预览/时间轴/播放起点三处同时停在错误位置。
+        """
+        window.state.binaries = binaries
+        self._clean(window)
+        try:
+            _import_and_wait(window, qapp, assets["cfr"])
+            stage = window.workbench.stage_view
+            stage.goto(Fraction(60))
+            assert stage.position == Fraction(60), "前置：播放头已移离片头"
+
+            _import_and_wait(window, qapp, assets["nonzero_pts"])
+
+            assert stage.position == Fraction(0), (
+                f"换片后播放头应回到片头，实际 {float(stage.position):.3f}s"
+            )
+            assert stage.preview._frame_index == 0, "预览应显示新片子的首帧"
+        finally:
+            self._clean(window)
+
+
+class TestPlayPauseToggle:
+    """播放与暂停合并成一个键（按钮文案随状态变，暂停后再点续播）。
+
+    原先控制条上是「▶ 播放本集」+「■ 停止」两个键，而 ``stop()`` 只停表、
+    不复位播放头，和暂停没有可感知差别——用户要的就是一个键两态。
+    """
+
+    def test_no_stop_button_and_label_is_play(self, window):
+        from PySide6.QtWidgets import QPushButton
+
+        from app.gui.widgets.media_preview import MediaPreview
+
+        preview = window.workbench.stage_view.preview
+        labels = [b.text() for b in preview.findChildren(QPushButton)]
+        assert "■ 停止" not in labels, "停止键应与暂停合并，不再单独存在"
+        assert preview.btn_play.text() == MediaPreview.PLAY_TEXT
+
+    def test_toggle_pauses_and_resumes_from_playhead(
+        self, window, qapp, binaries, assets
+    ):
+        from PySide6.QtCore import QTimer
+
+        from app.core.probe import probe_media
+        from app.gui.widgets.media_preview import MediaPreview
+
+        window.state.reset_media()
+        window.state.media = probe_media(binaries, assets["cfr"])
+        window.state.binaries = binaries
+        window.workbench.refresh()
+
+        stage = window.workbench.stage_view
+        preview = stage.preview
+        try:
+            stage.goto(Fraction(10))
+            stage.toggle_playback()
+            assert stage.player.is_playing, "第一次点是播放"
+            assert preview.btn_play.text() == MediaPreview.PAUSE_TEXT
+
+            QTimer.singleShot(800, qapp.quit)
+            qapp.exec()
+            paused_at = stage.player.position
+
+            stage.toggle_playback()          # 第二个状态：暂停
+            assert not stage.player.is_playing
+            assert preview.btn_play.text() == MediaPreview.PLAY_TEXT
+            assert paused_at > 10.0, "播放头应真的往前走了"
+
+            stage.toggle_playback()          # 再点：从暂停处续播
+            assert stage.player.is_playing
+            assert stage.player.position >= paused_at - 0.05, (
+                "暂停后再点应接着播，而不是跳回片头/集首"
+            )
+        finally:
+            stage.player.stop()
+            window.state.reset_media()
+            window.workbench.refresh()
+
+
+class TestSettingsAutoFill:
+    """设置表单：派生目标值只读并实时反算。
+
+    - 按目标时长：时长是输入，**集数只读**且由 T÷D 反算（夹到可行区间）
+    - 按目标集数：集数 是输入，**时长只读**且由 T÷N 反算
+    反算值只用于展示/确认；内核在该模式下本来就只读另一个字段。
+    """
+
+    def _form_with_media(self, window, binaries, assets):
+        window.state.binaries = binaries
+        window.state.media = probe_media(binaries, assets["cfr"])   # 120 秒
+        form = window.build_settings_dialog().form
+        form.radio_by_duration.setChecked(True)
+        form.range_percent.setChecked(True)
+        form.tolerance_spin.setValue(0.0)
+        return form
+
+    def test_mode_a_fills_count_from_duration(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        form.duration_spin.setValue(30.0)
+
+        assert not form.duration_spin.isReadOnly(), "目标时长是用户输入，应可编辑"
+        assert form.count_spin.isReadOnly(), "按目标时长时集数是算出来的，应只读"
+        assert form.count_spin.value() == 4, (
+            f"120 秒 ÷ 30 秒应为 4 集，实际 {form.count_spin.value()}"
+        )
+        assert form._count_field._title.text() == "预计集数（自动）"
+        assert "自动计算" in form._count_field._help.text()
+
+    def test_mode_a_recomputes_live(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        for duration, expected in ((40.0, 3), (60.0, 2), (24.0, 5)):
+            form.duration_spin.setValue(duration)
+            assert form.count_spin.value() == expected, (
+                f"D={duration} 应反算为 {expected} 集，实际 {form.count_spin.value()}"
+            )
+
+    def test_mode_b_fills_duration_from_count(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.count_spin.setValue(5)
+
+        assert form.duration_spin.isReadOnly(), "按目标集数时时长是算出来的，应只读"
+        assert not form.count_spin.isReadOnly(), "目标集数是用户输入，应可编辑"
+        assert form.duration_spin.value() == pytest.approx(24.0, abs=1e-6), (
+            f"120 秒 ÷ 5 集应为 24 秒，实际 {form.duration_spin.value()}"
+        )
+        assert form._duration_field._title.text() == "预计目标时长（自动）"
+        assert form._count_field._title.text() == "目标集数 N"
+
+    def test_no_solution_does_not_guess_a_value(self, window, binaries, assets):
+        """无解时不猜集数：保留原值，理由交给可行性面板与 help 文案。"""
+        form = self._form_with_media(window, binaries, assets)
+        form.duration_spin.setValue(30.0)
+        # 切到手动上下限并设成对 120 秒源片明显无解的区间（每集 200–300 秒）
+        form.range_manual.setChecked(True)
+        form.min_spin.setValue(200.0)
+        form.max_spin.setValue(300.0)
+        before = form.count_spin.value()
+        assert "无解" in form._count_field._help.text()
+
+        # 无解状态下继续动输入：不得写入任何猜出来的集数
+        form.duration_spin.setValue(25.0)
+        assert form.count_spin.value() == before, "无解时不应写入一个猜出来的集数"
+        assert "无解" in form._count_field._help.text()
+
+    def test_without_media_keeps_value_and_hints(self, window, qapp):
+        window.state.reset_media()
+        window.workbench.refresh()
+        form = window.build_settings_dialog().form
+        assert "导入源片后自动计算" in form._count_field._help.text()
+
+
+class TestWheelDoesNotChangeValues:
+    """滚轮不改值：数值框与下拉框把滚轮量交给滚动区，页面照常滚动。"""
+
+    @staticmethod
+    def _wheel_event(widget, angle_y: int = -120):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+
+        center = QPointF(widget.rect().center())
+        return QWheelEvent(
+            center, center, QPoint(0, 0), QPoint(0, angle_y),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+
+    def _scroll_area_with(self, qapp, widget):
+        from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+        from app.gui.widgets import scrollable
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(widget)
+        for index in range(30):
+            layout.addWidget(QLabel(f"占位 {index}"))
+
+        area = scrollable(content)
+        area.resize(320, 200)
+        area.show()
+        qapp.processEvents()
+        return area
+
+    def test_spinbox_wheel_scrolls_instead_of_stepping(self, qapp):
+        from app.gui.widgets import NoWheelSpinBox
+
+        spin = NoWheelSpinBox()
+        spin.setRange(1, 9999)
+        spin.setValue(60)
+        area = self._scroll_area_with(qapp, spin)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_value, before_scroll = spin.value(), bar.value()
+
+            qapp.sendEvent(spin, self._wheel_event(spin))
+            qapp.processEvents()
+
+            assert spin.value() == before_value, "滚轮不得改变数值"
+            assert bar.value() == before_scroll + 120, "滚轮量应交给滚动区（页面照常滚）"
+        finally:
+            area.close()
+
+    def test_combo_wheel_does_not_switch_option(self, qapp):
+        from app.gui.widgets import NoWheelComboBox
+
+        combo = NoWheelComboBox()
+        combo.addItems(["a", "b", "c"])
+        combo.setCurrentIndex(1)
+        area = self._scroll_area_with(qapp, combo)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_index, before_scroll = combo.currentIndex(), bar.value()
+
+            qapp.sendEvent(combo, self._wheel_event(combo))
+            qapp.processEvents()
+
+            assert combo.currentIndex() == before_index, "滚轮不得切换下拉选项"
+            assert bar.value() == before_scroll + 120
+        finally:
+            area.close()
 
 
 class TestThemeAndTopBar:

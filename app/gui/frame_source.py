@@ -52,9 +52,26 @@ class FrameDecoder:
         self._ffmpeg = _ffmpeg_path()
         self._size: tuple[int, int] = (0, 0)
 
-    def set_source(self, path: str | Path | None) -> None:
+    def set_source(self, path: str | Path | None,
+                   size: tuple[int, int] | None = None) -> None:
+        """设定源文件；``size`` 是**已知的源分辨率**（宽, 高），可选。
+
+        传了 size 就直接算出输出尺寸。否则第一次取帧时会在调用线程里同步跑
+        一次 ffprobe（``output_size`` 里），大文件/慢盘上表现为"点一下卡一下"——
+        而调用方通常已经从媒体探测里拿到了分辨率。
+        """
         self._path = Path(path) if path else None
-        self._size = (0, 0)
+        self._size = self._scaled(size) if size else (0, 0)
+
+    def _scaled(self, size: tuple[int, int]) -> tuple[int, int]:
+        width, height = size
+        if width <= 0 or height <= 0:
+            return (0, 0)
+        out_width = min(self._max_width, width) if self._max_width else width
+        out_height = max(2, int(round(height * out_width / width)))
+        if out_height % 2:
+            out_height += 1
+        return (out_width, out_height)
 
     @property
     def source(self) -> Path | None:
@@ -140,6 +157,7 @@ class StreamPlayer(QObject):
     frame_ready = Signal(QImage)
     position_changed = Signal(float)
     playback_finished = Signal()
+    playing_changed = Signal(bool)   # 播放↔暂停（含自然播完）
     error = Signal(str)
 
     MAX_QUEUE = 48  # 预解码上限，避免长片段一次性吃掉内存
@@ -160,7 +178,10 @@ class StreamPlayer(QObject):
         self._queue: deque[bytes] = deque()
         self._lock = threading.Lock()
         self._stop_flag = threading.Event()
-        self._frame_size = (0, 0)
+        # 输出尺寸缓存。注意名字不要叫 _frame_size：那会遮蔽同名的 _frame_size()
+        # 方法，调用点直接 TypeError（本文件最早版本就这样，播放按钮因此一直
+        # 静默失效——异常在 Qt 槽里被打印后吞掉，界面上只表现为"点了没反应"）。
+        self._cached_size = (0, 0)
         self._last_frame: bytes | None = None
 
         self._timer = QTimer(self)
@@ -171,9 +192,27 @@ class StreamPlayer(QObject):
 
     # ---- 配置 ----------------------------------------------------------
 
-    def set_source(self, path: str | Path | None) -> None:
+    def set_source(self, path: str | Path | None,
+                   size: tuple[int, int] | None = None) -> None:
+        """设定源文件；``size`` 是**已知的源分辨率**（宽, 高），可选。
+
+        每次换源都要清掉尺寸缓存，否则换一个不同分辨率的片子后仍按旧尺寸
+        解码（画面糊/花或直接读不出帧）。传了 size 就直接算出输出尺寸，
+        省掉首次播放时在调用线程里同步跑的那次 ffprobe。
+        """
         self.stop()
         self._source = Path(path) if path else None
+        self._cached_size = self._scaled(size) if size else (0, 0)
+
+    def _scaled(self, size: tuple[int, int]) -> tuple[int, int]:
+        width, height = size
+        if width <= 0 or height <= 0:
+            return (0, 0)
+        out_width = min(self._max_width, width)
+        out_height = max(2, int(round(height * out_width / width)))
+        if out_height % 2:
+            out_height += 1
+        return (out_width, out_height)
 
     def set_max_width(self, width: int) -> None:
         self._max_width = max(160, width)
@@ -204,14 +243,24 @@ class StreamPlayer(QObject):
             return
         if self._playing:
             return
-        self._playing = True
+        self._set_playing(True)
         self._start_reader(self._position)
         self._timer.start(self._interval_ms())
 
     def pause(self) -> None:
-        self._playing = False
+        self._set_playing(False)
         self._timer.stop()
         self._stop_reader()
+
+    def _set_playing(self, value: bool) -> None:
+        """``_playing`` 的唯一写入口：状态没变不发信号。
+
+        「播放」键兼作「暂停」键后，按钮文案完全依赖这个信号的准确性——
+        自然播完（``_on_tick``）也必须走这里，否则键会一直停在「暂停」。
+        """
+        if self._playing != value:
+            self._playing = value
+            self.playing_changed.emit(value)
 
     def stop(self) -> None:
         self.pause()
@@ -238,8 +287,9 @@ class StreamPlayer(QObject):
         return max(8, int(round(1000.0 / float(self._fps))))
 
     def _frame_size(self) -> tuple[int, int]:
-        if self._frame_size != (0, 0):
-            return self._frame_size
+        """每帧原始字节对应的输出尺寸（``set_source`` 已知源分辨率时直接用）。"""
+        if self._cached_size != (0, 0):
+            return self._cached_size
         if self._source is None:
             return (0, 0)
         root = Path(__file__).resolve().parent.parent.parent
@@ -251,12 +301,10 @@ class StreamPlayer(QObject):
         info = probe_media(locate_ffmpeg(), self._source, detect_vfr=False)
         if info.video is None:
             return (0, 0)
-        width = min(self._max_width, info.video.width)
-        height = max(2, int(round(info.video.height * width / info.video.width)))
-        if height % 2:
-            height += 1
-        self._frame_size = (width, height)
-        return self._frame_size
+        self._cached_size = self._scaled(
+            (info.video.width, info.video.height)
+        )
+        return self._cached_size
 
     def _build_stream_command(self, start_seconds: float) -> list[str]:
         width, height = self._frame_size()
@@ -343,7 +391,7 @@ class StreamPlayer(QObject):
         if chunk is None:
             # 预解码队列空：若解码线程已结束，说明本段播完
             if self._reader is not None and not self._reader.is_alive():
-                self._playing = False
+                self._set_playing(False)
                 self._timer.stop()
                 self.playback_finished.emit()
                 return
@@ -365,7 +413,7 @@ class StreamPlayer(QObject):
         frame_duration = 1.0 / float(self._fps)
         self._position += frame_duration
         if self._end is not None and self._position > self._end + frame_duration:
-            self._playing = False
+            self._set_playing(False)
             self._timer.stop()
             self._stop_reader()
             self.playback_finished.emit()

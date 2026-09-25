@@ -41,6 +41,10 @@ class StageView(QWidget):
         self.position = Fraction(0)
         self.current_episode = 1
         self._stitch_queue: list[tuple] = []
+        # 当前绑定的媒体对象：换片（每次导入/打开项目都会产生新的 MediaInfo）
+        # 时用来判断"播放头该不该回到片头"。用对象而不是路径，因为重新导入同一
+        # 部片子也应当回到片头。
+        self._bound_media: object | None = None
 
         self.preview = MediaPreview()
         # 中栏是自适应宽度，预览给一个能看清切点画面的最小高度
@@ -54,10 +58,10 @@ class StageView(QWidget):
         layout.addWidget(self.timeline)
 
         # ---- 播放控制接线（原先散在审核页，现统一在这里） ----
-        self.preview.btn_play.clicked.connect(lambda: self.play_episode())
+        # 「播放」键兼作「暂停」键：文案由 player.playing_changed 驱动
+        self.preview.btn_play.clicked.connect(self.toggle_playback)
         self.preview.btn_boundary.clicked.connect(lambda: self.play_boundary())
         self.preview.btn_stitch.clicked.connect(lambda: self.play_stitched())
-        self.preview.btn_stop.clicked.connect(self.player.stop)
         self.preview.btn_prev_frame.clicked.connect(lambda: self.step_frames(-1))
         self.preview.btn_next_frame.clicked.connect(lambda: self.step_frames(1))
         self.preview.btn_back_1s.clicked.connect(lambda: self.step_seconds(-1.0))
@@ -67,6 +71,7 @@ class StageView(QWidget):
 
         self.player.frame_ready.connect(self.preview.set_image)
         self.player.position_changed.connect(self._on_position)
+        self.player.playing_changed.connect(self.preview.set_playing)
         self.player.playback_finished.connect(self._on_playback_finished)
         self.player.error.connect(lambda text: message.warning(self, "播放失败", text))
 
@@ -82,17 +87,37 @@ class StageView(QWidget):
         if selected_episode is not None:
             self.current_episode = selected_episode
         if media is None:
+            self._bound_media = None
+            self.player.stop()          # 换源为空时也要停掉旧片子的播放
             self.preview.clear("尚未选择源文件")
             self.timeline.set_project(None, None, {}, None)
             return
-        self.decoder.set_source(media.path)
-        self.player.set_source(media.path)
-        if media.video is not None:
-            self.player.set_fps(media.video.nominal_fps)
+        if self._bound_media is not media:
+            # 换了源片（每次导入/打开项目都是新的媒体对象）：播放头必须回到
+            # 片头。否则新片子会在上一部片子的播放头位置起播，时间轴与预览
+            # 也跟着停在那个位置。
+            self._bound_media = media
+            self._set_position(Fraction(0))
+        video = media.video
+        # 把已探测到的分辨率交给解码器：否则第一次取帧会在 GUI 线程里同步跑
+        # 一次 ffprobe（大文件上可见卡顿）
+        self.decoder.set_source(
+            media.path, size=(video.width, video.height) if video else None
+        )
+        self.player.set_source(
+            media.path, size=(video.width, video.height) if video else None
+        )
+        if video is not None:
+            self.player.set_fps(video.nominal_fps)
         self.timeline.set_project(
             media, self.state.current_plan, self.state.exported, self.current_episode
         )
         self.timeline.set_playhead(self.position)
+        # 换源/重建后立刻把当前帧画出来。否则画面区还停在上一状态（导入后
+        # 是「尚未选择源文件」的占位文字），要等用户点「下一帧」「−1s」或
+        # 拖时间轴触发 goto() 才会出图——看起来像"导入后没有画面"。
+        if video is not None:
+            self.goto(self.position)
 
     def refresh_theme(self) -> None:
         """主题切换后自绘控件需要重绘（时间轴静态层带主题色）。"""
@@ -110,7 +135,6 @@ class StageView(QWidget):
             self.preview.btn_fwd_1s,
             self.preview.btn_back_5s,
             self.preview.btn_fwd_5s,
-            self.preview.btn_stop,
         ):
             button.setEnabled(enabled)
         self.timeline.setEnabled(enabled)
@@ -172,6 +196,25 @@ class StageView(QWidget):
     def _episodes(self):
         plan = self.state.current_plan
         return plan.episodes() if plan else []
+
+    def toggle_playback(self) -> None:
+        """「播放」键兼作「暂停」键（按钮文案随状态变）。
+
+        播放中 → 暂停，播放头停在原处；未播放 → 从**当前播放头**接着播，
+        直到所在集的片尾为止。暂停后再点不跳回集首——把播放与暂停合并成一
+        个键后，这是唯一说得通的预期；要回集首用「上一帧」或拖时间轴。
+        """
+        if self.player.is_playing:
+            self.player.pause()
+            return
+        for episode in self._episodes():
+            if episode.start_seconds <= self.position < episode.end_seconds:
+                self.player.set_range(float(self.position), float(episode.end_seconds))
+                self.player.play()
+                return
+        # 没有方案（就绪阶段，整片连播）或播放头不在任何一集内（例如停在片尾）：
+        # 交给 play_episode 决定范围（整片从播放头起 / 当前集从集首起）
+        self.play_episode()
 
     def play_episode(self, index: int | None = None) -> None:
         episodes = self._episodes()
@@ -236,7 +279,11 @@ class StageView(QWidget):
         if self._stitch_queue:
             self._play_next_stitch()
         else:
-            # 回到整片源，避免下次播放还停在成片上
+            # 回到整片源，避免下次播放还停在成片上（带上已知分辨率，
+            # 否则下一次播放又要在 GUI 线程里同步跑一次 ffprobe）
             media = self.state.media
             if media is not None:
-                self.player.set_source(media.path)
+                video = media.video
+                self.player.set_source(
+                    media.path, size=(video.width, video.height) if video else None
+                )

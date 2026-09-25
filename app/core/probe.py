@@ -605,6 +605,39 @@ def _sample_frame_pts(
     per_window: list[list[Fraction]] = []
     for start in starts:
         interval = f"{max(0.0, start):.6f}%+{seg:.3f}"
+        pts, error = _window_pts(binaries, info, stream_index, interval)
+        if pts is None:
+            return [], f"区间 {interval} {error}"
+        per_window.append(pts)
+
+    if not per_window:
+        return [], "抽样区间内未读到任何帧"
+    return per_window, ""
+
+
+def _window_pts(
+    binaries: FfmpegBinaries,
+    info: MediaInfo,
+    stream_index: int,
+    interval: str,
+) -> tuple[list[Fraction] | None, str]:
+    """读一个抽样窗口内的时间戳，返回 (排序去重后的列表, 失败原因)。
+
+    读**包**时间戳而不是解码后的帧时间戳：``-show_entries frame=pts_time``
+    会让 ffprobe 解码每一帧，实测 1080p60 长 GOP 素材上 3 窗 24 秒画面要
+    **4.8 秒**；同样的窗口用 ``packet=pts_time`` 只要 **0.18 秒**，而且两者
+    给出的条数与相邻间隔逐值一致（本机实测：480/481/248 条、7 种间隔、
+    最小 0.016567 / 最大 0.016734，完全相同）。
+
+    包按解码顺序输出（B 帧会错序），因此必须排序后再用；排序后得到的就是
+    显示顺序的相邻间隔，正是"帧间隔是否均匀"要看的量。
+
+    少数容器/编码的包不带 PTS（或一个包含多帧）：该窗口读不到 ≥2 个时间戳时
+    退回到解码帧的方式，宁可慢也不能把"没读到"当成"均匀"（§10.4）。
+    """
+    last_error = ""
+    for entry in ("packet=pts_time", "frame=pts_time"):
+        key = entry.split("=")[0] + "s"
         try:
             data = run_ffprobe_json(
                 binaries,
@@ -614,7 +647,7 @@ def _sample_frame_pts(
                     "-read_intervals",
                     interval,
                     "-show_entries",
-                    "frame=pts_time",
+                    entry,
                     "-of",
                     "json",
                     str(info.path),
@@ -622,26 +655,26 @@ def _sample_frame_pts(
                 timeout=600.0,
             )
         except FfmpegError as exc:
-            return [], f"区间 {interval} 读取失败（退出码 {exc.returncode}）：{exc.stderr_tail[:200]}"
+            last_error = f"读取失败（退出码 {exc.returncode}）：{exc.stderr_tail[:200]}"
+            continue
 
-        pts: list[Fraction] = []
-        for frame in data.get("frames") or []:
-            value = _safe_seconds(frame.get("pts_time"))
+        values: list[Fraction] = []
+        for item in data.get(key) or []:
+            value = _safe_seconds(item.get("pts_time"))
             if value is None:
                 continue
             # pts_time 是流时间轴上的绝对时间戳，换算到"相对视频首帧"的时间轴秒
-            pts.append(value - info.video_start_time)
-        pts.sort()
+            values.append(value - info.video_start_time)
+        values.sort()
         deduped: list[Fraction] = []
-        for value in pts:
+        for value in values:
             if not deduped or value > deduped[-1]:
                 deduped.append(value)
-        if deduped:
-            per_window.append(deduped)
+        if len(deduped) >= 2:
+            return deduped, ""
+        last_error = last_error or f"{entry} 只读到 {len(deduped)} 个时间戳"
 
-    if not per_window:
-        return [], "抽样区间内未读到任何帧"
-    return per_window, ""
+    return None, last_error or "未读到可用时间戳"
 
 
 # ---------------------------------------------------------------------------
