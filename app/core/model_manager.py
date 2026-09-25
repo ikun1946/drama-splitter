@@ -262,16 +262,27 @@ def free_space_bytes(models_root: str | Path) -> int | None:
 
 
 def _curl(args: list[str], *, timeout: int = 60) -> tuple[int, str]:
-    """调用 curl。始终带 --noproxy 例外，避免系统代理拦掉回环地址（测试要用）。"""
-    proc = subprocess.run(
-        ["curl", "-sS", "--noproxy", "localhost,127.0.0.1", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_NO_WINDOW,
-        timeout=timeout,
-    )
+    """调用 curl。始终带 --noproxy 例外，避免系统代理拦掉回环地址（测试要用）。
+
+    返回 (退出码, 输出)。超时不抛异常而是返回退出码 28（curl 的
+    OPERATION_TIMEDOUT 语义）——remote_size / download_model 的契约是
+    「取不到就降级，绝不炸调用方」，实测 hf-mirror 对 -L -X HEAD 组合
+    可能挂起 30s+，这里必须兜住。
+    """
+    try:
+        proc = subprocess.run(
+            ["curl", "-sS", "--noproxy", "localhost,127.0.0.1", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NO_WINDOW,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 28, ""
+    except OSError as exc:
+        return -1, str(exc)
     return proc.returncode, (proc.stdout or "").strip() or (proc.stderr or "").strip()
 
 
@@ -281,18 +292,25 @@ def remote_size(url: str) -> int | None:
     必须解析 `Content-Length` 头，**不能用 `%{size_download}`**：HEAD 请求
     按定义不下载响应体，`size_download` 恒为 0，返回的永远是 None——
     这是个很隐蔽的错（进度百分比与磁盘预检会静默失效，表现为"总大小未知"）。
-    跟随重定向时会收到多个响应头，取**最后一个** content-length（最终资源的）。
 
-    部分镜像不支持 HEAD 时，退回 Range 探测（`Content-Range` 的 `总长` 段）。
+    本机实测（系统代理 + hf-mirror）：
+    - HEAD 带 `-L` 跟随重定向会**挂在 CDN 上**（30s 超时无响应）；
+    - 不带 `-L` 时 hf-mirror 先回 302，响应头里自带 `X-Linked-Size`
+      （真实文件字节数）；但 hf-mirror/代理**不按 HEAD 语义断开连接**，
+      curl 会挂在等 1065 字节的跳转页 body 上直到超时——响应头本身
+      1~2 秒内就已完整收到，因此用 `--max-time 6` 让 curl 自行退出
+      （exit 28），再从**已收到的部分头**里解析；302 的 `Content-Length`
+      只是跳转页大小（实测 1065），**绝不能当文件大小用**。
+
+    策略：HEAD（不跟随，允许超时）解析 X-Linked-Size → 200 时的
+    Content-Length → Range 探测兜底（`Content-Range` 的总长段）。
     """
-    code, output = _curl(["-sL", "-X", "HEAD", "-D", "-", "-o", os.devnull, url], timeout=30)
-    if code in (0, 18):
-        size = None
-        for line in (output or "").splitlines():
-            if line.lower().startswith("content-length:"):
-                tail = line.split(":", 1)[1].strip()
-                if tail.isdigit():
-                    size = int(tail)
+    code, output = _curl(
+        ["-s", "-X", "HEAD", "-D", "-", "-o", os.devnull, "--max-time", "6", url],
+        timeout=15,
+    )
+    if output:
+        size = _size_from_headers(output)
         if size:
             return size
 
@@ -306,6 +324,33 @@ def remote_size(url: str) -> int | None:
             tail = line.split("/")[-1].strip()
             if tail.isdigit():
                 return int(tail)
+    return None
+
+
+def _size_from_headers(output: str) -> int | None:
+    """从 HEAD 响应头提取文件大小。规则见 remote_size 的 docstring。"""
+    x_linked: int | None = None
+    content_length: int | None = None
+    status_codes: list[str] = []
+    for line in (output or "").splitlines():
+        low = line.lower()
+        if low.startswith("x-linked-size:"):
+            tail = line.split(":", 1)[1].strip()
+            if tail.isdigit():
+                x_linked = int(tail)
+        elif low.startswith("content-length:"):
+            tail = line.split(":", 1)[1].strip()
+            if tail.isdigit():
+                content_length = int(tail)
+        elif low.startswith("http/"):
+            parts = line.split(maxsplit=2)
+            if len(parts) >= 2:
+                status_codes.append(parts[1])
+    if x_linked:
+        return x_linked
+    # 只有无跳转（200 直出）时 Content-Length 才等于文件大小
+    if content_length and status_codes and status_codes[-1].startswith("2"):
+        return content_length
     return None
 
 

@@ -158,7 +158,7 @@ python -m venv .venv
 ## 验证
 
 ```bash
-# 单元与端到端测试（336 项；其中 29 项依赖合成语音素材，缺素材时跳过）
+# 单元与端到端测试（359 项；20 项按环境跳过：缺合成语音素材 / whisper 模型 / LLM 模型时）
 .venv/Scripts/python.exe -m pytest tests/ -q
 
 # 界面全链路冒烟（离屏运行，含真实编码与逐帧校验）
@@ -291,7 +291,7 @@ tools/             开发与验证工具
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             359 项自动化测试（13 个文件：330 通过 / 29 按环境跳过）
+tests/             359 项自动化测试（13 个文件：339 通过 / 20 按环境跳过）
 testdata/          合成素材（不入版本库）
 ```
 

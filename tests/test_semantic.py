@@ -532,21 +532,27 @@ class TestStrategies:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="class")
+def judge():
+    """真实 LLM 判官（类级共享）。
+
+    定义在模块级而不是类内：pytest 10 起废弃「类作用域夹具写成实例方法」，
+    且类内写法的实例属性对测试方法不可见（PytestRemovedIn10Warning）。
+    """
+    from app.core.semantic import locate_llm_model
+
+    model = locate_llm_model()
+    if model is None:
+        pytest.skip("未下载 LLM 模型。启用命令：python tools/fetch_llm.py")
+    try:
+        from app.core.semantic import LocalLlmJudge
+
+        return LocalLlmJudge.from_model_dir(model.parent, n_ctx=1024)
+    except ModelUnavailableError as exc:
+        pytest.skip(f"推理栈不可用：{exc}")
+
+
 class TestRealLLM:
-    @pytest.fixture(scope="class")
-    def judge(self):
-        from app.core.semantic import locate_llm_model
-
-        model = locate_llm_model()
-        if model is None:
-            pytest.skip("未下载 LLM 模型。启用命令：python tools/fetch_llm.py")
-        try:
-            from app.core.semantic import LocalLlmJudge
-
-            return LocalLlmJudge.from_model_dir(model.parent, n_ctx=1024)
-        except ModelUnavailableError as exc:
-            pytest.skip(f"推理栈不可用：{exc}")
-
     def test_probe_returns_valid_verdict(self, judge):
         """真实推理冒烟：输出必须是可解析的合法等级。"""
         verdict_text = judge.probe()

@@ -14,6 +14,7 @@ from fractions import Fraction
 
 import pytest
 
+from conftest import whisper_model_or_skip
 from app.core.candidates import (
     CandidatePoint,
     CandidateSet,
@@ -372,6 +373,17 @@ class TestSolveFromCandidates:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="class")
+def require_small_model():
+    """TestEndToEnd 的断言建立在 small 的转写产出上（10/10 断句、句末 3.80s 等）。
+
+    模型缺失时 AnalysisWorker 会跳过转写，上述假设全部落空——此时必须跳过
+    而不是失败，与 test_asr.py 的 whisper_model_or_skip 同一惯例。
+    """
+    return whisper_model_or_skip("small")
+
+
+@pytest.mark.usefixtures("require_small_model")
 class TestEndToEnd:
     """语音视频 → 转写 → 候选 → 动态规划 → 方案 的完整链路。"""
 
