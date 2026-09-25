@@ -398,6 +398,57 @@ class TestSettingsAutoFill:
         assert "导入源片后自动计算" in form._count_field._help.text()
 
 
+class TestAllowedCountInterval:
+    """允许集数区间：默认隐藏，只在「按目标集数 + 弹性集数」下出现且自洽。
+
+    原先它一直显示但灰掉，默认值 58–62 对多数素材既无意义又与名义目标冲突
+    （校验要求 N 落在区间内），一切到「弹性集数」就报"参数不完整"。
+    """
+
+    def _form(self, window, binaries, assets):
+        window.state.binaries = binaries
+        window.state.media = probe_media(binaries, assets["cfr"])
+        return window.build_settings_dialog().form
+
+    def test_hidden_unless_flexible_count_mode(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        assert form._flexible_row.isHidden(), "按目标时长模式下不该出现"
+
+        form.radio_by_count.setChecked(True)
+        assert form._flexible_row.isHidden(), "严格集数下也不该出现"
+
+        form.policy_flexible.setChecked(True)
+        assert not form._flexible_row.isHidden(), "弹性集数下应出现"
+
+        form.radio_by_duration.setChecked(True)
+        assert form._flexible_row.isHidden(), "切回按目标时长应再隐藏"
+
+    def test_seeded_around_nominal_count(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.count_spin.setValue(5)
+        form.policy_flexible.setChecked(True)
+
+        assert (form.allowed_min.value(), form.allowed_max.value()) == (4, 6), (
+            "刚切到弹性集数时应给出围绕名义目标的区间（N±1）"
+        )
+        text = form.feasibility.toPlainText()
+        assert "参数不完整" not in text, "切到弹性集数不该立刻报参数不完整"
+        assert "名义目标 5 集" in text
+
+    def test_user_edit_is_not_overwritten(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.policy_flexible.setChecked(True)
+        form.allowed_min.setValue(3)
+        form.allowed_max.setValue(9)
+
+        form.count_spin.setValue(6)   # 之后改名义目标，区间不应被自动覆盖
+        assert (form.allowed_min.value(), form.allowed_max.value()) == (3, 9), (
+            "用户亲手改过的区间不应再被自动跟随覆盖"
+        )
+
+
 class TestWheelDoesNotChangeValues:
     """滚轮不改值：数值框与下拉框把滚轮量交给滚动区，页面照常滚动。"""
 
@@ -468,6 +519,63 @@ class TestWheelDoesNotChangeValues:
             assert bar.value() == before_scroll + 120
         finally:
             area.close()
+
+
+class TestNoStrayTopLevelWindows:
+    """回归：打开分集设置时不得弹出任何多余的小窗口。
+
+    ``LabeledField`` 的后缀标签原先没有父级，构造时又调了
+    ``setVisible(True)``——Qt 里这等于"显示一个真正的顶层窗口"，于是 4 个带
+    单位（秒 / ％）的字段各弹出一个十几像素的小窗，这正是用户看到的"奇怪的小
+    窗口"。这里用 app 级事件过滤器抓全过程被 show 过的窗口，比"事后看顶层窗口"
+    更严：一闪而过的也逃不掉（事后它们已被重新设父并隐藏）。
+    """
+
+    def test_settings_dialog_shows_no_stray_window(self, window, qapp):
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QWidget
+
+        shown: list[str] = []
+
+        class _ShowSpy(QObject):
+            def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+                # 离屏平台下同一事件也会发给 QWindow（没有 isWindow()），
+                # 我们只关心"被显示成一个窗口的控件"
+                if (
+                    event.type() == QEvent.Type.Show
+                    and isinstance(obj, QWidget)
+                    and obj.isWindow()
+                ):
+                    shown.append(type(obj).__name__)
+                return False
+
+        spy = _ShowSpy()
+        qapp.installEventFilter(spy)
+        dialog = window.build_settings_dialog()
+        dialog.show()
+        qapp.processEvents()
+        qapp.removeEventFilter(spy)
+        try:
+            assert set(shown) == {"SettingsDialog"}, (
+                f"打开分集设置只应显示对话框本身，实际还弹出了：{shown}"
+            )
+        finally:
+            dialog.close()
+            qapp.processEvents()
+
+    def test_suffix_still_lands_in_the_field_row(self, window):
+        """后缀必须真的挂进字段行：修"小窗口"不能把单位（秒 / ％）修没了。"""
+        from PySide6.QtWidgets import QLineEdit
+
+        from app.gui.widgets import LabeledField
+
+        field = LabeledField("目标时长", suffix="秒")
+        field.attach(QLineEdit())
+        assert field._suffix_lbl.text() == "秒"
+        assert field._row.indexOf(field._suffix_lbl) >= 0, "后缀没挂进字段行"
+        assert field._suffix_lbl.parent() is field, (
+            "后缀标签必须有父级，否则 setVisible(True) 会把它变成顶层小窗口"
+        )
 
 
 class TestThemeAndTopBar:

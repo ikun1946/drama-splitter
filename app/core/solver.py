@@ -384,70 +384,105 @@ class CandidateGraphSolver:
     # ---- 诊断（§10.4）--------------------------------------------------
 
     def _explain_no_path(self, requested: int) -> str:
-        """无路径时给出可操作的成因，而不是一句"无解"。
+        """无路径时给出「一句话成因 + 该怎么调设置」。
 
-        「DP 第 N 层无可达节点」是对的现象但不是有用的解释。用户需要知道
-        **该去补什么**：是第一集没有可用切点、中间有空白区间、还是集数本身不成立。
+        「DP 第 N 层已无可达节点」是现象不是解释，用户照着它改不了任何东西。
+        这里只留两类信息：**哪一段切不动**、**把哪个参数改成多少**（原先同一段话
+        还会因为拼了 describe() 而整段重复两遍，报错框里全是重复内容）。
         """
-        reasons: list[str] = []
         low, high = self._low_frames, self._high_frames
         total = self._total_frames
+        low_s = float(self.derived.min_duration)
+        high_s = float(self.derived.max_duration)
+        total_s = total / self._fps
 
+        causes: list[str] = []
+        # 建议按成因分组：同一组内的几项是"调哪个都行"（如减集数或放宽集长），
+        # 组间用"；"并列；同一参数被多组各要求一个界时只留更严的那个。
+        groups: list[list[tuple[str, str, float]]] = []
+
+        def fmt(parameter: str, relation: str, value: float) -> str:
+            shown = f"{int(value)} 集" if parameter == "目标集数" else f"{value:.1f}s"
+            if parameter == "目标集数":
+                verb = "提到" if relation == "≥" else "降到"
+            else:
+                verb = "放宽到"          # 集长上下限都只说"放宽"，"提高上限"对用户没意义
+            return f"{parameter}{verb} {relation} {shown}"
+
+        # ① 集数与集长本身矛盾：与候选点无关，改设置就能解
         if requested * low > total:
-            reasons.append(
-                f"{requested} 集至少需要 {requested * low} 帧"
-                f"（每集不低于 {float(self.derived.min_duration):.1f}s），"
-                f"全片只有 {total} 帧"
+            causes.append(
+                f"{requested} 集至少需要 {requested * low_s:.1f}s"
+                f"（每集不低于 {low_s:.1f}s），全片只有 {total_s:.1f}s"
             )
-        if requested * high < total:
-            reasons.append(
-                f"{requested} 集最多容纳 {requested * high} 帧"
-                f"（每集不超过 {float(self.derived.max_duration):.1f}s），"
-                f"全片有 {total} 帧"
+            groups.append(
+                [("目标集数", "≤", int(total // low)), ("最短集长", "≤", total_s / requested)]
+            )
+        elif requested * high < total:
+            causes.append(
+                f"{requested} 集最多容纳 {requested * high_s:.1f}s"
+                f"（每集不超过 {high_s:.1f}s），全片有 {total_s:.1f}s"
+            )
+            groups.append(
+                [("目标集数", "≥", -(-total // high)), ("最长集长", "≥", total_s / requested)]
             )
 
-        # 成因一：第一集无法结束——片头之后的 [L,U] 窗口内没有任何候选点。
-        # 这是最常见的情形：对白句末的节奏与用户指定的集长不匹配。
-        low_seconds = Fraction(low, self._fps)
-        high_seconds = Fraction(high, self._fps)
-        candidates_after_head = [
-            node for node in self._nodes
-            if node.kind == "candidate" and low_seconds <= node.time <= high_seconds
-        ]
-        if not candidates_after_head:
-            later = [node for node in self._nodes if node.kind == "candidate" and node.time > high_seconds]
-            earlier = [node for node in self._nodes if node.kind == "candidate" and node.time < low_seconds]
-            if later:
-                nearest = min(later, key=lambda n: n.time)
-                reasons.append(
-                    f"第一集无法结束：片头之后 {float(low_seconds):.1f}–{float(high_seconds):.1f}s "
-                    f"内没有任何候选点，最近的候选在 {float(nearest.time):.2f}s。"
-                    "可放宽集长范围，或接受第一集更长（由整体规划在候选中就近取舍）"
-                )
-            elif earlier:
-                reasons.append(
-                    f"第一集无法结束：所有候选都早于 {float(low_seconds):.1f}s，"
-                    f"剩余区间没有可用切点"
-                )
+        # ② 片头之后 [L,U] 窗口里没有候选点 → 第一集结束不了。
+        # 这是最常见的一类：对白句末的节奏与设定的集长对不上。
+        points = [node for node in self._nodes if node.kind == "candidate"]
+        in_window = [n for n in points if low <= n.frame <= high]
+        before = [n for n in points if n.frame < low]
+        after = [n for n in points if n.frame > high]
+        jumped = not in_window and bool(after)
+        if jumped:
+            nearest = min(after, key=lambda n: n.frame)
+            causes.append(
+                f"第一集无法结束：{low_s:.1f}–{high_s:.1f}s 内没有候选切点，"
+                f"最近的候选在 {float(nearest.time):.1f}s"
+            )
+            group = [("最长集长", "≥", float(nearest.time))]
+            if before:
+                last = max(before, key=lambda n: n.frame)
+                group.append(("最短集长", "≤", float(last.time)))
+            groups.append(group)
+        elif not in_window and before:
+            last = max(before, key=lambda n: n.frame)
+            causes.append(
+                f"第一集无法结束：候选点都在 {float(last.time):.1f}s 之前，"
+                f"达不到最短集长 {low_s:.1f}s"
+            )
+            groups.append([("最短集长", "≤", float(last.time))])
 
-        if self.diagnostics.blocking_gaps:
-            first = self.diagnostics.blocking_gaps[0]
-            reasons.append(
-                f"候选点之间存在 {float(first[1] - first[0]):.1f}s 的空白区间"
-                f"（{float(first[0]):.1f}s–{float(first[1]):.1f}s），"
-                f"超过最长集长 {float(self.derived.max_duration):.1f}s，"
-                f"任何方案都无法覆盖——需要补充该区间的候选点"
+        # ③ 某段候选点间距超过最长集长：这一段任何方案都跨不过去
+        # （②已经点出"候选点跳档"时不再重复同一件事）
+        if self.diagnostics.blocking_gaps and not jumped:
+            start, end = self.diagnostics.blocking_gaps[0]
+            causes.append(
+                f"{float(start):.1f}s–{float(end):.1f}s 是 {float(end - start):.1f}s 的空白区间，"
+                f"超过最长集长 {high_s:.1f}s"
             )
-        if self.diagnostics.unreachable_layers:
-            reasons.append(
-                f"DP 第 {self.diagnostics.unreachable_layers} 层已无可达节点"
-            )
-        if not reasons:
-            reasons.append(
-                "在当前候选与集长约束下没有可行路径；"
-                "可放宽集长范围或增加候选来源后重试"
-            )
-        return "；".join(reasons)
+            groups.append([("最长集长", "≥", float(end - start))])
+
+        if not causes:
+            causes.append("当前候选点与集长范围下没有可行切分")
+
+        # 同一参数只留最严的界：更松的那个已被蕴含（"≥50s；≥80s" 只会让人困惑）
+        tightest: dict[str, tuple[str, float]] = {}
+        for group in groups:
+            for parameter, relation, value in group:
+                old = tightest.get(parameter)
+                if old is None or (value > old[1] if relation == "≥" else value < old[1]):
+                    tightest[parameter] = (relation, value)
+
+        advices = []
+        for group in groups:
+            kept = [fmt(p, r, v) for p, r, v in group if tightest[p] == (r, v)]
+            if kept:
+                advices.append("，或".join(kept))
+        if not advices:
+            advices.append("放宽集长范围（调大浮动比例或改上下限）后重试")
+
+        return "；".join(causes[:2]) + "。\n建议：" + "；".join(advices) + "。"
 
 
 class _NoPathError(RuntimeError):
@@ -516,11 +551,9 @@ def solve_from_candidates(
         else:
             solution = solver.solve_flexible(allowed_min, allowed_max)
     except _NoPathError as exc:
-        problem = PlanProblem(
-            "NO_PATH_IN_GRAPH",
-            "block",
-            f"候选图中不存在满足约束的路径。{exc}",
-        )
+        # 说明文字自身已是「成因 + 建议」，不再套"候选图中不存在满足约束的路径"
+        # 这类前言——报错框里每一行都要能照着改设置。
+        problem = PlanProblem("NO_PATH_IN_GRAPH", "block", str(exc))
         empty_solution = GraphSolution(diagnostics=exc.diagnostics)
         return _empty_plan(media), empty_solution, [problem], notes
 

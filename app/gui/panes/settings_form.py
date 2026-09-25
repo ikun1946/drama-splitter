@@ -53,6 +53,9 @@ class SettingsForm(QWidget):
         self.state = state
         # 反算写回派生控件时会再次触发 _refresh，用它挡住递归
         self._syncing = False
+        # 上一次刷新时「允许集数区间」是否可见：只在"刚切进弹性集数"那一次
+        # 做自洽兜底，之后用户怎么改都不再插手
+        self._was_flexible = False
         # 本表单由设置对话框承载（对话框正文套滚动容器）。显式给出能容纳双栏的
         # 最小宽度，窄窗口下横向滚动兜底，而不是把两栏压成"一列 90px"。
         self.setMinimumWidth(640)
@@ -97,12 +100,18 @@ class SettingsForm(QWidget):
         for w in (self.allowed_min, self.allowed_max):
             w.valueChanged.connect(self._refresh)
 
-        flexible_row = QHBoxLayout()
+        # 允许集数区间只在「按目标集数 + 弹性集数」下有意义，其余情况整行隐藏
+        # （原先是一直显示但灰掉，默认值 58–62 对多数素材都是无意义且自相矛盾的）
+        self._flexible_row = QWidget(self)
+        flexible_row = QHBoxLayout(self._flexible_row)
+        flexible_row.setContentsMargins(0, 0, 0, 0)
         flexible_row.addWidget(QLabel("允许集数区间："))
         flexible_row.addWidget(self.allowed_min)
         flexible_row.addWidget(QLabel("–"))
         flexible_row.addWidget(self.allowed_max)
         flexible_row.addStretch(1)
+        # 默认隐藏：只有「按目标集数 + 弹性集数」下它才有定义（见 _refresh）
+        self._flexible_row.setVisible(False)
 
         count_card = Card("目标集数 / 时长", parent=self)
         # 同一个框在两种模式下含义不同：手里的输入 vs 系统算出来的值
@@ -117,7 +126,7 @@ class SettingsForm(QWidget):
         count_card.body_layout.addSpacing(4)
         count_card.body_layout.addWidget(self.policy_exact)
         count_card.body_layout.addWidget(self.policy_flexible)
-        count_card.body_layout.addLayout(flexible_row)
+        count_card.body_layout.addWidget(self._flexible_row)
         self._count_card = count_card
 
         # ---- 范围来源 ----
@@ -299,8 +308,15 @@ class SettingsForm(QWidget):
         self._sync_editable_fields(by_count)
         self.policy_exact.setEnabled(by_count)
         self.policy_flexible.setEnabled(by_count)
-        self.allowed_min.setEnabled(by_count and settings.count_policy == CountPolicy.FLEXIBLE)
-        self.allowed_max.setEnabled(by_count and settings.count_policy == CountPolicy.FLEXIBLE)
+        # 允许集数区间只在「按目标集数 + 弹性集数」下有定义，其余情况整行隐藏
+        flexible = by_count and settings.count_policy == CountPolicy.FLEXIBLE
+        self._flexible_row.setVisible(flexible)
+        if flexible and not self._was_flexible:
+            # 刚切进弹性集数：若区间与名义目标自相矛盾（如默认 58–62）先兜底一次，
+            # 此后用户怎么改都不再插手
+            self._seed_allowed_range(settings)
+            settings = self.collect_settings()   # 把兜底后的区间纳入本次校验与判定
+        self._was_flexible = flexible
         manual = self.range_manual.isChecked()
         self.min_spin.setEnabled(manual)
         self.max_spin.setEnabled(manual)
@@ -386,6 +402,23 @@ class SettingsForm(QWidget):
 
     # ---- 自动反算（派生字段只读） --------------------------------------
 
+    def _seed_allowed_range(self, settings) -> None:
+        """刚切进弹性集数时的一次性兜底：区间不含名义目标就收回 N-1 – N+1。
+
+        58–62 这类与名义目标冲突的默认值（或项目里残留的旧值）会让校验直接报
+        「名义目标 N 不在允许区间内」，一选弹性就卡住。**只在切进来的这一次**
+        做，且只在区间确实不含名义目标时做——用户随后的任何修改都不再被覆盖。
+        """
+        nominal = settings.target_episode_count or 0
+        if nominal <= 0:
+            return
+        low = settings.allowed_count_min or 0
+        high = settings.allowed_count_max or 0
+        if low <= nominal <= high:
+            return
+        self._set_value(self.allowed_min, max(1, nominal - 1))
+        self._set_value(self.allowed_max, nominal + 1)
+
     def _sync_editable_fields(self, by_count: bool) -> None:
         """源字段可编辑、派生字段只读；标题随模式说明哪个是算出来的。
 
@@ -406,6 +439,14 @@ class SettingsForm(QWidget):
         )
         self._duration_field.set_label("预计目标时长（自动）" if by_count else "目标时长")
         self._count_field.set_label("目标集数 N" if by_count else "预计集数（自动）")
+
+        # 推荐方案：分析时由系统把三种策略各解一遍再取代价最低者，此时手选
+        # 「策略」既不会决定最终取向、又让人以为"我选的生效了"，索性置灰说清。
+        recommend = self.radio_recommend.isChecked()
+        self.strategy_combo.setEnabled(not recommend)
+        self._strategy_field.set_help(
+            "推荐方案会自动比较三种策略，取总代价最低者" if recommend else ""
+        )
 
     def _set_derived_help(self, by_count: bool, text: str) -> None:
         field = self._duration_field if by_count else self._count_field

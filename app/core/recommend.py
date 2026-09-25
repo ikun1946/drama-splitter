@@ -28,6 +28,13 @@ __all__ = ["StrategyComparison", "Recommendation", "recommend_plan"]
 
 DEFAULT_STRATEGIES = ("story", "suspense", "duration")
 
+# 策略的内部标识 → 界面/日志里给人看的名字（与设置里的「策略」下拉一致）
+STRATEGY_LABELS = {
+    "story": "剧情优先",
+    "suspense": "悬念优先",
+    "duration": "时长优先",
+}
+
 
 @dataclass
 class StrategyComparison:
@@ -43,13 +50,18 @@ class StrategyComparison:
     problems: list = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def label(self) -> str:
+        """给人看的策略名（日志里不暴露 story/suspense/duration 这类标识）。"""
+        return STRATEGY_LABELS.get(self.name, self.name)
+
     def describe(self) -> str:
         if not self.ok:
             failed = self.problems[0].message if self.problems else "无解"
-            return f"{self.name}：失败（{failed}）"
+            return f"{self.label}：失败（{failed}）"
         cuts = "、".join(f"{float(t):.2f}s" for t in self.cut_times)
         return (
-            f"{self.name}：{self.episode_count} 集，代价 {self.total_cost:.4f}，"
+            f"{self.label}：{self.episode_count} 集，代价 {self.total_cost:.4f}，"
             f"切点 {cuts}"
         )
 
@@ -65,7 +77,7 @@ class Recommendation:
         for comparison in self.comparisons:
             lines.append(f"  {comparison.describe()}")
         if self.chosen is not None:
-            lines.append(f"推荐：{self.chosen.name}（代价 {self.chosen.total_cost:.4f}）")
+            lines.append(f"推荐：{self.chosen.label}（代价 {self.chosen.total_cost:.4f}）")
         else:
             lines.append("无可用方案：所有策略均无解，请查看各自成因")
         for note in self.notes:

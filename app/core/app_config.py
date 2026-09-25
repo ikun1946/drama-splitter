@@ -20,6 +20,8 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .model_manager import WHISPER_TIERS, spec_by_key
+
 __all__ = ["AppConfig", "config_path", "default_models_root"]
 
 
@@ -49,7 +51,8 @@ class AppConfig:
 
     models_dir: str | None = None       # 用户指定的模型根目录
     endpoint: str = "https://hf-mirror.com"
-    last_download_key: str | None = None  # 上次选择的模型（下次打开时预选中）
+    asr_model_tier: str | None = None   # 使用中的转写档位；None = 默认档位
+    llm_model_key: str | None = None    # 使用中的语义模型（"llm:2B:Q4_K_M"）；None = 自动
     theme: str = "light"                # 界面主题：light / dark
     extra: dict = field(default_factory=dict)
 
@@ -67,10 +70,20 @@ class AppConfig:
         theme = str(data.get("theme") or "light")
         if theme not in ("light", "dark"):
             theme = "light"
+        # "使用中"的档位/模型必须真的存在且类型正确；否则回落 None（= 用默认），
+        # 避免手改配置或换目录后指向一个不存在的模型。
+        tier = data.get("asr_model_tier")
+        if tier not in {name for name, _, _ in WHISPER_TIERS}:
+            tier = None
+        key = data.get("llm_model_key")
+        llm_spec = spec_by_key(str(key)) if key else None
+        if llm_spec is None or llm_spec.kind != "llm":
+            key = None
         return cls(
             models_dir=data.get("models_dir"),
             endpoint=str(data.get("endpoint") or "https://hf-mirror.com"),
-            last_download_key=data.get("last_download_key"),
+            asr_model_tier=tier,
+            llm_model_key=key,
             theme=theme,
             extra=dict(data.get("extra") or {}),
         )

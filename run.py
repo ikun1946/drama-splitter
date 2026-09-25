@@ -138,19 +138,28 @@ def _ui_smoke() -> int:
     model_dialog = window.build_model_dialog()
     model_dialog.show()
     page = model_dialog.form
-    print(f"模型清单：{page.table.rowCount()} 项")
-    for row in range(page.table.rowCount()):
+    rows = page.rows()
+    print(f"模型清单：{len(rows)} 行（语音转写 {sum(1 for r in rows if r['kind'] == 'whisper')} 档"
+          f" + 语义判断 {sum(1 for r in rows if r['kind'] == 'llm')} 档）")
+    for row in rows:
         print(
-            f"  {page.table.item(row, 0).text():34s} "
-            f"{page.table.item(row, 2).text()}"
+            f"  {row['label']:22s} {row['size_text']:16s} {row['state']:24s} "
+            f"{'● 使用中' if row['in_use'] else '○'}  [{row['action']}]"
         )
     print(f"模型目录：{page.dir_edit.text()}")
     page._refresh()
     app.processEvents()
 
     # 核心工作流是单页三栏；设置与模型是对话框，不占工作区。
-    if page.table.rowCount() == 0:
-        print("界面自检失败：模型清单为空")
+    whisper_rows = [row for row in page.rows() if row["kind"] == "whisper"]
+    active_rows = [row for row in page.rows() if row["in_use"]]
+    if not whisper_rows:
+        print("界面自检失败：转写档位一行都没有")
+        return 1
+    if len(active_rows) != 2 and not (len(active_rows) == 1 and not any(
+        row["kind"] == "llm" for row in page.rows()
+    )):
+        print(f"界面自检失败：两组的「使用中」应各恰有一个，实际 {len(active_rows)}")
         return 1
     if len(window.menuBar().actions()) != 4:
         print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")

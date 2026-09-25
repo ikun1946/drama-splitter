@@ -257,6 +257,53 @@ class TestNoPathDiagnostics:
             solver.solve_exact(2)
         assert "空白区间" in str(excinfo.value)
 
+    def test_message_is_two_lines_of_cause_and_advice(self, media):
+        """报错要能照着改设置：一句话成因 + 建议，不留内部 DP 术语。
+
+        原先一句里塞了「第一集无法结束…；空白区间…；DP 第 [2] 层已无可达节点」，
+        再被 workers 拼一次 describe() 整段重复——用户看到的是一屏重复文字。
+        """
+        solver = CandidateGraphSolver(
+            candidates_at([10, 90]), media, derived(30, 10, 30)
+        )
+        solver.build()
+        with pytest.raises(_no_path_error()) as excinfo:
+            solver.solve_exact(2)
+        message = str(excinfo.value)
+        assert "DP 第" not in message, "内部 DP 状态对用户没有可操作性"
+        assert message.splitlines()[0].endswith("。")
+        assert message.splitlines()[1].startswith("建议：")
+        assert len(message.splitlines()) == 2, f"最多两行：{message}"
+
+    def test_advice_tightens_same_parameter_instead_of_repeating(self, media):
+        """同一参数被两条成因各要求一个界时只留更严的。
+
+        2 集 × U=30s 装不下 100s，同时 10s→90s 有 80s 空白区间：两条成因都要求
+        放宽最长集长，正确答案是 ≥80s——绝不能并列成"≥50s；≥80s"。
+        """
+        solver = CandidateGraphSolver(
+            candidates_at([10, 90]), media, derived(30, 10, 30)
+        )
+        solver.build()
+        with pytest.raises(_no_path_error()) as excinfo:
+            solver.solve_exact(2)
+        advice = str(excinfo.value).splitlines()[1]
+        assert advice.count("最长集长") == 1, f"同一参数只应给一个界：{advice}"
+        assert "80.0s" in advice, f"应给出更严的那个界：{advice}"
+
+    def test_first_episode_advice_uses_real_candidate_times(self, media):
+        """建议里的数值必须是真实候选点位置，用户才能判断该放宽到什么程度。"""
+        solver = CandidateGraphSolver(
+            candidates_at([5, 25]), media, derived(12, 9.6, 14.4, 100)
+        )
+        solver.build()
+        with pytest.raises(_no_path_error()) as excinfo:
+            solver.solve_exact(8)   # 8×9.6 ≤ 100 ≤ 8×14.4，只剩"窗口内无候选"这一条成因
+        message = str(excinfo.value)
+        assert "第一集无法结束" in message
+        assert "25.0s" in message, f"应给出最近的候选位置：{message}"
+        assert "5.0s" in message, f"应给出放宽最短集长的上限：{message}"
+
     def test_flexible_range_with_no_feasible_count(self, media):
         solver = CandidateGraphSolver(
             candidates_at([10, 90]), media, derived(30, 10, 30)
@@ -427,6 +474,10 @@ class TestEndToEnd:
             f"报错应包含可操作的成因：{message}"
         )
         assert "最近的候选在" in message, f"应指出最近的可用候选位置：{message}"
+        assert "建议：" in message, f"应给出该怎么调设置：{message}"
+        assert message.count("建议：") == 1, (
+            f"同一段成因+建议只应出现一次（曾因拼 message 与 describe 整段重复）：{message}"
+        )
         assert "plan" not in outcome, "无解时不得产出方案"
 
     def test_dp_path_with_wider_range(self, binaries, speech_video):
