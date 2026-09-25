@@ -47,3 +47,6 @@ config.json
 
 # 本地改动备份（改文件前的 .bak-YYYY-MM-DD）
 *.bak-*
+
+# 项目快照（自动保存在媒体文件旁，属用户数据不入库）
+*.drama-project

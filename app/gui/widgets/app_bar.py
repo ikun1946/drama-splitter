@@ -61,7 +61,11 @@ class AppBar(QFrame):
         self.stepper = StepIndicator(steps)
         self.stepper.clicked.connect(self.step_clicked)
 
-        # 右：主题切换 + 更换视频 + 设置/模型
+        # 右：保存状态 + 主题切换 + 更换视频 + 设置/模型
+        self.save_label = QLabel("")
+        self.save_label.setProperty("role", "status-text")
+        self.save_label.setStyleSheet("padding: 0 4px;")
+
         self.btn_theme = QPushButton("🌙 深色")
         self.btn_theme.setProperty("role", "ghost")
         self.btn_theme.setToolTip("切换深色 / 浅色主题（选择会记住）")
@@ -85,6 +89,7 @@ class AppBar(QFrame):
         right_holder = QHBoxLayout()
         right_holder.setContentsMargins(8, 0, 16, 0)
         right_holder.setSpacing(4)
+        right_holder.addWidget(self.save_label)
         right_holder.addWidget(self.btn_theme)
         right_holder.addWidget(self.btn_change_source)
         right_holder.addWidget(self.btn_settings)
@@ -118,6 +123,14 @@ class AppBar(QFrame):
     def set_theme_label(self, mode: str) -> None:
         """按当前主题更新切换按钮文案：显示的是「将要切过去的」那一档。"""
         self.btn_theme.setText("☀ 浅色" if mode == "dark" else "🌙 深色")
+
+    def set_save_status(self, text: str) -> None:
+        """顶栏保存状态（方案 §七：显示项目保存状态）。
+
+        常用文案：空（无可保存内容）、「● 未保存」、「已保存 HH:MM」、
+        「自动保存 HH:MM」。
+        """
+        self.save_label.setText(text)
 
     def set_steps(self, steps: list[str]) -> None:
         self.stepper.set_steps(steps)

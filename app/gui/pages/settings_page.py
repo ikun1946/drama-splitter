@@ -233,6 +233,49 @@ class SettingsPage(QWidget):
     def refresh_from_state(self) -> None:
         self._refresh()
 
+    def apply_settings(self, settings) -> None:
+        """把一份 SplitSettings 回填到控件（打开项目 / 恢复会话用）。
+
+        控件是参数的唯一录入面（collect_settings 从控件收集），因此恢复
+        也必须走控件：直接改 state.settings 会被下一次 _refresh 用控件值
+        覆盖回去。回填后立即刷新一次可行性提示。
+        """
+        mode = settings.split_mode
+        self.radio_by_duration.setChecked(mode == SplitMode.TARGET_DURATION)
+        self.radio_by_count.setChecked(mode == SplitMode.TARGET_EPISODE_COUNT)
+        self.radio_recommend.setChecked(mode == SplitMode.RECOMMEND)
+        # 各字段都可能为 None（取决于模式），None 就保留控件现值
+        if settings.target_duration_seconds is not None:
+            self.duration_spin.setValue(float(settings.target_duration_seconds))
+        if settings.target_episode_count is not None:
+            self.count_spin.setValue(settings.target_episode_count)
+        exact = settings.count_policy == CountPolicy.EXACT
+        self.policy_exact.setChecked(exact)
+        self.policy_flexible.setChecked(not exact)
+        if settings.allowed_count_min is not None:
+            self.allowed_min.setValue(settings.allowed_count_min)
+        if settings.allowed_count_max is not None:
+            self.allowed_max.setValue(settings.allowed_count_max)
+
+        spec = settings.range
+        percent = spec.mode == RangeMode.PERCENT
+        self.range_percent.setChecked(percent)
+        self.range_manual.setChecked(not percent)
+        if spec.tolerance is not None:
+            self.tolerance_spin.setValue(float(spec.tolerance) * 100)
+        if spec.manual_min is not None:
+            self.min_spin.setValue(float(spec.manual_min))
+        if spec.manual_max is not None:
+            self.max_spin.setValue(float(spec.manual_max))
+
+        index = self.strategy_combo.findData(settings.strategy.value)
+        if index >= 0:
+            self.strategy_combo.setCurrentIndex(index)
+        self.allow_exception.setChecked(settings.allow_episode_exceptions)
+
+        self.state.settings = settings
+        self._refresh()
+
     def _refresh(self) -> None:
         settings = self.collect_settings()
 

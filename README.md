@@ -117,7 +117,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §12.2 缓存按源失效（重算） | `app/core/cache.py` | 完成 |
 | §9.3 完整帧表（VFR 地基） | `app/core/probe.py` | 完成（生成与核验；导出仍要求 CFR） |
 | §15 硬件编码器探测 | `app/core/ffmpeg.py` | 完成 |
-| § 任务恢复（项目快照） | `app/gui/state.py` | 完成 |
+| § 任务恢复（项目快照）+ §五十五/五十六 保存 / 打开 / 自动保存 | `app/gui/state.py`、`app/gui/main_window.py` | 完成 |
 | §15 打包与部署自检 | `tools/build_package.py` + `run.py --self-check` | 完成 |
 
 已知限制（不静默蒙混，都在界面上如实说明）：
@@ -274,7 +274,7 @@ app/gui/           界面（PySide6-Essentials）
     review_page.py     审核
     export_page.py     导出
     model_page.py      模型（抽屉）
-  state.py           项目状态与方案版本链
+  state.py           项目状态与方案版本链（快照 payload + 原子落盘）
   workers.py         后台工作线程（BaseWorker + 探测/规划/分析/导出/下载）
   frame_source.py    帧级预览（单帧解码 + 流式播放）
   main_window.py     主窗口与装配（页面切换、顶栏、抽屉、快捷键）

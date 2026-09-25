@@ -194,6 +194,144 @@ class TestThemeAndTopBar:
         window.nav.setCurrentRow(0)
 
 
+class TestProjectPersistence:
+    """第 4 步：项目保存 / 打开 / 自动保存（方案 §五十五 / §五十六）。
+
+    open_project 的媒体恢复走真实 ffprobe（与既有 fixtures 同一素材），
+    方案链重建在探针完成后异步发生——测试里用 wait_until 风格的事件泵等它。
+    """
+
+    @staticmethod
+    def _wait(qapp, predicate, timeout=10.0):
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            qapp.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    @staticmethod
+    def _build_plan(media, cuts):
+        from fractions import Fraction
+
+        from app.core.plan import BoundaryPlan
+
+        time_base = media.video_time_base
+        ticks = [0] + [time_base.seconds_to_ticks(Fraction(str(c))) for c in cuts]
+        ticks.append(media.duration_ticks())
+        return BoundaryPlan(
+            boundary_ticks=ticks, time_base=time_base, total_ticks=media.duration_ticks()
+        )
+
+    def test_save_then_open_roundtrip(self, window, qapp, binaries, assets, tmp_path):
+        from fractions import Fraction
+
+        from app.core.settings import RangeSpec, SplitSettings
+
+        window.state.binaries = binaries
+        window.import_page._probe(str(assets["cfr"]))
+        assert self._wait(
+            qapp,
+            lambda: window.import_page._worker and not window.import_page._worker.isRunning(),
+        ), "探测超时"
+        qapp.processEvents()
+
+        settings = SplitSettings(
+            split_mode=SplitMode.TARGET_DURATION,
+            target_duration_seconds=Fraction(30),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(0)),
+        )
+        window.state.settings = settings
+        plan = self._build_plan(window.state.media, [30, 60, 90])
+        window.state.add_plan(plan)
+        window.state.audio_stream_index = 0
+
+        path = tmp_path / "roundtrip.drama-project"
+        assert window.save_project(path) == path
+        assert path.exists()
+        assert window.app_bar.save_label.text().startswith("已保存")
+
+        # 破坏现场，再从项目文件恢复
+        window.state.reset_media()
+        window.state.settings = SplitSettings()
+        window.open_project(path)
+        assert self._wait(
+            qapp,
+            lambda: window.state.media is not None and bool(window.state.plans),
+        ), "打开项目后未完成恢复"
+
+        assert window.state.settings.target_duration_seconds == Fraction(30)
+        assert window.state.settings.range.tolerance == Fraction(0)
+        assert len(window.state.plans) == 1
+        restored = window.state.plans[0]
+        assert list(restored.boundary_ticks) == list(plan.boundary_ticks)
+        assert window.state.project_path == path
+
+    def test_autosave_only_writes_when_dirty(
+        self, window, qapp, binaries, assets, tmp_path
+    ):
+        window.state.binaries = binaries
+        window.import_page._probe(str(assets["cfr"]))
+        assert self._wait(
+            qapp,
+            lambda: window.import_page._worker and not window.import_page._worker.isRunning(),
+        )
+        qapp.processEvents()
+
+        target = tmp_path / "auto.drama-project"
+        window.state.project_path = target
+        window._autosave_tick()
+        assert target.exists(), "首次自动保存应落盘"
+        first = target.read_text(encoding="utf-8")
+
+        # 内容没变 → 不重写
+        window._autosave_tick()
+        assert target.read_text(encoding="utf-8") == first
+
+        # 方案变了 → 下一个 tick 落盘新内容
+        window.state.add_plan(self._build_plan(window.state.media, [30, 60, 90]))
+        window._autosave_tick()
+        assert target.read_text(encoding="utf-8") != first
+
+    def test_apply_settings_roundtrip(self, window):
+        from fractions import Fraction
+
+        from app.core.settings import (
+            CountPolicy,
+            RangeMode,
+            RangeSpec,
+            SplitMode,
+            SplitSettings,
+            Strategy,
+        )
+
+        original = SplitSettings(
+            split_mode=SplitMode.TARGET_EPISODE_COUNT,
+            target_episode_count=12,
+            count_policy=CountPolicy.FLEXIBLE,
+            allowed_count_min=10,
+            allowed_count_max=15,
+            target_duration_seconds=Fraction(45),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(1, 10)),
+            strategy=Strategy.SUSPENSE,
+            allow_episode_exceptions=True,
+        )
+        window.settings_page.apply_settings(original)
+        collected = window.settings_page.collect_settings()
+        assert collected.split_mode == SplitMode.TARGET_EPISODE_COUNT
+        assert collected.target_episode_count == 12
+        assert collected.count_policy == CountPolicy.FLEXIBLE
+        assert collected.allowed_count_min == 10
+        assert collected.allowed_count_max == 15
+        assert collected.range.tolerance == Fraction(1, 10)
+        assert collected.strategy == Strategy.SUSPENSE
+        assert collected.allow_episode_exceptions is True
+
+
+
 class TestWorkers:
     """工作线程的构造参数与信号契约。
 

@@ -13,10 +13,14 @@ MainWindow 与装配逻辑（页面构建、页面切换、顶栏 stepper、抽�
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,7 +34,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.app_config import AppConfig
+from ..core.plan import BoundaryPlan
 from ..core.probe import check_compatibility
+from ..core.settings import SplitSettings
 from .pages import (
     ExportPage,
     ModelPage,
@@ -39,7 +45,7 @@ from .pages import (
     WorkbenchPage,
     scrollable,
 )
-from .state import ProjectState
+from .state import ProjectState, payload_text
 from .theme import apply_theme, current_mode
 from .widgets import (
     AppBar,
@@ -220,6 +226,148 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(0)
         self._install_shortcuts()
 
+        # ---- 项目保存 / 自动保存（方案 §五十五 / §五十六） ----
+        #
+        # 脏检测不做事件钩子（改参数/挪切点/确认审核/开始导出的入口太多），
+        # 而是每 30 秒把快照序列化一遍和上次比对：字节不同才算脏。
+        # 序列化一个方案链是毫秒级开销，比给每个事件源加钩子可靠得多。
+        self._last_saved_text: str | None = None
+        self._pending_restore: dict | None = None
+        self._autosave = QTimer(self)
+        self._autosave.setInterval(30_000)
+        self._autosave.timeout.connect(self._autosave_tick)
+        self._autosave.start()
+
+    # ---- 项目保存 / 打开 / 自动保存 ------------------------------------
+
+    def _autosave_tick(self, force: bool = False) -> None:
+        """定期保存：内容没变不写盘，后台任务运行中不打扰。
+
+        没有显式项目路径时存到媒体文件旁（``<媒体名>.drama-project``），
+        崩溃/误退后重开即恢复——这正是 §五十六 要防的「两小时分析后丢失」。
+        """
+        if not force and self.is_busy():
+            return
+        if self.state.media is None and not self.state.plans:
+            return
+        text = payload_text(self.state.snapshot_payload())
+        if not force and text == self._last_saved_text:
+            return
+        target = self.state.project_path
+        if target is None:
+            if self.state.media is None:
+                return
+            target = Path(self.state.media.path).with_suffix(".drama-project")
+        try:
+            self.state.save_snapshot(target)
+        except OSError as exc:
+            self.hint.setText(f"自动保存失败：{exc}")
+            return
+        self.state.project_path = target
+        self._last_saved_text = text
+        self.app_bar.set_save_status(f"自动保存 {time.strftime('%H:%M')}")
+
+    def save_project(self, path: str | Path | None = None) -> Path | None:
+        """另存/保存项目文件。返回实际写入路径；用户取消返回 None。"""
+        if path is None and self.state.project_path is None:
+            stem = Path(self.state.media.path).stem if self.state.media else "未命名项目"
+            suggested = str(Path.home() / f"{stem}.drama-project")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "保存项目", suggested, "项目文件 (*.drama-project)"
+            )
+            if not path:
+                return None
+            if not path.endswith(".drama-project"):
+                path += ".drama-project"
+        target = Path(path) if path is not None else self.state.project_path
+        assert target is not None
+        try:
+            self.state.save_snapshot(target)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return None
+        self.state.project_path = target
+        self._last_saved_text = payload_text(self.state.snapshot_payload())
+        self.app_bar.set_save_status(f"已保存 {time.strftime('%H:%M')}")
+        return target
+
+    def open_project(self, path: str | Path | None = None) -> bool:
+        """打开项目文件：设置立即恢复，媒体异步探针，方案在探针完成后重建。
+
+        返回是否开始了恢复（媒体缺失/文件损坏时给明确提示并返回 False）。
+        """
+        if self.is_busy():
+            self.hint.setText("后台任务进行中，结束后再打开项目。")
+            return False
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "打开项目", "", "项目文件 (*.drama-project *.json)"
+            )
+            if not path:
+                return False
+        try:
+            payload = ProjectState.load_snapshot(Path(path))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "打开失败", f"项目文件无法读取：\n{exc}")
+            return False
+
+        media_path = payload.get("media_path")
+        if not media_path or not Path(media_path).exists():
+            QMessageBox.warning(
+                self, "源视频缺失",
+                f"项目引用的源视频不存在：\n{media_path}\n\n"
+                "请先把源文件放回原位置再打开项目。",
+            )
+            return False
+
+        self.state.project_path = Path(path)
+        self.state.reset_media()
+        settings = (
+            SplitSettings.from_json(payload["settings"])
+            if payload.get("settings") else SplitSettings()
+        )
+        self.settings_page.apply_settings(settings)
+
+        # 方案重建需要 time_base / total_ticks，只能等探针完成（_maybe_finish_restore）
+        self._pending_restore = payload
+        self._last_saved_text = None
+        self.import_page._probe(str(media_path))
+        self.nav.setCurrentRow(0)
+        return True
+
+    def _maybe_finish_restore(self) -> None:
+        """探针成功后重建方案版本链与导出记录（由 _sync_top_bar 触发）。"""
+        payload = self._pending_restore
+        if payload is None or self.state.media is None:
+            return
+        self._pending_restore = None
+
+        time_base = self.state.media.video_time_base
+        total_ticks = self.state.media.duration_ticks()
+        self.state.plans = [
+            BoundaryPlan.from_json(item, time_base, total_ticks)
+            for item in payload.get("plans", [])
+        ]
+        cursor = max(0, len(self.state.plans) - 1)
+        wanted = payload.get("current_plan_version")
+        if wanted is not None:
+            for index, plan in enumerate(self.state.plans):
+                if plan.version == wanted:
+                    cursor = index
+                    break
+        self.state.plan_cursor = cursor
+        self.state.exported = {
+            int(episode): (Path(entry["path"]), int(entry["version"]))
+            for episode, entry in (payload.get("exported") or {}).items()
+        }
+        # 以刚打开的文件为「干净」基线，避免自动保存立刻重写一遍
+        self._last_saved_text = payload_text(self.state.snapshot_payload())
+        self.app_bar.set_save_status(f"已打开 {time.strftime('%H:%M')}")
+        if self.state.plans:
+            self.review_page.refresh()
+            self._refresh_inspector()
+
+
     # ---- 活跃任务登记 ----
     #
     # 五个后台任务分散在四个页面类里，各自持有 self._worker。这里做一层全局登记，
@@ -261,8 +409,10 @@ class MainWindow(QMainWindow):
             worker.wait(wait_ms)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        """退出前把后台线程停干净，否则 ffmpeg 子进程会变成孤儿。"""
+        """退出前把后台线程停干净，再补一次收尾保存，否则 ffmpeg 子进程会
+        变成孤儿、两小时的编辑成果可能丢失。"""
         self.cancel_all_workers()
+        self._autosave_tick(force=True)
         super().closeEvent(event)
 
     # ---- 顶栏 stepper 点击 → 跳对应 PAGES ----
@@ -306,6 +456,8 @@ class MainWindow(QMainWindow):
             self.app_bar.set_source(Path(media.path).name, str(media.path))
         else:
             self.app_bar.set_source(None)
+        # 打开项目后探针刚完成 → 在这里续上方案链重建
+        self._maybe_finish_restore()
 
     def _on_drawer_closed(self, pages_index: int) -> None:
         # 抽屉关闭时把 nav 跳回工作区，否则 nav 停在抽屉项上，
@@ -353,6 +505,9 @@ class MainWindow(QMainWindow):
         # 上一步 / 下一步
         QShortcut(QKeySequence("Left"), self, activated=lambda: self._navigate(-1))
         QShortcut(QKeySequence("Right"), self, activated=lambda: self._navigate(1))
+        # 项目保存 / 打开（方案 §五十五）
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_project)
+        QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_project)
         # 跳到指定页：Ctrl+1..N（按 PAGES 长度，抽屉也在内）
         for i in range(1, len(self.PAGES) + 1):
             QShortcut(

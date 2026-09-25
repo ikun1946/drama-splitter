@@ -15,7 +15,18 @@ from ..core.plan import BoundaryPlan
 from ..core.probe import MediaInfo
 from ..core.settings import SplitSettings
 
-__all__ = ["ProjectState"]
+__all__ = ["ProjectState", "payload_text"]
+
+
+def payload_text(payload: dict) -> str:
+    """快照 dict 的规范化序列化。
+
+    落盘与主窗口的脏检测必须用同一个函数：两边字节一致才算「没变」，
+    否则自动保存会因为格式差异每次都误判为脏。
+    """
+    import json
+
+    return json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True)
 
 
 @dataclass
@@ -48,15 +59,13 @@ class ProjectState:
 
     # ---------------- 任务恢复（阶段5） ----------------
 
-    def save_snapshot(self, path: "Path") -> "Path":
-        """把可恢复的项目状态写到磁盘（§ 任务恢复）。
+    def snapshot_payload(self) -> dict:
+        """构建快照数据（不落盘）。
 
-        只存"重新打开后能继续工作"所需的最小集合：源片路径、参数、方案版本链、
-        锁定切点与导出进度。转写/镜头等可由缓存重建的数据不入快照。
+        独立于 save_snapshot 存在：主窗口的自动保存用「序列化结果变没变」
+        判断脏状态，需要在不写文件的前提下拿到可比较的 dict。
         """
-        import json
-
-        payload = {
+        return {
             "schema": 1,
             "media_path": str(self.media.path) if self.media else None,
             "audio_stream_index": self.audio_stream_index,
@@ -68,10 +77,19 @@ class ProjectState:
                 for episode, (path, version) in self.exported.items()
             },
         }
+
+    def save_snapshot(self, path: "Path") -> "Path":
+        """把可恢复的项目状态写到磁盘（§ 任务恢复 / 方案 §五十五）。
+
+        只存"重新打开后能继续工作"所需的最小集合：源片路径、参数、方案版本链、
+        锁定切点与导出进度。转写/镜头等可由缓存重建的数据不入快照。
+        原子写：先落 .tmp 再 replace，断电不会留下半截文件。
+        """
+        payload = self.snapshot_payload()
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.write_text(payload_text(payload), encoding="utf-8")
         tmp.replace(target)
         return target
 
