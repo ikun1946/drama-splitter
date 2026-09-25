@@ -377,6 +377,42 @@ class TestProjectPersistence:
 
 
 
+class TestImportPreview:
+    """回归：导入完成后预览必须出图，不能留着占位文案。
+
+    用户报告「选好视频之后画面还写着尚未选择源文件」：绑定媒体时没有任何地方
+    解码首帧（只有用户主动 seek 才有画面），而画面区最大的那块文字正好是这句
+    占位提示——导入明明成功，看起来却像视频没选上。
+    """
+
+    def test_import_decodes_first_frame(self, window, qapp, binaries, assets):
+        window.state.binaries = binaries
+        window.state.reset_media()
+        window.workbench.refresh()
+        assert window.workbench.stage is Stage.EMPTY
+
+        window.workbench.import_pane.probe(str(assets["cfr"]))
+        assert TestProjectPersistence._wait(
+            qapp,
+            lambda: window.workbench.import_pane.worker
+            and not window.workbench.import_pane.worker.isRunning(),
+        ), "探测超时"
+        qapp.processEvents()
+
+        assert window.workbench.stage is Stage.READY
+        preview = window.workbench.stage_view.preview
+        assert preview.view.text() == "", (
+            f"导入后画面仍显示占位文案：{preview.view.text()!r}——"
+            "绑定媒体后应立即解出第一帧"
+        )
+        assert not preview.view.pixmap().isNull(), "导入后预览应显示真实解码帧"
+        assert window.workbench.stage_view.position == 0, "新片源的播放头应归零"
+
+        # 同一片源重刷（方案改动、锁切点都会走 set_project）不得把画面清回占位
+        window.workbench.refresh()
+        assert preview.view.text() == "" and not preview.view.pixmap().isNull()
+
+
 class TestWorkers:
     """工作线程的构造参数与信号契约。
 

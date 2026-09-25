@@ -41,6 +41,8 @@ class StageView(QWidget):
         self.position = Fraction(0)
         self.current_episode = 1
         self._stitch_queue: list[tuple] = []
+        # 已绑定到解码器的源片（用于区分"换了片源"与"同一片源重刷方案"）
+        self._bound_source: str | None = None
 
         self.preview = MediaPreview()
         # 中栏是自适应宽度，预览给一个能看清切点画面的最小高度
@@ -82,6 +84,7 @@ class StageView(QWidget):
         if selected_episode is not None:
             self.current_episode = selected_episode
         if media is None:
+            self._bound_source = None
             self.preview.clear("尚未选择源文件")
             self.timeline.set_project(None, None, {}, None)
             return
@@ -93,6 +96,20 @@ class StageView(QWidget):
             media, self.state.current_plan, self.state.exported, self.current_episode
         )
         self.timeline.set_playhead(self.position)
+
+        if self._bound_source != str(media.path):
+            # 新片源：播放头归零并立刻解出第一帧。本类之外没有任何地方会在
+            # "刚导入"这一刻取图（只有用户主动 seek 才有画面），不补这一步，
+            # 画面上会一直挂着"尚未选择源文件"——用户明明刚选完视频，看到的
+            # 却是最大的一块"没选文件"，会以为导入失败。
+            self._bound_source = str(media.path)
+            if media.video is None:
+                # 只有音轨的素材没有画面可解，如实说明而不是报"解码失败"
+                self.position = Fraction(0)
+                self.preview.clear("源文件没有视频轨")
+                self.timeline.set_playhead(self.position)
+                return
+            self.goto(Fraction(0))
 
     def refresh_theme(self) -> None:
         """主题切换后自绘控件需要重绘（时间轴静态层带主题色）。"""
