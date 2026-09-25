@@ -13,7 +13,6 @@ MainWindow 与装配逻辑（页面构建、页面切换、顶栏 stepper、抽�
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -28,23 +27,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.probe import check_compatibility
+from .pages import (
+    ExportPage,
+    ModelPage,
+    ReviewPage,
+    SettingsPage,
+    WorkbenchPage,
+    scrollable,
+)
 from .state import ProjectState
 from .theme import apply_theme
 from .widgets import (
     AppBar,
     Drawer,
+    InspectorIssue,
     MediaPreview,
     StepNav,
     StepState,
-)
-from .pages import (
-    AnalysisPage,
-    ExportPage,
-    ImportPage,
-    ModelPage,
-    ReviewPage,
-    SettingsPage,
-    scrollable,
 )
 
 # 本模块不再直接弹窗，但 QMessageBox 在本命名空间下是既有的公共接口面：
@@ -63,12 +63,18 @@ class PreviewPanel(MediaPreview):
 
 
 class MainWindow(QMainWindow):
-    PAGES = ["导入", "设置", "分析", "审核", "导出", "模型"]
+    # 三页工作区 + 两个抽屉（设置 / 模型不进核心工作流，见方案 §五）
+    PAGES = ["工作台", "设置", "审核", "导出", "模型"]
 
-    # stepper 显示用的 4 个工作阶段（≠PAGES 6 项）
+    # 抽屉在 PAGES 中的位置（不占 stack 位）
+    DRAWER_INDICES = {1: "settings", 4: "model"}
+
+    # stepper 仍是四步：工作台承担前两步（导入 + 分析）
     STEPPER_NAMES = ["导入", "分析", "审核", "导出"]
-    # PAGES 0/2/3/4 对应 stepper 0/1/2/3；PAGES 1/5 走抽屉
-    _STEPPER_INDEX = {0: 0, 2: 1, 3: 2, 4: 3}
+    # PAGES 0 对应 stepper 0/1（工作台覆盖导入与分析）；PAGES 2/3 对应 stepper 2/3
+    _STEPPER_INDEX = {0: 0, 2: 2, 3: 3}
+    # PAGES 索引 → stack 索引（抽屉不占 stack 位）
+    _STACK_INDEX = {0: 0, 2: 1, 3: 2}
 
     def __init__(self) -> None:
         super().__init__()
@@ -116,23 +122,25 @@ class MainWindow(QMainWindow):
         strip_layout.addWidget(self.status_progress, 1)
         strip_layout.addWidget(self.status_right)
 
-        # 主工作区 stack：4 个工作页 + 2 个占位（凑 count()==6，兼容测试）
+        # 主工作区 stack：三页（工作台 / 审核 / 导出）
+        #
+        # 设置与模型不占 stack 位置，走顶栏图标打开的抽屉（方案 §五：只保留
+        # 三个核心页面，模型与程序配置属系统设置，不进核心工作流）。
         self.stack = QStackedWidget()
-        self.import_page = ImportPage(self.state)
+
+        self.workbench_page = WorkbenchPage(self.state)
         self.settings_page = SettingsPage(self.state)
-        self.analysis_page = AnalysisPage(self.state)
         self.review_page = ReviewPage(self.state)
         self.export_page = ExportPage(self.state)
         self.model_page = ModelPage(self.state)
 
-        for page in (
-            self.import_page,
-            self._make_placeholder("设置（点击右上角 ⚙）"),
-            self.analysis_page,
-            self.review_page,
-            self.export_page,
-            self._make_placeholder("模型管理（点击右上角 🤖）"),
-        ):
+        # 兼容既有引用：导入与分析已并入工作台，这两个名字指向其中的对应视图。
+        # import_page 指向真正的 ImportPage（探针线程、兼容性清单在其中），
+        # analysis_page 指向真正的 AnalysisPage，二者都挂在工作台内部。
+        self.import_page = self.workbench_page.import_view
+        self.analysis_page = self.workbench_page.analysis_view
+
+        for page in (self.workbench_page, self.review_page, self.export_page):
             self.stack.addWidget(page)
 
         # 底部 action bar：提示 + 继续按钮
@@ -195,7 +203,7 @@ class MainWindow(QMainWindow):
 
         self.model_drawer = Drawer("模型管理", parent=central)
         self.model_drawer.set_body(scrollable(self.model_page))
-        self.model_drawer.closed.connect(lambda: self._on_drawer_closed(5))
+        self.model_drawer.closed.connect(lambda: self._on_drawer_closed(4))
 
         # 状态条已经把「导入状态 + 第 N / M 步」显示了一遍，QMainWindow 的原生
         # 状态栏会再显示一遍同样内容。因此隐藏原生状态栏，只保留对象本身
@@ -207,21 +215,6 @@ class MainWindow(QMainWindow):
 
         self.nav.setCurrentRow(0)
         self._install_shortcuts()
-
-    @staticmethod
-    def _make_placeholder(text: str) -> QWidget:
-        """stack 凑数用的占位 widget：实际入口是顶栏的图标按钮。"""
-        w = QFrame()
-        w.setStyleSheet("QFrame { background: #f5f6fa; }")
-        layout = QVBoxLayout(w)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet(
-            "color: #5f6368; font-size: 14pt; background: transparent;"
-        )
-        layout.addWidget(label)
-        return w
 
     # ---- 活跃任务登记 ----
     #
@@ -271,41 +264,49 @@ class MainWindow(QMainWindow):
     # ---- 顶栏 stepper 点击 → 跳对应 PAGES ----
 
     def _on_stepper_clicked(self, index: int) -> None:
-        # index 是 stepper 中的 0..3，对应 PAGES 0/2/3/4
+        # index 是 stepper 中的 0..3，对应 PAGES 0/2/3
         inv = {v: k for k, v in self._STEPPER_INDEX.items()}
         if index in inv:
             self.nav.setCurrentRow(inv[index])
 
     def _on_drawer_closed(self, pages_index: int) -> None:
-        # 抽屉关闭时，把 nav 也跳回当前工作区（避免误判 can_continue）
-        cur = self.nav.currentRow()
-        if cur == pages_index:
-            # 回退到最近的 stepper index
+        # 抽屉关闭时把 nav 跳回工作区，否则 nav 停在抽屉项上，
+        # 会让底部按钮的「继续」判定落空（抽屉不在工作流里）。
+        if self.nav.currentRow() == pages_index:
             self.nav.setCurrentRow(0)
 
     def _on_continue_clicked(self) -> None:
-        """底部按钮：根据当前阶段做不同动作。"""
+        """底部按钮：根据当前阶段做不同动作。
+
+        工作台一页承担导入与分析两职，因此这里的 0 分支要按「媒体是否就绪」
+        再分流一次：未导入时先检查导入前置，已导入时启动分析或进入审核。
+        """
         cur = self.nav.currentRow()
-        if cur == 0:    # 导入 → 分析
-            ok, msg = self.import_page.can_continue()
-            if not ok:
-                self.hint.setText(msg); return
-            self.nav.setCurrentRow(2)
-        elif cur == 2:  # 分析
-            # 分析完成后才能继续
+        if cur == 0:                          # 工作台
+            if self.state.media is None:      # 还没导入 → 只检查导入前置
+                ok, msg = self.import_page.can_continue()
+                if not ok:
+                    self.hint.setText(msg)
+                    return
+                return
             if self.analysis_page._worker and self.analysis_page._worker.isRunning():
-                self.hint.setText("分析进行中，请先取消或等待"); return
+                self.hint.setText("分析进行中，请先取消或等待")
+                return
             if self.state.current_plan is None:
-                # 触发开始
                 self.analysis_page._start()
                 return
-            self.nav.setCurrentRow(3)
-        elif cur == 3:  # 审核 → 导出
+            ok, msg = self.workbench_page.can_continue()
+            if not ok:
+                self.hint.setText(msg)
+                return
+            self.nav.setCurrentRow(2)
+        elif cur == 2:                        # 审核 → 导出
             ok, msg = self.review_page.can_continue()
             if not ok:
-                self.hint.setText(msg); return
-            self.nav.setCurrentRow(4)
-        elif cur == 4:  # 导出
+                self.hint.setText(msg)
+                return
+            self.nav.setCurrentRow(3)
+        elif cur == 3:                        # 导出
             self.export_page._start(None)
 
     # ---- 键盘快捷键 --------------------------------------------------
@@ -314,7 +315,7 @@ class MainWindow(QMainWindow):
         # 上一步 / 下一步
         QShortcut(QKeySequence("Left"), self, activated=lambda: self._navigate(-1))
         QShortcut(QKeySequence("Right"), self, activated=lambda: self._navigate(1))
-        # 跳到指定页：Ctrl+1..6
+        # 跳到指定页：Ctrl+1..N（按 PAGES 长度，抽屉也在内）
         for i in range(1, len(self.PAGES) + 1):
             QShortcut(
                 QKeySequence(f"Ctrl+{i}"),
@@ -338,13 +339,12 @@ class MainWindow(QMainWindow):
     def _nav_changed(self, index: int) -> None:
         if index < 0:
             return
-        # 1/5 = 抽屉；0/2/3/4 = 工作区 stack
-        if index == 1:
-            self.stack.setCurrentIndex(1)
+        drawer = self.DRAWER_INDICES.get(index)
+        if drawer == "settings":
+            # 抽屉是浮层，不切 stack：底下仍停在用户原来的工作页
             self.settings_drawer.show()
             self.settings_page.refresh_from_state()
-        elif index == 5:
-            self.stack.setCurrentIndex(5)
+        elif drawer == "model":
             self.model_drawer.show()
         else:
             # 关闭所有抽屉
@@ -352,8 +352,9 @@ class MainWindow(QMainWindow):
                 self.settings_drawer.hide()
             if self.model_drawer.isVisible():
                 self.model_drawer.hide()
-            # 索引直接对应 stack 中的位置（0..5）
-            self.stack.setCurrentIndex(index)
+            stack_index = self._STACK_INDEX.get(index)
+            if stack_index is not None:
+                self.stack.setCurrentIndex(stack_index)
 
         self._refresh_nav_states()
 
@@ -362,7 +363,7 @@ class MainWindow(QMainWindow):
                 f"第 {self._STEPPER_INDEX[index] + 1} / {len(self.STEPPER_NAMES)} 步"
             )
         else:
-            self.status_right.setText("⚙ 设置" if index == 1 else "🤖 模型")
+            self.status_right.setText("⚙ 设置" if drawer == "settings" else "🤖 模型")
 
         self._on_page_shown(index)
 
@@ -372,40 +373,41 @@ class MainWindow(QMainWindow):
         pass
 
     def _refresh_nav_states(self) -> None:
-        """更新 stepper 的 4 个状态 + nav 内部 6 项状态。"""
+        """更新 stepper 的 4 个状态 + nav 内部 5 项状态（3 工作区 + 2 抽屉）。"""
         cur = self.nav.currentRow()
 
-        # nav 内部 6 项（保持与 PAGES 对齐，test 仍可读 nav 状态）
+        # ---- nav 内部状态 ----
+        # 0 工作台：导入与分析合并，媒体就绪即算完成开头的导入环节
+        # 1 设置（抽屉）、4 模型（抽屉）：不在工作流上，只反映选中
+        # 2 审核、3 导出：沿用原来的阶段判定
+        has_plan = self.state.current_plan is not None
+        confirmed = bool(
+            has_plan and self.state.current_plan.semantic_review_status == "confirmed"
+        )
+
         nav_states: list[StepState] = [StepState.FUTURE] * len(self.PAGES)
-        nav_states[0] = (
-            StepState.DONE if self.state.media is not None
-            else (StepState.CURRENT if cur == 0 else StepState.FUTURE)
-        )
-        nav_states[1] = (
-            StepState.CURRENT if cur == 1
-            else (StepState.DONE if self.state.media else StepState.FUTURE)
-        )
-        if self.state.current_plan is not None:
-            nav_states[2] = StepState.DONE
+        # 0 工作台
+        if has_plan:
+            nav_states[0] = StepState.DONE
         else:
-            nav_states[2] = StepState.CURRENT if cur == 2 else StepState.FUTURE
-        if self.state.current_plan is not None:
-            nav_states[3] = (
-                StepState.DONE
-                if self.state.current_plan.semantic_review_status == "confirmed"
-                else StepState.CURRENT
-            )
+            nav_states[0] = StepState.CURRENT if cur == 0 else StepState.FUTURE
+        # 1 设置（抽屉）
+        nav_states[1] = StepState.CURRENT if cur == 1 else StepState.FUTURE
+        # 2 审核
+        if has_plan:
+            nav_states[2] = StepState.DONE if confirmed else StepState.CURRENT
+        else:
+            nav_states[2] = StepState.FUTURE
+        # 3 导出
+        if self.state.exported:
+            nav_states[3] = StepState.DONE
+        elif has_plan:
+            nav_states[3] = StepState.CURRENT if cur == 3 else StepState.FUTURE
         else:
             nav_states[3] = StepState.FUTURE
-        if self.state.exported:
-            nav_states[4] = StepState.DONE
-        else:
-            nav_states[4] = (
-                StepState.CURRENT if cur == 4
-                else (StepState.DONE if self.state.current_plan else StepState.FUTURE)
-            )
-        nav_states[5] = StepState.CURRENT if cur == 5 else StepState.FUTURE
-        if 0 <= cur < len(nav_states):
+        # 4 模型（抽屉）
+        nav_states[4] = StepState.CURRENT if cur == 4 else StepState.FUTURE
+        if 0 <= cur < len(nav_states) and cur not in self.DRAWER_INDICES:
             nav_states[cur] = StepState.CURRENT
         self.nav.set_states(nav_states)
 
@@ -434,15 +436,17 @@ class MainWindow(QMainWindow):
         elif self.state.current_plan is not None:
             step_states[3] = StepState.CURRENT
 
-        # 抽屉打开时强制 stepper 不高亮
-        if cur in (1, 5):
+        # 抽屉打开时强制 stepper 不高亮（抽屉不在工作流上）
+        if cur in self.DRAWER_INDICES:
             for i in range(len(step_states)):
                 if step_states[i] == StepState.CURRENT:
                     step_states[i] = StepState.DONE
-            # 但要让当前工作区阶段高亮（如果没有 done）
-            if cur == 5:
-                # 模型抽屉不影响 stepper
-                pass
+        # 工作台同时承担「导入 + 分析」两步：停在 0 时按实际进度补一个高亮
+        if cur == 0 and not any(s == StepState.CURRENT for s in step_states):
+            if self.state.media is None:
+                step_states[0] = StepState.CURRENT
+            elif self.state.current_plan is None:
+                step_states[1] = StepState.CURRENT
         # 当前 stepper index（若在工作区）
         cur_step = self._STEPPER_INDEX.get(cur, -1)
         if cur_step >= 0 and step_states[cur_step] != StepState.DONE:
@@ -456,21 +460,25 @@ class MainWindow(QMainWindow):
 
         # 「继续」按钮文案
         if cur == 0:
-            self.btn_continue.setText("下一步：分析  →")
-        elif cur == 2:
-            if self.analysis_page._worker and self.analysis_page._worker.isRunning():
+            # 工作台：媒体没导进来先让用户导入；导进来后再按分析进度给文案
+            if self.state.media is None:
+                self.btn_continue.setText("继续  →")
+            elif self.analysis_page._worker and self.analysis_page._worker.isRunning():
                 self.btn_continue.setText("分析进行中…")
                 self.btn_continue.setEnabled(False)
                 return
-            self.btn_continue.setEnabled(True)
-            self.btn_continue.setText("▶  开始分析" if self.state.current_plan is None else "下一步：审核  →")
-        elif cur == 3:
+            else:
+                self.btn_continue.setText(
+                    "下一步：审核  →" if self.state.current_plan is not None
+                    else "▶  开始分析"
+                )
+        elif cur == 2:
             self.btn_continue.setText("下一步：导出  →")
-        elif cur == 4:
+        elif cur == 3:
             self.btn_continue.setText("▶  开始导出")
         else:
             self.btn_continue.setText("继续  →")
-        self.btn_continue.setEnabled(cur in (0, 2, 3, 4))
+        self.btn_continue.setEnabled(cur in (0, 2, 3))
 
         # 模型通知徽章：若全部模型未安装 → 提示
         try:
@@ -489,26 +497,61 @@ class MainWindow(QMainWindow):
 
     def _on_page_shown(self, index: int) -> None:
         self.hint.setText("")
-        if index == 3:
+        if index == 0:
+            # 工作台：导入区与审核页共用切点数据，进入时刷新一次
+            self.workbench_page.inspector.set_tab(0)
+            self._refresh_inspector()
+        elif index == 2:
             self.review_page.refresh()
-        elif index == 4:
-            self.export_page.refresh()
         # 状态条左
         if self.state.media is not None:
             self.status_left.setText(f"源文件：{self.state.media.path}")
         else:
             self.status_left.setText("未导入源视频")
 
+    def _refresh_inspector(self) -> None:
+        """把当前状态里能看出来的风险汇总到右栏检查器（方案 §二十四）。"""
+        issues: list[InspectorIssue] = []
+        state = self.state
+
+        # 兼容性阻断
+        if state.media is not None and state.binaries is not None:
+            for issue in check_compatibility(state.media, state.binaries):
+                if not issue.is_blocking:
+                    continue
+                issues.append(
+                    InspectorIssue(
+                        title=issue.message,
+                        detail=issue.detail or "",
+                        priority="P0",
+                        key=f"compat:{issue.code}",
+                    )
+                )
+
+        # 逐集复核风险（Phase 4 的 grade / risks）
+        for review in state.episode_reviews or []:
+            for risk in review.risks:
+                priority = "P0" if review.grade == "block" else "P1"
+                issues.append(
+                    InspectorIssue(
+                        title=risk,
+                        priority=priority,
+                        episode=review.episode,
+                        key=f"review:{review.episode}",
+                    )
+                )
+
+        self.workbench_page.inspector.set_issues(issues)
+
     def _current_page(self):
-        """返回对应阶段的页面（仅工作区 4 个）。"""
-        mapping = {0: self.import_page, 2: self.analysis_page, 3: self.review_page, 4: self.export_page}
+        """返回对应阶段的页面（仅工作区 3 个）。"""
+        mapping = {0: self.workbench_page, 2: self.review_page, 3: self.export_page}
         return mapping.get(self.nav.currentRow())
 
     def _navigate(self, delta: int) -> None:
-        """兼容旧 API：按 delta 上下移动到下一个工作区。"""
+        """按 delta 在三个工作区之间移动（抽屉不参与）。"""
         cur = self.nav.currentRow()
-        # 顺序：导入(0) → 分析(2) → 审核(3) → 导出(4)
-        order = [0, 2, 3, 4]
+        order = [0, 2, 3]
         if cur not in order:
             return
         i = order.index(cur)

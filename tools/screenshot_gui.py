@@ -208,8 +208,8 @@ def main(argv: list[str] | None = None) -> int:
         pump(app, 0.4)
 
     print("生成截图：")
-    # 必须在切换到设置页**之前**抓导入页，否则抓到的还是设置页
-    shot("01-导入.png", window)
+    # 工作台一页承担导入 + 分析：先抓「刚导入完」的状态（检查器已列兼容性问题）
+    shot("01-工作台-导入.png", window)
 
     # 设置：目标 30 秒、0% 浮动 → 4 集
     page = window.settings_page
@@ -221,23 +221,23 @@ def main(argv: list[str] | None = None) -> int:
     open_drawer(window.settings_drawer)
     shot_drawer("02-设置.png")
 
-    # 分析
-    window.nav.setCurrentRow(2)
+    # 分析：同一页的下半区，跑完后抓「工作台 + 检查器」的完整形态
+    window.nav.setCurrentRow(0)
     pump(app)
     window.analysis_page._start()
     wait_until(app, lambda: window.state.current_plan is not None)
     pump(app, 0.5)
-    shot("03-分析.png", window)
+    shot("03-工作台-分析.png", window)
 
     # 审核
-    window.nav.setCurrentRow(3)
+    window.nav.setCurrentRow(2)
     pump(app, 0.6)
     window.review_page.episode_table.selectRow(1)
     pump(app, 0.6)
     shot("04-审核.png", window)
 
     # 导出
-    window.nav.setCurrentRow(4)
+    window.nav.setCurrentRow(3)
     pump(app)
     export_dir = ROOT / "testdata" / "_shot_out"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     if uninstalled:
         models.table.selectRow(uninstalled[0])
     models._append("模型页：可直接选择并下载所需模型，无需命令行。")
-    window.nav.setCurrentRow(5)
+    window.nav.setCurrentRow(4)
     open_drawer(window.model_drawer)
     shot_drawer("06-模型.png")
 

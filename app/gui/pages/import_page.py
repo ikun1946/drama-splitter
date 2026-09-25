@@ -163,6 +163,8 @@ class ImportPage(QWidget):
         self.status.setText("正在探测媒体信息…")
         self.issues.clear_issues()
         self.state.reset_media()
+        # 换片时恢复 hero 形态，让「拖入 / 点选」的入口重新显眼
+        self.drop_zone.set_compact(False)
 
         self._worker = ProbeWorker(self.state.binaries, path, self)
         self._worker.completed.connect(self._on_probed)
@@ -174,6 +176,9 @@ class ImportPage(QWidget):
         self.state.media = info
         self.status.setText("探测完成。")
         self.summary.setText(describe_media(info))
+        # 导入完成后收掉 hero 拖放区：它的使命已经完成，140px 的高度会把
+        # 下方的分析区顶出可视范围（工作台是导入 + 分析同屏的一页）。
+        self.drop_zone.set_compact(True)
 
         self.issues.clear_issues()
         for issue in issues:

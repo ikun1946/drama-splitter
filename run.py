@@ -112,9 +112,10 @@ def _ui_smoke() -> int:
 
     window = MainWindow()
     app.processEvents()
-    print(f"界面构建成功：{window.stack.count()} 页")
+    print(f"界面构建成功：{window.stack.count()} 页 + {len(window.DRAWER_INDICES)} 个抽屉")
     for index, name in enumerate(window.PAGES):
-        print(f"  {index + 1}. {name}")
+        kind = "抽屉" if index in window.DRAWER_INDICES else "页面"
+        print(f"  {index + 1}. {name}（{kind}）")
 
     page = window.model_page
     print(f"模型清单：{page.table.rowCount()} 项")
@@ -127,8 +128,16 @@ def _ui_smoke() -> int:
     page._refresh()
     app.processEvents()
 
-    if window.stack.count() != len(window.PAGES):
-        print("界面自检失败：页面数与导航项不一致")
+    # 核心工作流只有三页（方案 §五），设置与模型降级为抽屉、不占 stack 位。
+    # 两者相加才是 PAGES 的长度 —— 用「stack 页数 + 抽屉数」来断言，
+    # 免得哪天漏挂一个页面却因为数字恰好对上而混过去。
+    expected_pages = len(window.PAGES) - len(window.DRAWER_INDICES)
+    if window.stack.count() != expected_pages:
+        print(
+            f"界面自检失败：stack 应为 {expected_pages} 页"
+            f"（PAGES {len(window.PAGES)} - 抽屉 {len(window.DRAWER_INDICES)}），"
+            f"实际 {window.stack.count()}"
+        )
         return 1
     if page.table.rowCount() == 0:
         print("界面自检失败：模型清单为空")

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QFont, QBrush, QMouseEvent
 from PySide6.QtWidgets import QWidget
 

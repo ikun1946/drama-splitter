@@ -1,9 +1,17 @@
-"""GUI 冒烟测试：离屏跑通「导入 → 设置 → 分析 → 审核 → 导出」全链路。
+"""GUI 冒烟测试：离屏跑通「工作台（导入 + 分析）→ 设置 → 审核 → 导出 → 模型」全链路。
 
 用离屏平台（QT_QPA_PLATFORM=offscreen）无需显示器即可运行。
 所有 QMessageBox 被替换为记录器，避免模态对话框在自动化环境中阻塞。
 
 断言的是**结果**而不是"点了没报错"：导出后逐帧读回条码，确认帧身份正确。
+
+导航行号（与 ``MainWindow.PAGES`` 对齐，见方案 §五 / §六）
+--------------------------------------------------------
+0 工作台（导入 + 分析，同一页两个分区）
+1 设置（抽屉，不切 stack）
+2 审核
+3 导出
+4 模型（抽屉，不切 stack）
 """
 
 from __future__ import annotations
@@ -76,7 +84,9 @@ def main() -> int:
     window = mw.MainWindow()
     window.show()
     app.processEvents()
-    print("窗口构造成功，共", window.stack.count(), "页")
+    print("窗口构造成功，共", window.stack.count(), "页 +",
+          len(window.DRAWER_INDICES), "个抽屉")
+    assert window.stack.count() == 3, "核心工作流应只有三页（方案 §五）"
 
     from app.core.ffmpeg import check_encoders
 
@@ -84,8 +94,10 @@ def main() -> int:
     check_encoders(binaries)
     window.state.binaries = binaries
 
-    # ---- 页1 导入 ------------------------------------------------------
-    print("[页1] 导入并探测…")
+    # ---- 页0 工作台 · 导入区 -------------------------------------------
+    print("[页0 · 导入区] 导入并探测…")
+    window.nav.setCurrentRow(0)
+    app.processEvents()
     window.import_page._probe(str(asset))
     ok = wait_until(
         app,
@@ -102,12 +114,19 @@ def main() -> int:
     print(f"  音轨：{len(media.audio_tracks)} 条，已选：{window.state.audio_track_label}")
     print(f"  兼容性问题：{window.import_page.issues.rowCount()} 条")
     ok, message = window.import_page.can_continue()
-    assert ok, f"导入页无法继续：{message}"
+    assert ok, f"导入区无法继续：{message}"
 
-    # ---- 页2 设置 ------------------------------------------------------
-    print("[页2] 设置分集目标（目标时长 30 秒，0% 浮动）…")
+    # 兼容性阻断项必须沉淀到右栏检查器（方案 §二十四 / §二十六）
+    inspector = window.workbench_page.inspector
+    print(f"  检查器：问题 {inspector.problem_count()} 条"
+          f"（其中阻断 {inspector.blocking_count()}）"
+          f"，默认页签 = {inspector.current_tab()}")
+
+    # ---- 页1 设置（抽屉） ----------------------------------------------
+    print("[页1 · 抽屉] 设置分集目标（目标时长 30 秒，0% 浮动）…")
     window.nav.setCurrentRow(1)
     app.processEvents()
+    assert window.settings_drawer.isVisible(), "设置抽屉未打开"
     page = window.settings_page
     page.radio_by_duration.setChecked(True)
     page.range_percent.setChecked(True)
@@ -123,9 +142,9 @@ def main() -> int:
     ok, message = page.can_continue()
     assert ok, f"设置页无法继续：{message}"
 
-    # ---- 页3 分析 ------------------------------------------------------
-    print("[页3] 生成规则草案方案…")
-    window.nav.setCurrentRow(2)
+    # ---- 页0 工作台 · 分析区 -------------------------------------------
+    print("[页0 · 分析区] 生成规则草案方案…")
+    window.nav.setCurrentRow(0)   # 抽屉行不切 stack，这里显式回到工作台
     app.processEvents()
     window.analysis_page._start()
     ok = wait_until(
@@ -155,12 +174,19 @@ def main() -> int:
               f"{float(episode.start_seconds):8.3f}s – {float(episode.end_seconds):8.3f}s "
               f"（{float(episode.duration_seconds):7.3f}s）")
     assert plan.coverage_valid(), "方案未通过覆盖校验"
-    ok, message = window.analysis_page.can_continue()
-    assert ok, f"分析页无法继续：{message}"
+    # 分析日志必须同时出现在分析区和检查器「日志」页签（镜像写入）
+    mirrored = inspector.log_text()
+    assert "候选点：" in mirrored, (
+        f"检查器日志页签未收到分析输出。实际尾部：\n{mirrored[-400:]}"
+    )
+    print(f"  检查器日志页签已镜像 {len(mirrored.splitlines())} 行")
 
-    # ---- 页4 审核 ------------------------------------------------------
-    print("[页4] 审核页：列表、预览、微调…")
-    window.nav.setCurrentRow(3)
+    ok, message = window.analysis_page.can_continue()
+    assert ok, f"分析区无法继续：{message}"
+
+    # ---- 页2 审核 ------------------------------------------------------
+    print("[页2] 审核页：列表、预览、微调…")
+    window.nav.setCurrentRow(2)
     app.processEvents()
     review = window.review_page
     assert review.episode_table.rowCount() == plan.episode_count, (
@@ -211,9 +237,9 @@ def main() -> int:
     ok, message = review.can_continue()
     assert ok, f"审核页无法继续：{message}"
 
-    # ---- 页5 导出 ------------------------------------------------------
-    print("[页5] 导出…")
-    window.nav.setCurrentRow(4)
+    # ---- 页3 导出 ------------------------------------------------------
+    print("[页3] 导出…")
+    window.nav.setCurrentRow(3)
     app.processEvents()
     export = window.export_page
     window.state.output_root = out_dir
@@ -270,9 +296,10 @@ def main() -> int:
     print(f"  音画同步：{measurement.describe(float(media.video.nominal_fps))}")
     assert measurement.within(1.0 / float(media.video.nominal_fps)), measurement.describe()
 
-    print("[页6] 模型页：清单、状态、目录…")
-    window.nav.setCurrentRow(5)
+    print("[页4 · 抽屉] 模型页：清单、状态、目录…")
+    window.nav.setCurrentRow(4)
     app.processEvents()
+    assert window.model_drawer.isVisible(), "模型抽屉未打开"
     models = window.model_page
     print(f"  表格行数：{models.table.rowCount()}")
     assert models.table.rowCount() > 0, "模型清单不应为空"

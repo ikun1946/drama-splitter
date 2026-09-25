@@ -455,12 +455,16 @@ QFrame[role="card"] {{
 }}
 
 QFrame[role="card-title"] {{
+    /* font-family 必须显式写出：QSS 设了 padding / font-* 任一属性后，
+       Qt 会把控件字体重置为默认值，中文因此落到 SimSun 这类高行距字体上，
+       卡片标题被撑高十几像素，多张卡片叠起来会把下半页顶出可视区。 */
+    font-family: {FONT_FAMILY};
     background: {BG};
     border: none;
     border-bottom: 1px solid {BORDER};
     border-top-left-radius: {RADIUS_MD}px;
     border-top-right-radius: {RADIUS_MD}px;
-    padding: 8px 12px;
+    padding: 6px 12px;
 }}
 
 QFrame[role="card-body"] {{
@@ -566,6 +570,102 @@ QToolTip {{
     padding: 4px 8px;
     border-radius: {RADIUS_SM}px;
     font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+/* ===== 右栏检查器 ===== */
+QFrame[role="inspector"] {{
+    background: {BG};
+    border-left: 1px solid {BORDER};
+}}
+
+QFrame[role="inspector-tabs"] {{
+    background: {BG_ALT};
+    border: none;
+    border-bottom: 1px solid {BORDER};
+}}
+
+QPushButton[role="inspector-tab"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 6px 4px;
+    color: {TEXT_MUTED};
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QPushButton[role="inspector-tab"]:hover {{
+    color: {TEXT};
+    background: {BG_HOVER};
+}}
+
+QPushButton[role="inspector-tab"]:checked {{
+    color: {PRIMARY};
+    border-bottom: 2px solid {PRIMARY};
+    font-weight: 600;
+}}
+
+QFrame[role="issue-row"] {{
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+}}
+
+QFrame[role="issue-bar"] {{
+    border: none;
+    border-radius: 1px;
+}}
+
+QFrame[role="issue-bar"][tone="danger"] {{
+    background: {DANGER};
+}}
+
+QFrame[role="issue-bar"][tone="warn"] {{
+    background: {WARN};
+}}
+
+QFrame[role="issue-bar"][tone="primary"] {{
+    background: {PRIMARY};
+}}
+
+QLabel[role="issue-title"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {TEXT};
+    font-weight: 600;
+}}
+
+QLabel[role="issue-meta"] {{
+    font-family: {FONT_MONO};
+    color: {TEXT_MUTED};
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QLabel[role="issue-detail"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {TEXT_MUTED};
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QLabel[role="issue-hint"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {PRIMARY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QPushButton[role="ghost"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: transparent;
+    border: none;
+    color: {PRIMARY};
+    padding: 2px 6px;
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QPushButton[role="ghost"]:hover {{
+    color: {PRIMARY_HOVER};
+    background: {PRIMARY_SOFT};
+    border-radius: {RADIUS_SM}px;
 }}
 """
 

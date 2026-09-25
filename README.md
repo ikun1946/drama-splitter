@@ -103,7 +103,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §7.1/§7.3 语音转写、VAD、词级时间、分块偏移 | `app/core/asr.py` | 完成 |
 | §8.1 镜头切换与黑场检测 | `app/core/shots.py` | 完成 |
 | §8.2/§8.4 候选数据库：收集、合并、评分、限流 | `app/core/candidates.py` | 完成 |
-| §13.1 工作流界面（六页：导入/设置/分析/审核/导出/模型，后两者为抽屉） | `app/gui/pages/`、`app/gui/main_window.py` | 完成 |
+| §13.1 工作流界面（三页：工作台（导入+分析）/审核/导出，设置与模型为顶栏抽屉） | `app/gui/pages/`、`app/gui/main_window.py` | 完成 |
 | §13.3 帧级预览（解码帧驱动，非播放器近似） | `app/gui/frame_source.py` | 完成 |
 | §16 阶段1「不依赖 AI 也能正确剪出指定区间」 | 全部 | 验收通过 |
 | §16 阶段3「自动基础分析 → 候选数据库」 | `asr/shots/subtitles/candidates/audio/cache` | 验收通过 |
@@ -265,11 +265,12 @@ app/core/          引擎（不依赖界面，可独立测试）
 app/gui/           界面（PySide6-Essentials）
   theme.py           设计令牌与全局 QSS（浅色 / 深色双套）
   widgets/           通用控件（卡片/抽屉/步骤条/下拉区/日志面板等 12 个）
-  pages/             六个工作页面，每页一个文件
+  pages/             页面实现，每页一个文件（方案 §五：核心工作流三页）
     _common.py         页面层共享符号（等级映射、任务登记、滚动容器）
-    import_page.py     导入
+    workbench_page.py  分集工作台 = 导入区 + 分析区 + 右侧检查器（§八/§二十四）
+    import_page.py     导入区（工作台上半，媒体就绪后拖放区收为一行）
+    analysis_page.py   分析区（工作台下半，日志镜像到检查器）
     settings_page.py   设置（抽屉）
-    analysis_page.py   分析
     review_page.py     审核
     export_page.py     导出
     model_page.py      模型（抽屉）

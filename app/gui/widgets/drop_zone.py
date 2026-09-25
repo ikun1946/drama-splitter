@@ -59,6 +59,34 @@ class DropZone(QFrame):
         outer.addStretch(1)
 
         self._hover = False
+        self._compact = False
+
+    def set_compact(self, compact: bool) -> None:
+        """收成一行「更换源视频」提示。
+
+        导入完成后拖放大图的任务已经结束，留着 140px 起步的 hero 只会把
+        下方的分析区顶出可视范围。这里保留可点击（换片）与可拖放（换片）能力，
+        只是把高度压到一行。
+        """
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.icon_label.setVisible(not compact)
+        self.hint_label.setVisible(not compact)
+        self.title_label.setText("更换源视频" if compact else "拖放视频到此处，或点击选择")
+        self.icon_label.setStyleSheet(
+            "font-size: 20pt; background: transparent;" if compact
+            else "font-size: 48pt; background: transparent;"
+        )
+        self.title_label.setStyleSheet(
+            "font-size: 10pt; color: #5f6368; background: transparent;" if compact
+            else "font-size: 14pt; font-weight: 600; color: #20232a; background: transparent;"
+        )
+        margins = (12, 6, 12, 6) if compact else (24, 24, 24, 24)
+        self.layout().setContentsMargins(*margins)
+        self.setMinimumHeight(40 if compact else 140)
+        self.setMaximumHeight(40 if compact else 280)
+        self.update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:

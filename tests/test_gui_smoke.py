@@ -46,10 +46,64 @@ def window(qapp):
 
 class TestWindowConstruction:
     def test_all_pages_are_present(self, window):
-        assert window.stack.count() == 6
-        assert window.PAGES == ["导入", "设置", "分析", "审核", "导出", "模型"]
+        # 方案 §五：核心工作流只保留三页（工作台 / 审核 / 导出），
+        # 设置与模型降级为顶栏图标打开的抽屉，不占 stack 位。
+        assert window.stack.count() == 3
+        assert window.PAGES == ["工作台", "设置", "审核", "导出", "模型"]
+        assert set(window.DRAWER_INDICES.values()) == {"settings", "model"}
+
+    def test_workbench_composes_import_and_analysis(self, window):
+        # 工作台一页承担导入 + 分析：两个子视图都在，且别名指向同一对象
+        wb = window.workbench_page
+        assert window.import_page is wb.import_view
+        assert window.analysis_page is wb.analysis_view
+        assert wb.import_view.parent() is not None
+        assert wb.analysis_view.parent() is not None
+
+    def test_workbench_splitter_is_actually_resizable(self, window, qapp):
+        """分割条必须能被程序与用户调整。
+
+        回归用例：导入区四张卡片叠起来最小高度接近 700px，两个子控件的最小
+        高度之和超过可视高度时，Qt 会静默忽略 setSizes() 与 moveSplitter()——
+        实测表现为 sizes() 恒等于均分、moveSplitter() 直接返回 None。
+        修法是给两半各套一层滚动容器。这里断言"能设得动"，而不是断言某个
+        具体比例（比例随窗口尺寸变化）。
+        """
+        wb = window.workbench_page
+        window.resize(1440, 900)
+        window.show()          # 布局只在 show 之后才真正分配高度
+        qapp.processEvents()
+        try:
+            total = sum(wb.splitter.sizes())
+            assert total > 0, "分割器未获得可用高度"
+
+            upper = max(1, int(total * 0.25))
+            wb.splitter.setSizes([upper, total - upper])
+            qapp.processEvents()
+            got_upper, got_lower = wb.splitter.sizes()
+            assert abs(got_upper - upper) <= 2, (
+                f"分割器忽略了 setSizes：请求上半 {upper}px，实际 {got_upper}px"
+                f"（{wb.splitter.sizes()}）——子控件最小高度可能又超过了可用高度"
+            )
+            assert got_lower > got_upper, "分析区应拿到更多高度"
+        finally:
+            window.hide()      # 恢复 fixture 原状，不影响同模块后续用例
+
+    def test_page_rows_map_to_stack(self, window):
+        # 抽屉行（1/4）不切 stack；工作区行（0/2/3）依次对应 stack 0/1/2
+        for row, expected in ((0, 0), (2, 1), (3, 2)):
+            window.nav.setCurrentRow(row)
+            assert window.stack.currentIndex() == expected
+
+    def test_drawer_rows_do_not_switch_stack(self, window):
+        window.nav.setCurrentRow(0)
+        before = window.stack.currentIndex()
+        for row in (1, 4):
+            window.nav.setCurrentRow(row)
+            assert window.stack.currentIndex() == before
 
     def test_navigation_starts_at_import(self, window):
+        window.nav.setCurrentRow(0)
         assert window.stack.currentIndex() == 0
         assert not window.btn_prev.isEnabled()
 

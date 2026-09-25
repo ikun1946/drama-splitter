@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
