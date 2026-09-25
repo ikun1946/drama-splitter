@@ -73,9 +73,14 @@ class MediaPreview(QWidget):
             b.setMinimumWidth(0)
             if b in (self.btn_play, self.btn_boundary):
                 b.setProperty("role", "primary")
+                b.setProperty("compact", "true")   # QSS: padding 4px 8px
                 # primary 在 QSS 里要重新 polish 才生效
                 b.style().unpolish(b)
                 b.style().polish(b)
+            else:
+                # 紧凑档：控制条 10 个按钮单行，默认 padding 会把「停止」
+                # 挤出审核页右列视口（QSS role="mini"）
+                b.setProperty("role", "mini")
 
         controls = QHBoxLayout()
         controls.setSpacing(6)

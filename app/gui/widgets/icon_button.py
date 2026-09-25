@@ -10,14 +10,14 @@ class IconButton(QPushButton):
     """圆形 / 圆角小按钮，用于顶栏图标操作。
 
     特性：
-    - 36×36 固定大小（顶栏标准）
-    - 默认扁平，hover 时浅蓝背景
+    - 40×40 固定大小（顶栏标准；36px 时 emoji 字形放不下会被压扁）
+    - 默认扁平，hover 时浅蓝背景（QSS role="icon-button"）
     - 支持 set_notify(True) 显示右上角小红点（未读提示）
     """
 
     def __init__(self, text: str = "", parent=None) -> None:
         super().__init__(text, parent)
-        self.setFixedSize(QSize(36, 36))
+        self.setFixedSize(QSize(40, 40))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setProperty("role", "icon-button")

@@ -684,6 +684,40 @@ QPushButton[role="ghost"]:hover {{
     border-radius: {RADIUS_SM}px;
 }}
 
+/* 顶栏图标按钮（⚙ / 🤖）：必须自带专属规则。
+   若只吃全局 QPushButton 的 padding: 6px 14px，36/40px 宽的按钮内容区
+   只剩 6px，Segoe UI Emoji 的大 em 字形会被横向压成竖条（f0d0899 起的
+   遗留缺陷）。扁平 + hover 浅蓝是 IconButton docstring 的既定设计。 */
+QPushButton[role="icon-button"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: 17px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {RADIUS_SM}px;
+}}
+
+QPushButton[role="icon-button"]:hover {{
+    background: {PRIMARY_SOFT};
+    border-color: {PRIMARY};
+}}
+
+QPushButton[role="icon-button"]:pressed {{
+    background: {PRIMARY_HOVER};
+}}
+
+/* 预览控制条紧凑档：10 个按钮单行，默认 padding 6px 14px 时总宽
+   超过审核页右列可用宽度，「停止」会被推出视口（04-审核 截图缺陷） */
+QPushButton[role="mini"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    padding: 4px 8px;
+    font-size: {FONT_SIZE_CAPTION}pt;
+}}
+
+QPushButton[role="primary"][compact="true"] {{
+    padding: 4px 8px;
+}}
+
 /* ===== 顶栏 / 状态条 / 底栏（原先散在各控件里的硬编码颜色收拢于此） ===== */
 QFrame[role="app-bar"] {{
     background: {BG_ALT};
