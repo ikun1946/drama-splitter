@@ -7,17 +7,20 @@
 
 ## 界面
 
-五页工作流。截图由 `tools/screenshot_gui.py` 离屏渲染真实界面得到，
+六页工作流。截图由 `tools/screenshot_gui.py` 离屏渲染真实界面得到，
 预览区显示的是 FFmpeg 解出的**真实解码帧**（可见测试素材自带的帧号条码）。
 
 | 页面 | 截图 |
 | --- | --- |
 | 导入 | [01-导入](docs/screenshots/01-导入.png) |
-| 设置 | [02-设置](docs/screenshots/02-设置.png) |
+| 设置（右侧抽屉，顶栏 ⚙ 打开） | [02-设置](docs/screenshots/02-设置.png) |
 | 分析 | [03-分析](docs/screenshots/03-分析.png) |
 | 审核 | [04-审核](docs/screenshots/04-审核.png) |
 | 导出 | [05-导出](docs/screenshots/05-导出.png) |
-| 模型 | 选择并下载模型（见下节） |
+| 模型（右侧抽屉，顶栏 🤖 打开） | [06-模型](docs/screenshots/06-模型.png) |
+
+「设置」与「模型」不是独立工作阶段，而是随时可开的抽屉：实际操作时左侧
+仍停在当前工作页。截图因此按「左侧窗口 + 右侧抽屉」横向拼接呈现。
 
 ![审核页](docs/screenshots/04-审核.png)
 
@@ -26,7 +29,8 @@
 
 ## 模型下载（界面内完成）
 
-应用内置"模型"页，用户可直接在界面里选择并下载所需模型，**不需要命令行**。
+应用内置"模型"页（顶栏 🤖 打开），用户可直接在界面里选择并下载所需模型，
+**不需要命令行**。
 
 | 类别 | 可选档位 | 用途 |
 |---|---|---|
@@ -99,7 +103,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §7.1/§7.3 语音转写、VAD、词级时间、分块偏移 | `app/core/asr.py` | 完成 |
 | §8.1 镜头切换与黑场检测 | `app/core/shots.py` | 完成 |
 | §8.2/§8.4 候选数据库：收集、合并、评分、限流 | `app/core/candidates.py` | 完成 |
-| §13.1 五页工作流界面 | `app/gui/main_window.py` | 完成 |
+| §13.1 工作流界面（六页：导入/设置/分析/审核/导出/模型，后两者为抽屉） | `app/gui/main_window.py` | 完成 |
 | §13.3 帧级预览（解码帧驱动，非播放器近似） | `app/gui/frame_source.py` | 完成 |
 | §16 阶段1「不依赖 AI 也能正确剪出指定区间」 | 全部 | 验收通过 |
 | §16 阶段3「自动基础分析 → 候选数据库」 | `asr/shots/subtitles/candidates/audio/cache` | 验收通过 |
@@ -131,7 +135,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 ## 环境
 
 - Windows（其他平台应可运行，未验证）
-- Python 3.12+（实测 3.13.14）
+- Python 3.12+（本机实测 3.14.6）
 - **FFmpeg**（实测 9.0 full build，需含 `libx264` 与 `aac`）
   查找顺序：显式目录 → 环境变量 `DRAMA_FFMPEG_DIR` → `PATH` → 已知安装位置
 
@@ -152,7 +156,7 @@ python -m venv .venv
 ## 验证
 
 ```bash
-# 单元与端到端测试（223 项）
+# 单元与端到端测试（336 项；其中 29 项依赖合成语音素材，缺素材时跳过）
 .venv/Scripts/python.exe -m pytest tests/ -q
 
 # 界面全链路冒烟（离屏运行，含真实编码与逐帧校验）
@@ -251,21 +255,32 @@ app/core/          引擎（不依赖界面，可独立测试）
   asr.py             语音转写、词级时间戳、分块偏移（§7.1、§7.3）
   shots.py           镜头切换与黑场检测（§8.1）
   candidates.py      候选数据库：收集、合并、评分、限流（§8.2、§8.4）
+  solver.py          候选图 + 动态规划（§10.1–10.2）
+  semantic.py        语义判断、请求校验、预算与降级（§11）
+  review.py          事件索引与整集复核
+  recommend.py       剧情/悬念/时长三种策略
+  episode_files.py   单集字幕导出（SRT）
+  model_manager.py   模型清单、体积探测、下载与删除
+  app_config.py      应用配置持久化（模型目录等）
 app/gui/           界面（PySide6-Essentials）
+  theme.py           设计令牌与全局 QSS
+  widgets/           通用控件（卡片/抽屉/步骤条/下拉区/日志面板等 12 个）
   state.py           项目状态与方案版本链
   workers.py         后台工作线程（探测/规划/导出）
   frame_source.py    帧级预览（单帧解码 + 流式播放）
-  main_window.py     五页工作流
+  main_window.py     六页工作流（设置/模型为右侧抽屉）
 tools/             开发与验证工具
   markers.py         帧号条码与声音标记规范
   verify.py          帧号读回、提示音检测、音画偏差测量
   make_test_assets.py 合成素材生成
   make_speech_asset.py 中文语音合成（带 ASR 标准答案）
   eval_asr.py        ASR 评测：CER 与时间戳误差
-  fetch_whisper_model.py 下载 whisper 模型（走镜像、绕开符号链接）
+  fetch_whisper_model.py / fetch_llm.py 下载模型（走镜像、绕开符号链接）
+  screenshot_gui.py  离屏渲染界面截图（抽屉页按窗口+面板拼接）
   gui_smoke.py       界面全链路冒烟
+  build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             102 项自动化测试
+tests/             336 项自动化测试（13 个文件）
 testdata/          合成素材（不入版本库）
 ```
 
@@ -296,6 +311,28 @@ testdata/          合成素材（不入版本库）
 5. 可行性检查原先在提前返回的分支里没算可行集数范围，
    界面于是打印出 `可行集数范围：0 – 0 集` / `2 – 1 集` 这类
    把"未计算"当成"计算结果"的假信息。已调整计算顺序并补上可操作的说明文案。
+
+界面层另有三个**只有把界面渲染出来才会暴露**的坑，全部已修并留了回归手段：
+
+6. **Qt 的 QSS 覆盖 `font-size` 时会重置字体族。**
+   抽屉标题只写了 `font-weight` 与 `font-size`，没写 `font-family`，
+   结果 "⚙" / "🤖" 落到不含该字形的字体上，渲染成豆腐块。
+   实测对照：只写 `font-size` 的 QLabel 显示豆腐块，同时写 `font-family` 的正常。
+   现在 `theme.py` 里凡设置字号/字重的规则都显式带上 `FONT_SYMBOL` 回退链。
+
+7. **抽屉的滑入是动画，截完立刻抓图只能抓到父窗口右外侧的空位。**
+   截图工具原先在 `nav.setCurrentRow(1)` 之后马上 `grab()`，
+   于是 02-设置 / 06-模型 两张图里只有占位页的提示文字。
+   现在等 `drawer.x() < window.width()` 再抓。
+
+8. **抽屉是 `centralWidget` 的子控件、挂在布局之外，窗口截图里根本没有它。**
+   同时它又是浮层——窗口截图会把被它遮住的区域一并画进来，
+   直接把"窗口 + 抽屉"横向拼接会得到一份重复内容。
+   现在按 `drawer.x()` 裁掉窗口右侧被覆盖的部分再拼。
+
+另外，`tools/screenshot_gui.py` 的 `pump()` 曾被误粘贴成 `install_cjk_font()`
+的副本，且函数体的循环写在 `return` 之后——所有 `pump()` 调用都是空操作，
+事件循环从未推进。已重写。
 
 ## 验收证据
 

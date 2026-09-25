@@ -18,6 +18,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+# 应用版本号。
+#
+# 与 pyproject.toml 的 [project].version 保持一致：两处都是打包相关的元数据
+# 入口（一处给 Python 打包工具读，一处给运行时自检打印）。改版本时两处都要改
+# ——历史上它们漂移到了 1.0.0 / 0.1.0。
 VERSION = "1.0.0"
 
 

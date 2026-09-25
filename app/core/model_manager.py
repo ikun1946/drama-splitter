@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -284,8 +285,8 @@ def remote_size(url: str) -> int | None:
 
     部分镜像不支持 HEAD 时，退回 Range 探测（`Content-Range` 的 `总长` 段）。
     """
-    code, output = _curl(["-sIL", "-D", "-", "-o", "/dev/null", url], timeout=30)
-    if code == 0:
+    code, output = _curl(["-sL", "-X", "HEAD", "-D", "-", "-o", os.devnull, url], timeout=30)
+    if code in (0, 18):
         size = None
         for line in (output or "").splitlines():
             if line.lower().startswith("content-length:"):
@@ -296,9 +297,9 @@ def remote_size(url: str) -> int | None:
             return size
 
     code, output = _curl(
-        ["-sL", "-r", "0-0", "-D", "-", "-o", "/dev/null", url], timeout=30
+        ["-sL", "-r", "0-0", "-D", "-", "-o", os.devnull, url], timeout=30
     )
-    if code != 0:
+    if code not in (0, 18):
         return None
     for line in (output or "").splitlines():
         if line.lower().startswith("content-range:"):

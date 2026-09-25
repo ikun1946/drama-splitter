@@ -282,7 +282,14 @@ def main() -> int:
         status = models.table.item(row, 2).text()
         rows.append((label, status))
         print(f"    {label:34s} {status}")
-    assert any("已安装" in status for _, status in rows), "测试机上至少应有一个已安装模型"
+    assert any(status for _, status in rows), "每行都应报出安装状态"
+    installed = [label for label, status in rows if "已安装" in status]
+    if installed:
+        print(f"  已安装模型：{'、'.join(installed)}")
+    else:
+        # 不是失败：模型体积大、不入版本库，干净机器上就是全未安装。
+        # 这里只确认「状态列被真实填充」，而非假设这台机器装过模型。
+        print("  本机未安装任何模型（属正常）；状态列已按实际探测结果填充")
     print(f"  模型目录：{models.dir_edit.text()}")
     print(f"  {models.free_label.text()}")
 

@@ -31,5 +31,13 @@ build/
 *.swp
 Thumbs.db
 desktop.ini
+
 # 模型文件体积大且可由脚本重建，不入库
 models/
+
+# 工作区记忆与本地配置（机器本地数据）
+.workbuddy/
+config.json
+
+# 临时验证产物
+.tmp-verify/
