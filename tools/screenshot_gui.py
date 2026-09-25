@@ -2,10 +2,16 @@
 
 QT_QPA_PLATFORM=offscreen 下 QWidget.grab() 仍会真实走一遍布局与绘制，
 因此截图能反映实际版式，而不只是"控件都建出来了"。
+
+用法::
+
+    python tools/screenshot_gui.py                # 浅色，输出到 docs/screenshots/
+    python tools/screenshot_gui.py --theme dark    # 深色，输出到 docs/screenshots/dark/
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -24,7 +30,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 import app.gui.main_window as mw  # noqa: E402
 from app.core.ffmpeg import check_encoders, locate_ffmpeg  # noqa: E402
 
-OUT = ROOT / "docs" / "screenshots"
+OUT_DEFAULT = ROOT / "docs" / "screenshots"
 
 
 def install_fonts(app: QApplication) -> str:
@@ -89,24 +95,44 @@ def wait_until(app: QApplication, predicate, timeout: float = 120.0) -> bool:
     return False
 
 
-def main() -> int:
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="离屏渲染界面截图")
+    parser.add_argument(
+        "--theme", choices=("light", "dark"), default="light",
+        help="主题（默认 light）。dark 输出到 docs/screenshots/dark/",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    theme_mode = args.theme
+    out_dir = OUT_DEFAULT if theme_mode == "light" else OUT_DEFAULT / theme_mode
+    # 抽屉拼接的画布底色必须跟着主题走，否则深色截图右侧会露一条白边
+    canvas_bg = "#202226" if theme_mode == "dark" else "#ffffff"
+
     asset = ROOT / "testdata" / "cfr_120s_25fps.mp4"
     if not asset.exists():
         print("缺少测试素材：python tools/make_test_assets.py testdata --seconds 120")
         return 2
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 截图时不要弹模态框
     mw.QMessageBox.information = staticmethod(lambda *a, **k: None)
     mw.QMessageBox.warning = staticmethod(lambda *a, **k: None)
     mw.QMessageBox.critical = staticmethod(lambda *a, **k: None)
 
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv[:1])
     family = install_fonts(app)
+    print(f"主题：{theme_mode}    输出：{out_dir.relative_to(ROOT)}")
     print(f"截图字体：{family or '（未注册成功，中文可能显示为方框）'}")
 
     window = mw.MainWindow()
+    # MainWindow.__init__ 里已按默认主题调用过 apply_theme()，这里覆盖成目标主题
+    from app.gui.theme import apply_theme
+
+    apply_theme(app, theme_mode)
     window.resize(1440, 900)
     window.show()
     pump(app)
@@ -133,7 +159,7 @@ def main() -> int:
         if status is not None and status.isVisible():
             hidden.append("status_bar 可见，已从截图底部裁掉")
             pixmap = pixmap.copy(0, 0, pixmap.width(), status.y())
-        target = OUT / name
+        target = out_dir / name
         pixmap.save(str(target), "PNG")
         print(f"  {target.relative_to(ROOT)}  {pixmap.width()}×{pixmap.height()}")
 
@@ -158,12 +184,12 @@ def main() -> int:
         panel = drawer.grab()
         cut = max(0, min(drawer.x(), left.width()))
         canvas = QPixmap(cut + panel.width(), left.height())
-        canvas.fill(QColor("#ffffff"))
+        canvas.fill(QColor(canvas_bg))
         painter = QPainter(canvas)
         painter.drawPixmap(0, 0, left, 0, 0, cut, left.height())
         painter.drawPixmap(cut, 0, panel)
         painter.end()
-        target = OUT / name
+        target = out_dir / name
         canvas.save(str(target), "PNG")
         print(
             f"  {target.relative_to(ROOT)}  {canvas.width()}×{canvas.height()}"
@@ -213,10 +239,10 @@ def main() -> int:
     # 导出
     window.nav.setCurrentRow(4)
     pump(app)
-    out_dir = ROOT / "testdata" / "_shot_out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    window.state.output_root = out_dir
-    window.export_page.output_edit.setText(str(out_dir))
+    export_dir = ROOT / "testdata" / "_shot_out"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    window.state.output_root = export_dir
+    window.export_page.output_edit.setText(str(export_dir))
     window.export_page.refresh()
     pump(app, 0.4)
     shot("05-导出.png", window)
@@ -244,7 +270,7 @@ def main() -> int:
 
     digests: dict[str, str] = {}
     duplicates: list[str] = []
-    for path in sorted(OUT.glob("*.png")):
+    for path in sorted(out_dir.glob("*.png")):
         digest = hashlib.md5(path.read_bytes()).hexdigest()
         if digest in digests:
             duplicates.append(f"{digests[digest]} 与 {path.name} 内容完全相同")

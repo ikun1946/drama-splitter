@@ -3,13 +3,29 @@
 设计目标
 --------
 - 现代、信息层级清晰：标题、卡片、徽章、按钮状态（默认 / hover / pressed / disabled / primary / danger）有视觉区分
-- 配色克制：主色 #3b6cb8（蓝灰），辅色用于阻断 / 警告 / 提示 / 成功 / 进行中
+- 配色克制：单一主色（浅色 #3b6cb8 / 深色 #4aa6ff），辅色用于阻断 / 警告 / 提示 / 成功 / 进行中
 - 不依赖任何外部资源：图标用 QStyle.StandardPixmap，颜色用 token 常量
+
+双套令牌
+--------
+``TOKENS["light"]`` 与 ``TOKENS["dark"]`` 是同一个键集合的两份取值。QSS 由
+:func:`build_stylesheet` 按 mode 渲染，因此换主题不需要改任何页面代码。
+
+新增颜色键时必须**同时**补进两套字典 —— :func:`_validate_tokens` 会在导入时
+校验两套键集合一致，缺一个直接抛错，避免出现「深色下某处漏色」这种难查的问题。
+
+字体族回退链（重要）
+-------------------
+每条由 QSS 设置 ``font-size`` / ``font-weight`` 的规则都必须显式带 ``font-family``。
+Qt 的 QSS 一旦覆盖字号，会连带把字体族重置成默认值，于是 "⚙" / "🤖" / "🎬"
+这类符号落到没有该字形的默认字体上，渲染成豆腐块。实测：只写 font-size 的
+QLabel 显示豆腐块，同时写 font-family 的正常。全局 ``QWidget`` 规则里的
+family 救不了它们。
 
 调用方
 ------
-``apply_theme(QApplication.instance())`` 一次性注入；任何 QWidget 在创建时自动继承
-（Qt 的 stylesheet 级联在 QApplication 上生效）。
+``apply_theme(app)`` 注入浅色；``apply_theme(app, "dark")`` 注入深色。
+多次调用幂等（同一 mode 下字符串相同）。
 """
 
 from __future__ import annotations
@@ -20,80 +36,150 @@ from PySide6.QtWidgets import QApplication
 # 设计令牌
 # ---------------------------------------------------------------------------
 
-# 配色 —— 在这里集中改，全局生效
-COLOR_PRIMARY = "#3b6cb8"
-COLOR_PRIMARY_HOVER = "#4a7bc6"
-COLOR_PRIMARY_PRESSED = "#2f5aa0"
-COLOR_DANGER = "#b3261e"
-COLOR_DANGER_HOVER = "#c4332a"
-COLOR_WARN = "#9a6700"
-COLOR_INFO = "#3d6b35"
-COLOR_SUCCESS = "#2e7d32"
-COLOR_NEUTRAL = "#5f6368"
-
-COLOR_BG = "#f5f6fa"
-COLOR_BG_ALT = "#ffffff"
-COLOR_BG_HOVER = "#eef1f7"
-COLOR_BG_SELECTED = "#e8f0fc"
-COLOR_BORDER = "#d9dce4"
-COLOR_BORDER_STRONG = "#b8bdc8"
-COLOR_TEXT = "#20232a"
-COLOR_TEXT_MUTED = "#5f6368"
-COLOR_TEXT_DISABLED = "#a0a3ac"
-COLOR_TEXT_INVERSE = "#ffffff"
-
-# 圆角
+# 与颜色无关的令牌：两套主题共用
 RADIUS_SM = 4
 RADIUS_MD = 8
 RADIUS_LG = 12
 
-# 间距
 SPACE_XS = 4
 SPACE_SM = 8
 SPACE_MD = 12
 SPACE_LG = 16
 SPACE_XL = 24
 
-# 字体
-#
-# 必须显式把符号字体排进回退链，且**每个由 QSS 设置 font-size 的规则都要带上
-# font-family**：Qt 的 QSS 一旦覆盖 font-size，会连带把字体族重置成默认值，
-# 于是 "⚙" / "🤖" 这类符号落到没有该字形的默认字体上，渲染成豆腐块。
-# 实测：只写 font-size 的 QLabel 显示豆腐块，同时写 font-family 的正常。
 FONT_FAMILY = (
     "'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif"
 )
 FONT_SYMBOL = "'Segoe UI Symbol', 'Segoe UI Emoji', 'Microsoft YaHei UI'"
 FONT_MONO = "Consolas, 'Cascadia Mono', 'Source Code Pro', monospace"
 
-# 字号
 FONT_SIZE_TITLE = 14
 FONT_SIZE_BODY = 12
 FONT_SIZE_CAPTION = 11
 FONT_SIZE_MONO = 12
+
+# 配色：两套主题按键集合完全一致
+#
+# light 是既有的浅色方案（原始提交值，未改动任何色值）。
+# dark 按方案 §31–33 取深色底 + 单强调色 #4AA6FF，并补齐浅色有而方案未列出的角色色
+# （info / neutral / 各 pill 底色等）——数量必须与 light 一一对应。
+TOKENS: dict[str, dict[str, str]] = {
+    "light": {
+        "PRIMARY": "#3b6cb8",
+        "PRIMARY_HOVER": "#4a7bc6",
+        "PRIMARY_PRESSED": "#2f5aa0",
+        "PRIMARY_SOFT": "#e8f0fc",
+        "DANGER": "#b3261e",
+        "DANGER_HOVER": "#c4332a",
+        "DANGER_SOFT": "#fbe6e4",
+        "WARN": "#9a6700",
+        "WARN_SOFT": "#fbf2dd",
+        "INFO": "#3d6b35",
+        "SUCCESS": "#2e7d32",
+        "SUCCESS_SOFT": "#e7f4ea",
+        "NEUTRAL": "#5f6368",
+        "BG": "#f5f6fa",
+        "BG_ALT": "#ffffff",
+        "BG_HOVER": "#eef1f7",
+        "BG_SELECTED": "#e8f0fc",
+        "BG_LOG": "#fafbfd",
+        "BORDER": "#d9dce4",
+        "BORDER_STRONG": "#b8bdc8",
+        "TEXT": "#20232a",
+        "TEXT_MUTED": "#5f6368",
+        "TEXT_DISABLED": "#a0a3ac",
+        "TEXT_INVERSE": "#ffffff",
+    },
+    "dark": {
+        "PRIMARY": "#4aa6ff",
+        "PRIMARY_HOVER": "#6bb7ff",
+        "PRIMARY_PRESSED": "#3189dd",
+        "PRIMARY_SOFT": "#1c2c3d",
+        "DANGER": "#f4685c",
+        "DANGER_HOVER": "#ff8074",
+        "DANGER_SOFT": "#3a2222",
+        "WARN": "#e0b355",
+        "WARN_SOFT": "#3a3320",
+        "INFO": "#7fc47a",
+        "SUCCESS": "#6cc47a",
+        "SUCCESS_SOFT": "#1f3325",
+        "NEUTRAL": "#8a8f98",
+        "BG": "#181a1d",
+        "BG_ALT": "#202226",
+        "BG_HOVER": "#2a2d32",
+        "BG_SELECTED": "#2a3644",
+        "BG_LOG": "#1b1d21",
+        "BORDER": "#33373d",
+        "BORDER_STRONG": "#4a4f57",
+        "TEXT": "#e6e8ec",
+        "TEXT_MUTED": "#9aa0a8",
+        "TEXT_DISABLED": "#5c6169",
+        "TEXT_INVERSE": "#0f1113",
+    },
+}
+
+
+def _validate_tokens() -> None:
+    """两套主题的键集合必须一致，否则深色下会漏染色。"""
+    light_keys = set(TOKENS["light"])
+    dark_keys = set(TOKENS["dark"])
+    if light_keys != dark_keys:
+        missing_in_dark = sorted(light_keys - dark_keys)
+        missing_in_light = sorted(dark_keys - light_keys)
+        raise RuntimeError(
+            "主题令牌两套不一致："
+            f"dark 缺少 {missing_in_dark}；light 缺少 {missing_in_light}"
+        )
+
+
+_validate_tokens()
+
+DEFAULT_MODE = "light"
+MODES = tuple(TOKENS)
+
+
+def tokens(mode: str = DEFAULT_MODE) -> dict[str, str]:
+    """取一套颜色令牌。mode 非法时退回默认，不抛异常（避免 UI 起不来）。"""
+    if mode not in TOKENS:
+        mode = DEFAULT_MODE
+    return TOKENS[mode]
+
+
+# 兼容旧引用：默认浅色的扁平常量。
+# 内部一律走 TOKENS，新代码请直接使用 tokens(mode)[...]。
+COLOR_PRIMARY = TOKENS[DEFAULT_MODE]["PRIMARY"]
+COLOR_DANGER = TOKENS[DEFAULT_MODE]["DANGER"]
+COLOR_WARN = TOKENS[DEFAULT_MODE]["WARN"]
+COLOR_INFO = TOKENS[DEFAULT_MODE]["INFO"]
+COLOR_SUCCESS = TOKENS[DEFAULT_MODE]["SUCCESS"]
+COLOR_BG = TOKENS[DEFAULT_MODE]["BG"]
+COLOR_BG_ALT = TOKENS[DEFAULT_MODE]["BG_ALT"]
+COLOR_BORDER = TOKENS[DEFAULT_MODE]["BORDER"]
+COLOR_TEXT = TOKENS[DEFAULT_MODE]["TEXT"]
+COLOR_TEXT_MUTED = TOKENS[DEFAULT_MODE]["TEXT_MUTED"]
 
 
 # ---------------------------------------------------------------------------
 # 样式表
 # ---------------------------------------------------------------------------
 
-STYLESHEET = f"""
+_RAW_TEMPLATE = """
 /* ===== 全局 ===== */
 QWidget {{
     font-family: {FONT_FAMILY};
     font-size: {FONT_SIZE_BODY}pt;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 QMainWindow, QDialog {{
-    background: {COLOR_BG};
+    background: {BG};
 }}
 
 /* ===== 工具栏 / 状态栏 ===== */
 QStatusBar {{
-    background: {COLOR_BG_ALT};
-    border-top: 1px solid {COLOR_BORDER};
-    color: {COLOR_TEXT_MUTED};
+    background: {BG_ALT};
+    border-top: 1px solid {BORDER};
+    color: {TEXT_MUTED};
     font-size: {FONT_SIZE_CAPTION}pt;
 }}
 
@@ -109,7 +195,7 @@ QStatusBar::item {{
  */
 QLabel {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    color: {COLOR_TEXT};
+    color: {TEXT};
     background: transparent;
 }}
 
@@ -117,24 +203,24 @@ QLabel[role="title"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: {FONT_SIZE_TITLE}pt;
     font-weight: 600;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 QLabel[role="subtitle"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: {FONT_SIZE_CAPTION}pt;
-    color: {COLOR_TEXT_MUTED};
+    color: {TEXT_MUTED};
 }}
 
 QLabel[role="mono"] {{
     font-family: {FONT_MONO};
     font-size: {FONT_SIZE_MONO}pt;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 QLabel[role="muted"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    color: {COLOR_TEXT_MUTED};
+    color: {TEXT_MUTED};
     font-size: {FONT_SIZE_CAPTION}pt;
 }}
 
@@ -151,81 +237,81 @@ QLabel[role="pill"] {{
 /* ===== 按钮 ===== */
 QPushButton {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    background: {COLOR_BG_ALT};
-    color: {COLOR_TEXT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
     padding: 6px 14px;
     min-height: 18px;
 }}
 
 QPushButton:hover {{
-    background: {COLOR_BG_HOVER};
-    border-color: {COLOR_BORDER_STRONG};
+    background: {BG_HOVER};
+    border-color: {BORDER_STRONG};
 }}
 
 QPushButton:pressed {{
-    background: {COLOR_BG_SELECTED};
+    background: {BG_SELECTED};
 }}
 
 QPushButton:disabled {{
-    color: {COLOR_TEXT_DISABLED};
-    background: {COLOR_BG};
-    border-color: {COLOR_BORDER};
+    color: {TEXT_DISABLED};
+    background: {BG};
+    border-color: {BORDER};
 }}
 
 QPushButton[role="primary"] {{
-    background: {COLOR_PRIMARY};
-    color: {COLOR_TEXT_INVERSE};
-    border-color: {COLOR_PRIMARY};
+    background: {PRIMARY};
+    color: {TEXT_INVERSE};
+    border-color: {PRIMARY};
     font-weight: 600;
 }}
 
 QPushButton[role="primary"]:hover {{
-    background: {COLOR_PRIMARY_HOVER};
-    border-color: {COLOR_PRIMARY_HOVER};
+    background: {PRIMARY_HOVER};
+    border-color: {PRIMARY_HOVER};
 }}
 
 QPushButton[role="primary"]:pressed {{
-    background: {COLOR_PRIMARY_PRESSED};
-    border-color: {COLOR_PRIMARY_PRESSED};
+    background: {PRIMARY_PRESSED};
+    border-color: {PRIMARY_PRESSED};
 }}
 
 QPushButton[role="primary"]:disabled {{
-    background: {COLOR_BG_HOVER};
-    color: {COLOR_TEXT_DISABLED};
-    border-color: {COLOR_BORDER};
+    background: {BG_HOVER};
+    color: {TEXT_DISABLED};
+    border-color: {BORDER};
 }}
 
 QPushButton[role="danger"] {{
-    color: {COLOR_DANGER};
-    border-color: {COLOR_DANGER};
+    color: {DANGER};
+    border-color: {DANGER};
 }}
 
 QPushButton[role="danger"]:hover {{
-    background: {COLOR_DANGER};
-    color: {COLOR_TEXT_INVERSE};
+    background: {DANGER};
+    color: {TEXT_INVERSE};
 }}
 
 /* ===== 输入控件 ===== */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-    background: {COLOR_BG_ALT};
-    color: {COLOR_TEXT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
     padding: 4px 8px;
     min-height: 22px;
-    selection-background-color: {COLOR_BG_SELECTED};
-    selection-color: {COLOR_TEXT};
+    selection-background-color: {BG_SELECTED};
+    selection-color: {TEXT};
 }}
 
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-    border-color: {COLOR_PRIMARY};
+    border-color: {PRIMARY};
 }}
 
 QLineEdit:read-only {{
-    background: {COLOR_BG};
-    color: {COLOR_TEXT_MUTED};
+    background: {BG};
+    color: {TEXT_MUTED};
 }}
 
 QSpinBox::up-button, QSpinBox::down-button,
@@ -241,28 +327,28 @@ QComboBox::drop-down {{
 }}
 
 QComboBox QAbstractItemView {{
-    background: {COLOR_BG_ALT};
-    color: {COLOR_TEXT};
-    border: 1px solid {COLOR_BORDER};
-    selection-background-color: {COLOR_BG_SELECTED};
-    selection-color: {COLOR_TEXT};
+    background: {BG_ALT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    selection-background-color: {BG_SELECTED};
+    selection-color: {TEXT};
     outline: none;
 }}
 
 /* ===== 复选 / 单选 ===== */
 QCheckBox, QRadioButton {{
     spacing: 6px;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 QCheckBox:disabled, QRadioButton:disabled {{
-    color: {COLOR_TEXT_DISABLED};
+    color: {TEXT_DISABLED};
 }}
 
 /* ===== 分组框 ===== */
 QGroupBox {{
-    background: {COLOR_BG_ALT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
     margin-top: 14px;
     padding: 12px 8px 8px 8px;
@@ -273,14 +359,14 @@ QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 0 6px;
-    color: {COLOR_TEXT_MUTED};
+    color: {TEXT_MUTED};
     font-weight: 600;
 }}
 
 /* ===== 列表 ===== */
 QListWidget {{
-    background: {COLOR_BG_ALT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
     padding: 4px;
     outline: none;
@@ -289,34 +375,34 @@ QListWidget {{
 QListWidget::item {{
     padding: 8px 12px;
     border-radius: {RADIUS_SM}px;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 QListWidget::item:hover {{
-    background: {COLOR_BG_HOVER};
+    background: {BG_HOVER};
 }}
 
 QListWidget::item:selected {{
-    background: {COLOR_BG_SELECTED};
-    color: {COLOR_PRIMARY_PRESSED};
+    background: {BG_SELECTED};
+    color: {PRIMARY_PRESSED};
 }}
 
 /* ===== 表格 ===== */
 QTableWidget {{
-    background: {COLOR_BG_ALT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
-    gridline-color: {COLOR_BORDER};
-    selection-background-color: {COLOR_BG_SELECTED};
-    selection-color: {COLOR_TEXT};
+    gridline-color: {BORDER};
+    selection-background-color: {BG_SELECTED};
+    selection-color: {TEXT};
 }}
 
 QHeaderView::section {{
-    background: {COLOR_BG};
-    color: {COLOR_TEXT_MUTED};
+    background: {BG};
+    color: {TEXT_MUTED};
     border: none;
-    border-bottom: 1px solid {COLOR_BORDER};
-    border-right: 1px solid {COLOR_BORDER};
+    border-bottom: 1px solid {BORDER};
+    border-right: 1px solid {BORDER};
     padding: 6px 8px;
     font-weight: 600;
 }}
@@ -327,98 +413,98 @@ QTableWidget::item {{
 
 /* ===== 进度条 ===== */
 QProgressBar {{
-    background: {COLOR_BG};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
     text-align: center;
-    color: {COLOR_TEXT};
+    color: {TEXT};
     min-height: 16px;
 }}
 
 QProgressBar::chunk {{
-    background: {COLOR_PRIMARY};
-    border-radius: {RADIUS_SM - 1}px;
+    background: {PRIMARY};
+    border-radius: {RADIUS_SM_INNER}px;
 }}
 
 /* ===== 文本面板 ===== */
 QTextEdit, QPlainTextEdit {{
-    background: {COLOR_BG_ALT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
     padding: 8px;
-    color: {COLOR_TEXT};
-    selection-background-color: {COLOR_BG_SELECTED};
-    selection-color: {COLOR_TEXT};
+    color: {TEXT};
+    selection-background-color: {BG_SELECTED};
+    selection-color: {TEXT};
 }}
 
 QTextEdit[role="log"], QPlainTextEdit[role="log"] {{
     font-family: {FONT_MONO};
     font-size: {FONT_SIZE_MONO}pt;
-    background: #fafbfd;
+    background: {BG_LOG};
 }}
 
 QTextEdit:read-only, QPlainTextEdit:read-only {{
-    background: {COLOR_BG_ALT};
+    background: {BG_ALT};
 }}
 
 /* ===== 卡片（QFrame 派生） ===== */
 QFrame[role="card"] {{
-    background: {COLOR_BG_ALT};
-    border: 1px solid {COLOR_BORDER};
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
 }}
 
 QFrame[role="card-title"] {{
-    background: {COLOR_BG};
+    background: {BG};
     border: none;
-    border-bottom: 1px solid {COLOR_BORDER};
+    border-bottom: 1px solid {BORDER};
     border-top-left-radius: {RADIUS_MD}px;
     border-top-right-radius: {RADIUS_MD}px;
     padding: 8px 12px;
 }}
 
 QFrame[role="card-body"] {{
-    background: {COLOR_BG_ALT};
+    background: {BG_ALT};
     border: none;
     padding: 12px;
 }}
 
 QLabel[role="card-title-text"] {{
     font-weight: 600;
-    color: {COLOR_TEXT};
+    color: {TEXT};
 }}
 
 /* ===== 状态徽章 ===== */
 QLabel[role="pill"] {{
-    border-radius: {RADIUS_SM + 2}px;
+    border-radius: {RADIUS_PILL}px;
     padding: 2px 8px;
     font-size: {FONT_SIZE_CAPTION}pt;
     font-weight: 600;
 }}
 
 QLabel[role="pill"][tone="primary"] {{
-    background: {COLOR_BG_SELECTED};
-    color: {COLOR_PRIMARY_PRESSED};
+    background: {PRIMARY_SOFT};
+    color: {PRIMARY_PRESSED};
 }}
 
 QLabel[role="pill"][tone="success"] {{
-    background: #e7f4ea;
-    color: {COLOR_SUCCESS};
+    background: {SUCCESS_SOFT};
+    color: {SUCCESS};
 }}
 
 QLabel[role="pill"][tone="warn"] {{
-    background: #fbf2dd;
-    color: {COLOR_WARN};
+    background: {WARN_SOFT};
+    color: {WARN};
 }}
 
 QLabel[role="pill"][tone="danger"] {{
-    background: #fbe6e4;
-    color: {COLOR_DANGER};
+    background: {DANGER_SOFT};
+    color: {DANGER};
 }}
 
 QLabel[role="pill"][tone="muted"] {{
-    background: {COLOR_BG_HOVER};
-    color: {COLOR_TEXT_MUTED};
+    background: {BG_HOVER};
+    color: {TEXT_MUTED};
 }}
 
 /* ===== 滚动条 ===== */
@@ -429,13 +515,13 @@ QScrollBar:vertical {{
 }}
 
 QScrollBar::handle:vertical {{
-    background: {COLOR_BORDER_STRONG};
+    background: {BORDER_STRONG};
     border-radius: 5px;
     min-height: 24px;
 }}
 
 QScrollBar::handle:vertical:hover {{
-    background: {COLOR_NEUTRAL};
+    background: {NEUTRAL};
 }}
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
@@ -449,7 +535,7 @@ QScrollBar:horizontal {{
 }}
 
 QScrollBar::handle:horizontal {{
-    background: {COLOR_BORDER_STRONG};
+    background: {BORDER_STRONG};
     border-radius: 5px;
     min-width: 24px;
 }}
@@ -461,7 +547,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 
 /* ===== 分割器 ===== */
 QSplitter::handle {{
-    background: {COLOR_BORDER};
+    background: {BORDER};
 }}
 
 QSplitter::handle:horizontal {{
@@ -474,9 +560,9 @@ QSplitter::handle:vertical {{
 
 /* ===== 工具提示 ===== */
 QToolTip {{
-    background: {COLOR_TEXT};
-    color: {COLOR_TEXT_INVERSE};
-    border: 1px solid {COLOR_TEXT};
+    background: {TEXT};
+    color: {TEXT_INVERSE};
+    border: 1px solid {TEXT};
     padding: 4px 8px;
     border-radius: {RADIUS_SM}px;
     font-size: {FONT_SIZE_CAPTION}pt;
@@ -484,19 +570,58 @@ QToolTip {{
 """
 
 
+def build_stylesheet(mode: str = DEFAULT_MODE) -> str:
+    """按主题模式渲染全局样式表。"""
+    palette = dict(tokens(mode))
+    # 派生量：不在 TOKENS 里，避免两套字典要多写派生键
+    palette["RADIUS_SM"] = RADIUS_SM
+    palette["RADIUS_MD"] = RADIUS_MD
+    palette["RADIUS_SM_INNER"] = RADIUS_SM - 1
+    palette["RADIUS_PILL"] = RADIUS_SM + 2
+    palette["FONT_FAMILY"] = FONT_FAMILY
+    palette["FONT_SYMBOL"] = FONT_SYMBOL
+    palette["FONT_MONO"] = FONT_MONO
+    palette["FONT_SIZE_TITLE"] = FONT_SIZE_TITLE
+    palette["FONT_SIZE_BODY"] = FONT_SIZE_BODY
+    palette["FONT_SIZE_CAPTION"] = FONT_SIZE_CAPTION
+    palette["FONT_SIZE_MONO"] = FONT_SIZE_MONO
+    return _RAW_TEMPLATE.format(**palette)
+
+
+# 兼容旧引用：默认浅色样式表
+STYLESHEET = build_stylesheet(DEFAULT_MODE)
+
+
 # ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
 
 
-def apply_theme(app: QApplication | None = None) -> None:
+def apply_theme(app: QApplication | None = None, mode: str = DEFAULT_MODE) -> None:
     """把全局样式表注入到 QApplication。
 
-    多次调用幂等（同一字符串）。
+    mode 取 ``"light"`` / ``"dark"``；非法值退回默认浅色，不抛异常。
+    同一 mode 下多次调用幂等（字符串相同，不做无谓的 setStyleSheet）。
     """
     if app is None:
         app = QApplication.instance()
     if app is None:
         return
-    if app.styleSheet() != STYLESHEET:
-        app.setStyleSheet(STYLESHEET)
+    sheet = build_stylesheet(mode)
+    if app.styleSheet() != sheet:
+        app.setStyleSheet(sheet)
+
+
+def is_dark(mode: str = DEFAULT_MODE) -> bool:
+    """给需要按主题分叉的绘制代码用（如时间轴自绘背景）。"""
+    return mode == "dark"
+
+
+def qcolor(mode: str, key: str):
+    """取 QColor，供自绘控件使用。
+
+    延迟导入 QColor，避免纯逻辑测试在没有 QtGui 的环境下 import 失败。
+    """
+    from PySide6.QtGui import QColor
+
+    return QColor(tokens(mode)[key])

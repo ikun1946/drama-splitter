@@ -103,7 +103,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §7.1/§7.3 语音转写、VAD、词级时间、分块偏移 | `app/core/asr.py` | 完成 |
 | §8.1 镜头切换与黑场检测 | `app/core/shots.py` | 完成 |
 | §8.2/§8.4 候选数据库：收集、合并、评分、限流 | `app/core/candidates.py` | 完成 |
-| §13.1 工作流界面（六页：导入/设置/分析/审核/导出/模型，后两者为抽屉） | `app/gui/main_window.py` | 完成 |
+| §13.1 工作流界面（六页：导入/设置/分析/审核/导出/模型，后两者为抽屉） | `app/gui/pages/`、`app/gui/main_window.py` | 完成 |
 | §13.3 帧级预览（解码帧驱动，非播放器近似） | `app/gui/frame_source.py` | 完成 |
 | §16 阶段1「不依赖 AI 也能正确剪出指定区间」 | 全部 | 验收通过 |
 | §16 阶段3「自动基础分析 → 候选数据库」 | `asr/shots/subtitles/candidates/audio/cache` | 验收通过 |
@@ -263,12 +263,20 @@ app/core/          引擎（不依赖界面，可独立测试）
   model_manager.py   模型清单、体积探测、下载与删除
   app_config.py      应用配置持久化（模型目录等）
 app/gui/           界面（PySide6-Essentials）
-  theme.py           设计令牌与全局 QSS
+  theme.py           设计令牌与全局 QSS（浅色 / 深色双套）
   widgets/           通用控件（卡片/抽屉/步骤条/下拉区/日志面板等 12 个）
+  pages/             六个工作页面，每页一个文件
+    _common.py         页面层共享符号（等级映射、任务登记、滚动容器）
+    import_page.py     导入
+    settings_page.py   设置（抽屉）
+    analysis_page.py   分析
+    review_page.py     审核
+    export_page.py     导出
+    model_page.py      模型（抽屉）
   state.py           项目状态与方案版本链
-  workers.py         后台工作线程（探测/规划/导出）
+  workers.py         后台工作线程（BaseWorker + 探测/规划/分析/导出/下载）
   frame_source.py    帧级预览（单帧解码 + 流式播放）
-  main_window.py     六页工作流（设置/模型为右侧抽屉）
+  main_window.py     主窗口与装配（页面切换、顶栏、抽屉、快捷键）
 tools/             开发与验证工具
   markers.py         帧号条码与声音标记规范
   verify.py          帧号读回、提示音检测、音画偏差测量
@@ -276,7 +284,7 @@ tools/             开发与验证工具
   make_speech_asset.py 中文语音合成（带 ASR 标准答案）
   eval_asr.py        ASR 评测：CER 与时间戳误差
   fetch_whisper_model.py / fetch_llm.py 下载模型（走镜像、绕开符号链接）
-  screenshot_gui.py  离屏渲染界面截图（抽屉页按窗口+面板拼接）
+  screenshot_gui.py  离屏渲染界面截图（支持 --theme dark；抽屉页按窗口+面板拼接）
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）

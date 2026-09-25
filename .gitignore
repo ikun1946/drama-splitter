@@ -41,3 +41,9 @@ config.json
 
 # 临时验证产物
 .tmp-verify/
+
+# 临时运行目录（pytest / smoke 日志、一次性对比图）
+.tmp-run/
+
+# 本地改动备份（改文件前的 .bak-YYYY-MM-DD）
+*.bak-*
