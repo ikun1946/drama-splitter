@@ -1,16 +1,14 @@
 """MediaPreview —— 帧级预览（带 HUD 与时间码）。
 
-继承原 ``PreviewPanel`` 行为，但加上：
-- 顶部 HUD（时间码 + 帧号 + PTS）
-- 双击居中（保留旧 API）
-- 播放控制按钮图标化
-
-公开 API（与原 PreviewPanel 完全兼容）：
-- set_image(image)
-- clear(text)
+公开 API：
+- set_image(image) / clear(text) / set_frame_info(frame_index, pts)
 - timecode (QLabel)
 - btn_play / btn_boundary / btn_stitch / btn_prev_frame / btn_next_frame /
   btn_back_1s / btn_fwd_1s / btn_back_5s / btn_fwd_5s / btn_stop
+
+控制条放在横向滚动容器里：10 个按钮的单行最小宽度接近 900px，直接放进布局
+会顶住整栏的最小宽度（中栏就再也不能被压窄了）。装进容器后空间不足时横向
+滚动，按钮不会被压扁、也不会把窗口最小宽度顶上去。
 """
 
 from __future__ import annotations
@@ -25,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .scroll_area import h_scrollable
+
 
 class MediaPreview(QWidget):
     """带 HUD 的帧级预览。"""
@@ -35,16 +35,15 @@ class MediaPreview(QWidget):
         self._frame_index: int | None = None
         self._pts: str = "--:--:--.---"
 
-        # 画面区
+        # 画面区：最小高度按"能看清切点画面"给，宽度给得宽松（画面按比例缩放）
         self.view = QLabel("尚未选择源文件")
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.view.setMinimumSize(480, 270)
-        self.view.setStyleSheet("background:#0e0f13; color:#bbb; border:1px solid #1a1c22;")
+        self.view.setMinimumSize(360, 200)
+        self.view.setProperty("role", "video-canvas")
 
         # 时间码（HUD 顶部条）
         self.timecode = QLabel("--:--:--.---")
-        self.timecode.setProperty("role", "mono")
-        self.timecode.setStyleSheet("color:#cfd2d8; background:#1a1c22; padding:4px 10px;")
+        self.timecode.setProperty("role", "mono-hud")
 
         # 控制按钮
         self.btn_play = QPushButton("▶ 播放本集")
@@ -102,12 +101,15 @@ class MediaPreview(QWidget):
         ):
             controls.addWidget(b)
 
+        controls_holder = QWidget()
+        controls_holder.setLayout(controls)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.view, 1)
         layout.addWidget(self.timecode)
-        layout.addLayout(controls)
+        layout.addWidget(h_scrollable(controls_holder))
 
     def set_image(self, image: QImage | None) -> None:
         self._image = image

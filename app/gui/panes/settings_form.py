@@ -34,10 +34,10 @@ from ..widgets import (
 )
 
 
-__all__ = ["SettingsPage"]
+__all__ = ["SettingsForm"]
 
 
-class SettingsPage(QWidget):
+class SettingsForm(QWidget):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state

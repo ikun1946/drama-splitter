@@ -7,29 +7,46 @@
 
 ## 界面
 
-六页工作流。截图由 `tools/screenshot_gui.py` 离屏渲染真实界面得到，
-预览区显示的是 FFmpeg 解出的**真实解码帧**（可见测试素材自带的帧号条码）。
+**单页工作台**：一页三栏（左=上下文 / 中=舞台 / 右=检查器），四个阶段在同一页里
+换屏，没有页面切换、没有步骤条。阶段由项目状态推导（`app/gui/stage.py`）：
+
+| 阶段 | 判据 | 左栏 | 中栏 | 底栏主动作 |
+| --- | --- | --- | --- | --- |
+| 空态 | 无媒体 | 隐藏 | 拖放 hero | 选择源视频… |
+| 就绪 | 有媒体无方案 | 素材（源文件/媒体摘要/音轨） | 预览 + 整片时间轴 | ▶ 开始分析 |
+| 分析中 | 分析线程在跑 | 只读 | 阶段 n/7 + 进度 + 最近输出 | 取消分析 |
+| 审核 | 有方案 | 集列表 + 当前集 + 切点操作 | 预览 + 时间轴（切点/锁定/播放头）+ 播放控制 | 导出… |
+
+右栏检查器常驻：兼容性问题、方案层校验、逐集复核风险、后台日志，各只有一处
+（原先导入区与检查器各列一份问题清单、分析日志也两处显示）。设置 / 模型 / 导出
+是**对话框**（菜单「工具」），不占工作区。
+
+**轻量时间轴**（`app/gui/widgets/timeline.py`）：整片时长条 + 集分段 + 切点标记
+（锁定实心 / 异常标红）+ 播放头，可直接拖动切点（松手先吸附到帧起点再换算 ticks）、
+点击跳转与选集。不做帧缩略图。绘制分静态层（缓存 QPixmap，仅尺寸/主题/方案/选中
+集变化才重建）与动态层（只重绘播放头），播放时每帧刷新不会重建整条。
+
+截图由 `tools/screenshot_gui.py` 离屏渲染真实界面得到，预览区显示的是 FFmpeg
+解出的**真实解码帧**（可见测试素材自带的帧号条码）。
 
 | 页面 | 截图 |
 | --- | --- |
-| 导入 | [01-导入](docs/screenshots/01-导入.png) |
-| 设置（右侧抽屉，顶栏 ⚙ 打开） | [02-设置](docs/screenshots/02-设置.png) |
-| 分析 | [03-分析](docs/screenshots/03-分析.png) |
-| 审核 | [04-审核](docs/screenshots/04-审核.png) |
-| 导出 | [05-导出](docs/screenshots/05-导出.png) |
-| 模型（右侧抽屉，顶栏 🤖 打开） | [06-模型](docs/screenshots/06-模型.png) |
+| 空态（未导入） | [01-空态](docs/screenshots/01-工作台-空态.png) |
+| 素材就绪 | [02-素材就绪](docs/screenshots/02-工作台-素材就绪.png) |
+| 分析中 | [03-分析中](docs/screenshots/03-工作台-分析中.png) |
+| 审核（时间轴） | [04-审核](docs/screenshots/04-工作台-审核.png) |
+| 设置（对话框） | [05-设置](docs/screenshots/05-设置.png) |
+| 模型（对话框） | [06-模型](docs/screenshots/06-模型.png) |
+| 导出（对话框） | [07-导出](docs/screenshots/07-导出.png) |
 
-「设置」与「模型」不是独立工作阶段，而是随时可开的抽屉：实际操作时左侧
-仍停在当前工作页。截图因此按「左侧窗口 + 右侧抽屉」横向拼接呈现。
+![审核](docs/screenshots/04-工作台-审核.png)
 
-![审核页](docs/screenshots/04-审核.png)
-
-审核页要求「连看切点前后」，因此提供三种检视方式：播放整集、播放切点前后 ±3 秒、
+审核要求「连看切点前后」，因此提供三种检视方式：播放整集、播放切点前后 ±3 秒、
 以及**用已导出的成片连看相邻两集**（后者能发现编码层面的衔接问题，前者只能验证规划）。
 
 ## 模型下载（界面内完成）
 
-应用内置"模型"页（顶栏 🤖 打开），用户可直接在界面里选择并下载所需模型，
+应用内置「模型管理」对话框（菜单 **工具 → 模型管理…**），用户可直接在界面里选择并下载所需模型，
 **不需要命令行**。
 
 | 类别 | 可选档位 | 用途 |
@@ -103,7 +120,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §7.1/§7.3 语音转写、VAD、词级时间、分块偏移 | `app/core/asr.py` | 完成 |
 | §8.1 镜头切换与黑场检测 | `app/core/shots.py` | 完成 |
 | §8.2/§8.4 候选数据库：收集、合并、评分、限流 | `app/core/candidates.py` | 完成 |
-| §13.1 工作流界面（三页：工作台（导入+分析）/审核/导出，设置与模型为顶栏抽屉） | `app/gui/pages/`、`app/gui/main_window.py` | 完成 |
+| §13.1 工作流界面（单页工作台：三栏 + 四阶段状态推进；设置/模型/导出为对话框） | `app/gui/workbench.py`、`app/gui/main_window.py` | 完成 |
 | §13.3 帧级预览（解码帧驱动，非播放器近似） | `app/gui/frame_source.py` | 完成 |
 | §16 阶段1「不依赖 AI 也能正确剪出指定区间」 | 全部 | 验收通过 |
 | §16 阶段3「自动基础分析 → 候选数据库」 | `asr/shots/subtitles/candidates/audio/cache` | 验收通过 |
@@ -118,7 +135,9 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §9.3 完整帧表（VFR 地基） | `app/core/probe.py` | 完成（生成与核验；导出仍要求 CFR） |
 | §15 硬件编码器探测 | `app/core/ffmpeg.py` | 完成 |
 | § 任务恢复（项目快照）+ §五十五/五十六 保存 / 打开 / 自动保存 | `app/gui/state.py`、`app/gui/main_window.py` | 完成 |
-| §37 导出前置检查（未审核切点不禁止：继续导出 / 返回审核） | `app/gui/pages/export_page.py::export_precheck` | 完成 |
+| §37 导出前置检查（未审核切点不禁止：继续导出 / 返回审核） | `app/gui/panes/export_form.py::export_precheck` | 完成 |
+| §19（自定）轻量时间轴：切点标记 / 锁定 / 播放头 / 拖拽改切点 | `app/gui/widgets/timeline.py` | 完成（不含帧缩略图） |
+| § 四阶段状态机（空态 / 就绪 / 分析中 / 审核） | `app/gui/stage.py` | 完成 |
 | §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航、F11 全屏/Esc 关闭） | `app/gui/main_window.py::_install_shortcuts` | 完成 |
 | §15 打包与部署自检 | `tools/build_package.py` + `run.py --self-check` | 完成 |
 
@@ -133,6 +152,11 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 - **HDR 转换**：不做，源片 HDR 属性在导入阶段给出警告。
 - **快速复制**：要求所有集间切点都落在关键帧上，否则明确拒绝（不静默降级为重新编码）。
   实测关键帧通常每 250 帧（约 10 秒）一个，因此实际可用的切点位置受限。
+- **时间轴不做帧缩略图**：只画集分段、切点与播放头。1 小时 1080p 约 10.8 万帧，
+  直读必卡，需要另建缩略图金字塔与缓存策略，属后续独立模块。
+- **手工移动切点不新建方案版本**：与既有实现一致，只把 `plan.source` 标为 `manual`
+  并立即重检（方案版本链仍由自动规划与"另存为新版本"产生）。
+- **分析中只报阶段与最近一条输出**：完整日志在右栏检查器的「日志」页签（唯一落点）。
 
 ## 环境
 
@@ -158,7 +182,7 @@ python -m venv .venv
 ## 验证
 
 ```bash
-# 单元与端到端测试（362 项；20 项按环境跳过：缺合成语音素材 / whisper 模型 / LLM 模型时）
+# 单元与端到端测试（394 项；20 项按环境跳过：缺合成语音素材 / whisper 模型 / LLM 模型时）
 .venv/Scripts/python.exe -m pytest tests/ -q
 
 # 界面全链路冒烟（离屏运行，含真实编码与逐帧校验）
@@ -265,21 +289,33 @@ app/core/          引擎（不依赖界面，可独立测试）
   model_manager.py   模型清单、体积探测、下载与删除
   app_config.py      应用配置持久化（模型目录、界面主题等）
 app/gui/           界面（PySide6-Essentials）
-  theme.py           设计令牌与全局 QSS（浅色 / 深色双套，顶栏可运行时切换并记住）
-  widgets/           通用控件（卡片/抽屉/步骤条/下拉区/日志面板等 12 个）
-  pages/             页面实现，每页一个文件（方案 §五：核心工作流三页）
-    _common.py         页面层共享符号（等级映射、任务登记、滚动容器）
-    workbench_page.py  分集工作台 = 导入区 + 分析区 + 右侧检查器（§八/§二十四）
-    import_page.py     导入区（工作台上半，媒体就绪后拖放区收为一行）
-    analysis_page.py   分析区（工作台下半，日志镜像到检查器）
-    settings_page.py   设置（抽屉）
-    review_page.py     审核（切点操作两列网格 + 显式最小高度，右列滚动兜底）
-    export_page.py     导出（§37 前置检查：未审核切点可继续或返回审核）
-    model_page.py      模型（抽屉）
+  theme.py           设计令牌与全局 QSS（浅色 / 深色双套，菜单可运行时切换并记住）
+  stage.py           四阶段裁决（空态/就绪/分析中/审核）+ 底栏文案与主动作
+  workbench.py       单页工作台：三栏装配 + 阶段驱动（左=上下文 / 中=舞台 / 右=检查器）
+  panes/             分区与表单（每屏一文件）
+    _common.py         共享符号（等级映射、任务登记、滚动容器）
+    import_pane.py     左栏·素材（源文件 / 媒体摘要 / 主对白音轨）
+    review_pane.py     左栏·分集审核（集列表 / 当前集 / 切点操作）
+    analysis_pane.py   中栏·分析进度（阶段 / 进度 / 最近输出）
+    settings_form.py   分集设置表单（由对话框承载，取消即回滚）
+    model_form.py      模型表单（清单 / 体积 / 磁盘预检 / 下载删除）
+    export_form.py     导出表单（§37 前置检查在这里做，决策点在对话框）
+  dialogs/           对话框：DialogShell + 设置 / 模型 / 导出
+    base.py            外壳与「自动化里不许 exec()」的约定
+  widgets/           通用控件
+    timeline.py        轻量时间轴（静态层缓存 + 播放头局部重绘）
+    stage_view.py      中栏舞台（预览 + 时间轴 + 播放控制）
+    inspector.py       右侧常驻检查器（问题 / 建议 / 日志）
+    bottom_bar.py      底栏（阶段文案 + 进度 + 提示 + 主动作）
+    app_bar.py         顶栏（源文件名 + 保存状态 + 更换视频）
+    media_preview.py   帧级预览（HUD 时间码；控制条可横向滚动）
+    card.py / drop_zone.py / labeled_field.py / log_panel.py / status_pill.py
+    message.py         统一弹窗出口（测试只 patch 这一处）
+    scroll_area.py     scrollable / h_scrollable
   state.py           项目状态与方案版本链（快照 payload + 原子落盘）
   workers.py         后台工作线程（BaseWorker + 探测/规划/分析/导出/下载）
   frame_source.py    帧级预览（单帧解码 + 流式播放）
-  main_window.py     主窗口与装配（页面切换、顶栏、抽屉、快捷键 §54、检查器跳转）
+  main_window.py     主窗口：菜单、对话框工厂、项目保存、任务登记、快捷键 §54
 tools/             开发与验证工具
   markers.py         帧号条码与声音标记规范
   verify.py          帧号读回、提示音检测、音画偏差测量
@@ -287,11 +323,11 @@ tools/             开发与验证工具
   make_speech_asset.py 中文语音合成（带 ASR 标准答案）
   eval_asr.py        ASR 评测：CER 与时间戳误差
   fetch_whisper_model.py / fetch_llm.py 下载模型（走镜像、绕开符号链接）
-  screenshot_gui.py  离屏渲染界面截图（支持 --theme dark；抽屉页按窗口+面板拼接）
+  screenshot_gui.py  离屏渲染界面截图（支持 --theme dark；对话框只 show() 不 exec）
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             362 项自动化测试（13 个文件：342 通过 / 20 按环境跳过）
+tests/             394 项自动化测试（15 个文件：374 通过 / 20 按环境跳过）
 testdata/          合成素材（不入版本库）
 ```
 
@@ -344,6 +380,11 @@ testdata/          合成素材（不入版本库）
 另外，`tools/screenshot_gui.py` 的 `pump()` 曾被误粘贴成 `install_cjk_font()`
 的副本，且函数体的循环写在 `return` 之后——所有 `pump()` 调用都是空操作，
 事件循环从未推进。已重写。
+
+> 第 6–8 条与上面这条记录的抽屉（Drawer）与拼接 hack 已随界面改版整体移除：
+> 设置 / 模型 / 导出改成真对话框后，"窗口 + 面板"拼接、动画等待、被遮区域重复
+> 都不再存在，截图工具只需 `show() + grab()`。这些坑仍值得记住——只要再引入
+> 浮层控件，它们会原样回来。
 
 ## 验收证据
 

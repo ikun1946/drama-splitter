@@ -1,14 +1,16 @@
-"""主窗口（方案 §13.1 推荐界面结构）。
+"""主窗口：菜单 + 顶栏 + 单页工作台 + 底栏。
 
-六个工作页面的实现在 ``app.gui.pages`` 下，各占一个文件；本模块只保留
-MainWindow 与装配逻辑（页面构建、页面切换、顶栏 stepper、抽屉、
-活跃任务登记、快捷键）。
+工作区只有一个工作台（``app/gui/workbench.py``），四个阶段在同一页里换屏，
+不再有页面栈、抽屉与步骤条。本模块只负责"窗口级"的事情：
 
-分层约定：
-- 主题由 ``app.gui.theme`` 注入（设计令牌化，支持浅色 / 深色两套）；
-- 通用控件从 ``app.gui.widgets`` 取；
-- 页面的具体实现仍然挂在同名属性下（``import_page.issues``、
-  ``review_page.episode_table``、``export_page.queue`` 等），冒烟测试无须改动。
+- 菜单与三个对话框（设置 / 模型 / 导出）的构造与打开；
+- 项目保存 / 打开 / 自动保存；
+- 活跃后台任务登记（统一判断"忙不忙"、退出时收尾）；
+- 快捷键；
+- 把工作台的阶段变化翻译成底栏文案与主动作。
+
+自动化约定：测试、冒烟与截图只走 ``build_*_dialog() + show()``。实例级
+``exec()`` 在离屏环境会永久阻塞（实测挂过 25 分钟），所以菜单处理器里才 exec。
 """
 
 from __future__ import annotations
@@ -22,79 +24,32 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
     QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.app_config import AppConfig
 from ..core.plan import BoundaryPlan
-from ..core.probe import check_compatibility
 from ..core.settings import SplitSettings
-from .pages import (
-    ExportPage,
-    ModelPage,
-    ReviewPage,
-    SettingsPage,
-    WorkbenchPage,
-    scrollable,
-)
+from .dialogs import ExportDialog, ModelDialog, SettingsDialog
+from .stage import Stage, primary_action, stage_caption
 from .state import ProjectState, payload_text
 from .theme import apply_theme, current_mode
-from .widgets import (
-    AppBar,
-    Drawer,
-    InspectorIssue,
-    MediaPreview,
-    StepNav,
-    StepState,
-)
+from .widgets import AppBar, BottomBar
+from .widgets import message
+from .workbench import Workbench
 
-# 本模块不再直接弹窗，但 QMessageBox 在本命名空间下是既有的公共接口面：
-# 冒烟脚本会 monkeypatch ``main_window.QMessageBox.information`` 等来录制对话框，
-# 页类也大量用它。显式重导出，避免成为一个「看起来没用」的导入被清掉。
-__all__ = ["MainWindow", "PreviewPanel", "QMessageBox"]
-
-
-class PreviewPanel(MediaPreview):
-    """旧代码里部分脚本可能仍引用 ``PreviewPanel``；保留同名派生类。"""
-
-
-# ---------------------------------------------------------------------------
-# 主窗口
-# ---------------------------------------------------------------------------
+__all__ = ["MainWindow"]
 
 
 class MainWindow(QMainWindow):
-    # 三页工作区 + 两个抽屉（设置 / 模型不进核心工作流，见方案 §五）
-    PAGES = ["工作台", "设置", "审核", "导出", "模型"]
-
-    # 抽屉在 PAGES 中的位置（不占 stack 位）
-    DRAWER_INDICES = {1: "settings", 4: "model"}
-
-    # stepper 仍是四步：工作台承担前两步（导入 + 分析）
-    STEPPER_NAMES = ["导入", "分析", "审核", "导出"]
-    # PAGES 0 对应 stepper 0/1（工作台覆盖导入与分析）；PAGES 2/3 对应 stepper 2/3
-    _STEPPER_INDEX = {0: 0, 2: 2, 3: 3}
-    # PAGES 索引 → stack 索引（抽屉不占 stack 位）
-    _STACK_INDEX = {0: 0, 2: 1, 3: 2}
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AI 短剧智能分集器")
         self.resize(1440, 900)
-        # 显式设最小尺寸，避免各子控件的 minimumSizeHint 累加成 1325+
-        self.setMinimumSize(960, 600)
-        # 不设最大尺寸：人为上限会在超过上限的屏幕上把最大化卡死
-        # （实测教训：4096×2160 的旧上限在 5120×1440 超宽屏上会让
-        # 最大化按钮把窗口钳在 4096 宽，表现为"不能全屏"）。
+        # 三栏 + 左右两条边栏的最小宽度预算（320 + 460 + 300 ≈ 1080）
+        self.setMinimumSize(1100, 700)
 
         # 主题取自应用配置（记住上次选择）；非法值在 AppConfig.load 已兜底
         self.config = AppConfig.load()
@@ -105,133 +60,30 @@ class MainWindow(QMainWindow):
         # 阻止并发启动互相干扰的任务，以及退出时等它们收尾。
         self._workers: dict[str, object] = {}
 
-        # 顶栏（stepper + 主题切换 + 更换视频 + 设置/模型）
-        self.app_bar = AppBar("🎬  AI 短剧分集器", self.STEPPER_NAMES)
-        self.app_bar.set_theme_label(current_mode())
-        self.app_bar.step_clicked.connect(self._on_stepper_clicked)
-        self.app_bar.settings_clicked.connect(lambda: self.nav.setCurrentRow(1))
-        self.app_bar.model_clicked.connect(lambda: self.nav.setCurrentRow(4))
-        self.app_bar.theme_clicked.connect(self._on_theme_toggled)
+        self.app_bar = AppBar()
         self.app_bar.change_source_clicked.connect(self._on_change_source)
 
-        # StepNav 实例保留（兼容测试 + 作为导航数据模型），但不可见
-        self.nav = StepNav(self.PAGES)
-        self.nav.setVisible(False)
-        self.nav.currentRowChanged.connect(self._nav_changed)
+        self.workbench = Workbench(self.state)
+        self.bottom = BottomBar()
+        self.bottom.action_clicked.connect(self._on_bottom_action)
 
-        # 状态条（极简）：颜色全部走 QSS 角色，深浅主题自动跟随
-        self.status_strip = QFrame()
-        self.status_strip.setProperty("role", "status-strip")
-        self.status_strip.setFixedHeight(32)
-        self.status_left = QLabel("未导入源视频")
-        self.status_left.setProperty("role", "status-text")
-        self.status_progress = QLabel("")
-        self.status_progress.setProperty("role", "status-text")
-        self.status_right = QLabel(f"第 1 / {len(self.STEPPER_NAMES)} 步")
-        self.status_right.setProperty("role", "status-text")
-
-        strip_layout = QHBoxLayout(self.status_strip)
-        strip_layout.setContentsMargins(0, 0, 0, 0)
-        strip_layout.setSpacing(0)
-        strip_layout.addWidget(self.status_left, 1)
-        strip_layout.addWidget(self.status_progress, 1)
-        strip_layout.addWidget(self.status_right)
-
-        # 主工作区 stack：三页（工作台 / 审核 / 导出）
-        #
-        # 设置与模型不占 stack 位置，走顶栏图标打开的抽屉（方案 §五：只保留
-        # 三个核心页面，模型与程序配置属系统设置，不进核心工作流）。
-        self.stack = QStackedWidget()
-
-        self.workbench_page = WorkbenchPage(self.state)
-        self.settings_page = SettingsPage(self.state)
-        self.review_page = ReviewPage(self.state)
-        self.export_page = ExportPage(self.state)
-        self.model_page = ModelPage(self.state)
-
-        # 兼容既有引用：导入与分析已并入工作台，这两个名字指向其中的对应视图。
-        # import_page 指向真正的 ImportPage（探针线程、兼容性清单在其中），
-        # analysis_page 指向真正的 AnalysisPage，二者都挂在工作台内部。
-        self.import_page = self.workbench_page.import_view
-        self.analysis_page = self.workbench_page.analysis_view
-
-        # 检查器「查看」→ 切到审核页并定位到问题时间点（方案 §二十四 / §54）
-        self.workbench_page.inspector.jump_requested.connect(self._jump_to_issue)
-        # 导出前置检查中选「返回审核」→ 切回审核页（方案 §37）
-        self.export_page.review_requested.connect(lambda: self.nav.setCurrentRow(2))
-
-        for page in (self.workbench_page, self.review_page, self.export_page):
-            self.stack.addWidget(page)
-
-        # 底部 action bar：提示 + 继续按钮
-        self.hint = QLabel("")
-        self.hint.setProperty("role", "hint")
-
-        self.btn_continue = QPushButton("继续  →")
-        self.btn_continue.setProperty("role", "primary")
-        self.btn_continue.style().unpolish(self.btn_continue)
-        self.btn_continue.style().polish(self.btn_continue)
-        self.btn_continue.setMinimumWidth(140)
-        self.btn_continue.clicked.connect(self._on_continue_clicked)
-
-        # 兼容性占位（测试断言 window.btn_prev.isEnabled() == False）
-        self.btn_prev = QPushButton("←  上一步")
-        self.btn_prev.setVisible(False)
-        self.btn_prev.setEnabled(False)
-        self.btn_next = QPushButton("下一步  →")
-        self.btn_next.setVisible(False)
-
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.addWidget(self.hint, 1)
-        footer.addWidget(self.btn_continue)
-        footer_widget = QFrame()
-        footer_widget.setProperty("role", "footer-bar")
-        footer_widget.setLayout(footer)
-        footer_widget.setFixedHeight(56)
-
-        # 主内容区（占满 stack）
-        body = QHBoxLayout()
+        body = QVBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self.stack, 1)
-
-        body_widget = QWidget()
-        body_widget.setLayout(body)
-
-        # 总布局
-        root = QVBoxLayout()
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self.app_bar)
-        root.addWidget(self.status_strip)
-        root.addWidget(body_widget, 1)
-        root.addWidget(footer_widget)
-
+        body.addWidget(self.app_bar)
+        body.addWidget(self.workbench, 1)
+        body.addWidget(self.bottom)
         central = QWidget()
-        central.setLayout(root)
+        central.setLayout(body)
         self.setCentralWidget(central)
 
-        # 设置 / 模型抽屉（绑在 central 之上）
-        # 抽屉固定 420px，而两张页面的最小宽度是 640px：直接塞进去会被挤变形，
-        # 因此套一层横向滚动区，窄抽屉里也能完整读到内容。
-        self.settings_drawer = Drawer("设置", parent=central)
-        self.settings_drawer.set_body(scrollable(self.settings_page))
-        self.settings_drawer.closed.connect(lambda: self._on_drawer_closed(1))
+        # 三个对话框按需构造（见 build_*_dialog）
+        self.settings_dialog: SettingsDialog | None = None
+        self.model_dialog: ModelDialog | None = None
+        self.export_dialog: ExportDialog | None = None
 
-        self.model_drawer = Drawer("模型管理", parent=central)
-        self.model_drawer.set_body(scrollable(self.model_page))
-        self.model_drawer.closed.connect(lambda: self._on_drawer_closed(4))
-
-        # 状态条已经把「导入状态 + 第 N / M 步」显示了一遍，QMainWindow 的原生
-        # 状态栏会再显示一遍同样内容。因此隐藏原生状态栏，只保留对象本身
-        # 以兼容既有测试的取值。
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-        self.status_bar.addWidget(self.status_left, 1)
-        self.status_bar.hide()
-
-        self.nav.setCurrentRow(0)
+        self._connect()
+        self._build_menu()
         self._install_shortcuts()
 
         # ---- 项目保存 / 自动保存（方案 §五十五 / §五十六） ----
@@ -245,6 +97,185 @@ class MainWindow(QMainWindow):
         self._autosave.setInterval(30_000)
         self._autosave.timeout.connect(self._autosave_tick)
         self._autosave.start()
+
+        self.workbench.refresh()
+
+    # ---- 接线 ----------------------------------------------------------
+
+    def _connect(self) -> None:
+        self.workbench.stage_changed.connect(lambda _stage: self._sync_chrome())
+        self.workbench.state_changed.connect(self._sync_chrome)
+        self.workbench.hint_changed.connect(self.bottom.set_hint)
+        self.workbench.analysis_pane.progress_changed.connect(
+            lambda _text, ratio: self.bottom.set_progress(int(ratio * 100))
+        )
+
+    def _sync_chrome(self) -> None:
+        """把当前阶段翻译成底栏与顶栏（唯一一处读 stage 的地方）。"""
+        stage = self.workbench.stage
+        self.bottom.set_caption(
+            stage_caption(stage, self.state, self.workbench.selected_episode)
+        )
+        text, role = primary_action(stage)
+        self.bottom.set_action(text, role=role)
+        if stage is not Stage.ANALYZING:
+            self.bottom.set_progress(None)
+
+        media = self.state.media
+        if media is not None:
+            self.app_bar.set_source(Path(media.path).name, str(media.path))
+        else:
+            self.app_bar.set_source(None)
+
+        if hasattr(self, "action_dark"):
+            self.action_dark.setChecked(current_mode() == "dark")
+        # 打开项目后探针刚完成 → 在这里续上方案链重建
+        self._maybe_finish_restore()
+
+    def _on_bottom_action(self) -> None:
+        """底栏主动作：按阶段分流（文案由 stage.primary_action 提供）。"""
+        stage = self.workbench.stage
+        if stage is Stage.EMPTY:
+            self.workbench.import_pane.choose_file()
+        elif stage is Stage.READY:
+            ok, reason = self.workbench.can_start_analysis()
+            if not ok:
+                self.bottom.set_hint(reason)
+                return
+            self.bottom.set_hint("")
+            self.workbench.analysis_pane.start()
+        elif stage is Stage.ANALYZING:
+            self.workbench.analysis_pane.cancel()
+        else:
+            self._start_export()
+
+    # ---- 菜单与对话框 --------------------------------------------------
+
+    def _build_menu(self) -> None:
+        bar = self.menuBar()
+        file_menu = bar.addMenu("文件")
+        self._add_action(file_menu, "打开项目…", self.open_project, "Ctrl+O")
+        self._add_action(file_menu, "保存项目", self.save_project, "Ctrl+S")
+        self._add_action(file_menu, "另存为…", lambda: self.save_project(None))
+        file_menu.addSeparator()
+        self._add_action(file_menu, "更换源视频…", self._on_change_source)
+        file_menu.addSeparator()
+        self._add_action(file_menu, "退出", self.close)
+
+        tools_menu = bar.addMenu("工具")
+        self._add_action(tools_menu, "分集设置…", self.open_settings_dialog)
+        self._add_action(tools_menu, "模型管理…", self.open_model_dialog)
+        self._add_action(tools_menu, "导出…", self._start_export, "Ctrl+E")
+
+        view_menu = bar.addMenu("视图")
+        self.action_dark = self._add_action(
+            view_menu, "深色主题", self._on_theme_toggled, checkable=True
+        )
+        self.action_dark.setChecked(current_mode() == "dark")
+
+        help_menu = bar.addMenu("帮助")
+        self._add_action(help_menu, "运行自检…", self._show_self_check)
+        self._add_action(help_menu, "关于", self._show_about)
+
+    def _add_action(self, menu, text: str, handler, shortcut: str = "",
+                    checkable: bool = False):
+        action = menu.addAction(text)
+        action.setCheckable(checkable)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        action.triggered.connect(handler)
+        return action
+
+    def build_settings_dialog(self) -> SettingsDialog:
+        """构建设置对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
+        self.settings_dialog = SettingsDialog(self.state, self)
+        return self.settings_dialog
+
+    def build_model_dialog(self) -> ModelDialog:
+        self.model_dialog = ModelDialog(self.state, self)
+        return self.model_dialog
+
+    def build_export_dialog(self) -> ExportDialog:
+        dialog = ExportDialog(self.state, self)
+        dialog.review_requested.connect(self._on_export_review_requested)
+        self.export_dialog = dialog
+        return dialog
+
+    def open_settings_dialog(self) -> None:
+        self.build_settings_dialog().exec()
+
+    def open_model_dialog(self) -> None:
+        self.build_model_dialog().exec()
+
+    def _start_export(self) -> None:
+        """打开导出对话框并直接开始（前置检查由对话框负责，Ctrl+E 同路）。"""
+        dialog = self.build_export_dialog()
+        dialog.show()
+        dialog.start_export()
+
+    def _on_export_review_requested(self, episode: int, ms: int) -> None:
+        """§37 前置检查选「返回审核」：回到审核态并定位到问题切点。"""
+        if episode:
+            self.workbench.select_episode(episode, seek=False)
+        if ms:
+            self.workbench.stage_view.goto(Fraction(ms, 1000))
+        self.workbench.inspector.set_tab(0)
+
+    def _show_self_check(self) -> None:
+        """帮助菜单：把运行前提汇总成一段文字（run.py --self-check 的摘要）。"""
+        lines: list[str] = []
+        try:
+            from ..core.ffmpeg import check_encoders, locate_ffmpeg
+
+            binaries = locate_ffmpeg()
+            check_encoders(binaries)
+            lines.append(f"FFmpeg：{binaries.ffmpeg}")
+            lines.append(f"FFprobe：{binaries.ffprobe}")
+            lines.append(f"编码器：{'、'.join(sorted(binaries.encoders))}")
+        except Exception as exc:  # noqa: BLE001 - 自检不该因单项失败而中断
+            lines.append(f"FFmpeg：不可用（{exc}）")
+
+        from ..core.asr import locate_model
+        from ..core.semantic import locate_llm_model
+
+        whisper = locate_model("small")
+        lines.append("转写模型：" + (whisper.describe() if whisper else "未下载"))
+        llm = locate_llm_model()
+        lines.append("语义模型：" + (llm.name if llm else "未下载（语义判断降级运行）"))
+        message.information(self, "运行自检", "\n".join(lines))
+
+    def _show_about(self) -> None:
+        from run import VERSION
+
+        message.information(
+            self,
+            "关于",
+            f"AI 短剧智能分集器 {VERSION}\n\n"
+            "按《AI短剧智能分集器 V1.2.0 可实施修订方案》落地。\n"
+            "AI 只给建议，用户审核，程序按帧精确导出；默认不重排、不补拍。",
+        )
+
+    # ---- 顶栏 ----------------------------------------------------------
+
+    def _on_change_source(self) -> None:
+        """顶栏「更换视频」：与空态拖放、菜单项等价。"""
+        if self.is_busy():
+            self.bottom.set_hint("后台任务进行中，等它结束或取消后再更换视频。")
+            return
+        self.workbench.import_pane.choose_file()
+
+    def _on_theme_toggled(self) -> None:
+        next_mode = "dark" if current_mode() == "light" else "light"
+        apply_theme(mode=next_mode)
+        self.workbench.stage_view.refresh_theme()
+        if hasattr(self, "action_dark"):
+            self.action_dark.setChecked(next_mode == "dark")
+        self.config.theme = next_mode
+        try:
+            self.config.save()
+        except OSError:
+            # 配置写失败只影响「下次记住」，不阻断本次切换
+            pass
 
     # ---- 项目保存 / 打开 / 自动保存 ------------------------------------
 
@@ -269,7 +300,7 @@ class MainWindow(QMainWindow):
         try:
             self.state.save_snapshot(target)
         except OSError as exc:
-            self.hint.setText(f"自动保存失败：{exc}")
+            self.bottom.set_hint(f"自动保存失败：{exc}")
             return
         self.state.project_path = target
         self._last_saved_text = text
@@ -292,7 +323,7 @@ class MainWindow(QMainWindow):
         try:
             self.state.save_snapshot(target)
         except OSError as exc:
-            QMessageBox.warning(self, "保存失败", str(exc))
+            message.warning(self, "保存失败", str(exc))
             return None
         self.state.project_path = target
         self._last_saved_text = payload_text(self.state.snapshot_payload())
@@ -305,7 +336,7 @@ class MainWindow(QMainWindow):
         返回是否开始了恢复（媒体缺失/文件损坏时给明确提示并返回 False）。
         """
         if self.is_busy():
-            self.hint.setText("后台任务进行中，结束后再打开项目。")
+            self.bottom.set_hint("后台任务进行中，结束后再打开项目。")
             return False
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
@@ -316,12 +347,12 @@ class MainWindow(QMainWindow):
         try:
             payload = ProjectState.load_snapshot(Path(path))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            QMessageBox.warning(self, "打开失败", f"项目文件无法读取：\n{exc}")
+            message.warning(self, "打开失败", f"项目文件无法读取：\n{exc}")
             return False
 
         media_path = payload.get("media_path")
         if not media_path or not Path(media_path).exists():
-            QMessageBox.warning(
+            message.warning(
                 self, "源视频缺失",
                 f"项目引用的源视频不存在：\n{media_path}\n\n"
                 "请先把源文件放回原位置再打开项目。",
@@ -334,17 +365,18 @@ class MainWindow(QMainWindow):
             SplitSettings.from_json(payload["settings"])
             if payload.get("settings") else SplitSettings()
         )
-        self.settings_page.apply_settings(settings)
+        # 设置对话框是按需构造的（打开时才建），因此这里直接写状态；
+        # 对话框构造时会用当前参数回填控件（见 SettingsDialog.__init__）。
+        self.state.settings = settings
 
         # 方案重建需要 time_base / total_ticks，只能等探针完成（_maybe_finish_restore）
         self._pending_restore = payload
         self._last_saved_text = None
-        self.import_page._probe(str(media_path))
-        self.nav.setCurrentRow(0)
+        self.workbench.import_pane.probe(str(media_path))
         return True
 
     def _maybe_finish_restore(self) -> None:
-        """探针成功后重建方案版本链与导出记录（由 _sync_top_bar 触发）。"""
+        """探针成功后重建方案版本链与导出记录（由 _sync_chrome 触发）。"""
         payload = self._pending_restore
         if payload is None or self.state.media is None:
             return
@@ -371,16 +403,9 @@ class MainWindow(QMainWindow):
         # 以刚打开的文件为「干净」基线，避免自动保存立刻重写一遍
         self._last_saved_text = payload_text(self.state.snapshot_payload())
         self.app_bar.set_save_status(f"已打开 {time.strftime('%H:%M')}")
-        if self.state.plans:
-            self.review_page.refresh()
-            self._refresh_inspector()
+        self.workbench.refresh()
 
-
-    # ---- 活跃任务登记 ----
-    #
-    # 五个后台任务分散在四个页面类里，各自持有 self._worker。这里做一层全局登记，
-    # 好处是：能统一回答「现在忙不忙」、能阻止并发启动互相干扰的任务、
-    # 退出时能一次性等它们收尾。页面类自身的 _worker 引用保持不变（测试依赖它）。
+    # ---- 活跃任务登记 --------------------------------------------------
 
     WORKER_NAMES = ("probe", "analysis", "export", "download")
 
@@ -399,7 +424,6 @@ class MainWindow(QMainWindow):
         worker.finished_ok.connect(lambda: self._workers.pop(name, None))
 
     def active_workers(self) -> dict[str, object]:
-        """当前仍在运行的任务快照。"""
         return {
             name: worker
             for name, worker in self._workers.items()
@@ -417,130 +441,49 @@ class MainWindow(QMainWindow):
             worker.wait(wait_ms)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        """退出前把后台线程停干净，再补一次收尾保存，否则 ffmpeg 子进程会
-        变成孤儿、两小时的编辑成果可能丢失。"""
+        """退出前把后台线程与播放器停干净，再补一次收尾保存。
+
+        否则 ffmpeg 子进程会变成孤儿、两小时的编辑成果可能丢失。
+        """
         self.cancel_all_workers()
+        self.workbench.stage_view.player.stop()
         self._autosave_tick(force=True)
         super().closeEvent(event)
 
-    # ---- 顶栏 stepper 点击 → 跳对应 PAGES ----
-
-    def _on_stepper_clicked(self, index: int) -> None:
-        # index 是 stepper 中的 0..3，对应 PAGES 0/2/3
-        inv = {v: k for k, v in self._STEPPER_INDEX.items()}
-        if index in inv:
-            self.nav.setCurrentRow(inv[index])
-
-    # ---- 顶栏：主题切换 / 更换视频 / 标题同步 -------------------------
-
-    def _on_theme_toggled(self) -> None:
-        """深浅主题互切：重设全局 QSS、更新按钮文案、写回配置。"""
-        next_mode = "dark" if current_mode() == "light" else "light"
-        apply_theme(mode=next_mode)
-        self.app_bar.set_theme_label(next_mode)
-        self.config.theme = next_mode
-        try:
-            self.config.save()
-        except OSError:
-            # 配置写失败只影响「下次记住」，不阻断本次切换
-            pass
-        # DropZone 等自绘控件要重绘一次才能拿到新令牌
-        self.update()
-
-    def _on_change_source(self) -> None:
-        """顶栏「更换视频」：与导入区的选择文件入口等价。"""
-        if self.is_busy():
-            self.hint.setText("后台任务进行中，等它结束或取消后再更换视频。")
-            return
-        self.import_page._choose_file()
-
-    def _sync_top_bar(self) -> None:
-        """按当前状态刷新顶栏标题（方案 §七：显示当前文件名与路径）。
-
-        在页面展示与探针完成两处调用；未导入时回到应用标题。
-        """
-        media = self.state.media
-        if media is not None:
-            self.app_bar.set_source(Path(media.path).name, str(media.path))
-        else:
-            self.app_bar.set_source(None)
-        # 打开项目后探针刚完成 → 在这里续上方案链重建
-        self._maybe_finish_restore()
-
-    def _on_drawer_closed(self, pages_index: int) -> None:
-        # 抽屉关闭时把 nav 跳回工作区，否则 nav 停在抽屉项上，
-        # 会让底部按钮的「继续」判定落空（抽屉不在工作流里）。
-        if self.nav.currentRow() == pages_index:
-            self.nav.setCurrentRow(0)
-
-    def _on_continue_clicked(self) -> None:
-        """底部按钮：根据当前阶段做不同动作。
-
-        工作台一页承担导入与分析两职，因此这里的 0 分支要按「媒体是否就绪」
-        再分流一次：未导入时先检查导入前置，已导入时启动分析或进入审核。
-        """
-        cur = self.nav.currentRow()
-        if cur == 0:                          # 工作台
-            if self.state.media is None:      # 还没导入 → 只检查导入前置
-                ok, msg = self.import_page.can_continue()
-                if not ok:
-                    self.hint.setText(msg)
-                    return
-                return
-            if self.analysis_page._worker and self.analysis_page._worker.isRunning():
-                self.hint.setText("分析进行中，请先取消或等待")
-                return
-            if self.state.current_plan is None:
-                self.analysis_page._start()
-                return
-            ok, msg = self.workbench_page.can_continue()
-            if not ok:
-                self.hint.setText(msg)
-                return
-            self.nav.setCurrentRow(2)
-        elif cur == 2:                        # 审核 → 导出
-            ok, msg = self.review_page.can_continue()
-            if not ok:
-                self.hint.setText(msg)
-                return
-            self.nav.setCurrentRow(3)
-        elif cur == 3:                        # 导出
-            self.export_page._start(None)
-
-    # ---- 键盘快捷键 --------------------------------------------------
+    # ---- 快捷键（方案 §54） --------------------------------------------
 
     def _install_shortcuts(self) -> None:
-        # 上一步 / 下一步
-        QShortcut(QKeySequence("Left"), self, activated=lambda: self._navigate(-1))
-        QShortcut(QKeySequence("Right"), self, activated=lambda: self._navigate(1))
-        # 项目保存 / 打开（方案 §五十五）
+        stage_view = self.workbench.stage_view
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_project)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_project)
-        # 跳到指定页：Ctrl+1..N（按 PAGES 长度，抽屉也在内）
-        for i in range(1, len(self.PAGES) + 1):
-            QShortcut(
-                QKeySequence(f"Ctrl+{i}"),
-                self,
-                activated=lambda idx=i - 1: self.nav.setCurrentRow(idx),
-            )
-        # 审核页播放/暂停、上下帧
-        QShortcut(QKeySequence("Space"), self, activated=self._space_pressed)
-        QShortcut(QKeySequence("K"), self, activated=lambda: self.review_page.preview.btn_next_frame.click())
-        QShortcut(QKeySequence("J"), self, activated=lambda: self.review_page.preview.btn_prev_frame.click())
-        # 导出（方案 §54）：切到导出页并直接走前置检查
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._start_export)
-        # 审核页回车确认当前集（方案 §54）；挂在审核页上，其他页不受影响
-        QShortcut(QKeySequence("Return"), self.review_page, activated=self.review_page._confirm_episode)
-        QShortcut(QKeySequence("Enter"), self.review_page, activated=self.review_page._confirm_episode)
-        # 检查器问题巡航（方案 §54）：N 下一个问题 / P 上一个问题
-        # 跳转会切到审核页，因此不限定当前页，保证连续按 N 能逐条走完
+        # 播放控制：空格播放/停止，J/K 逐帧，←/→ 逐秒
+        QShortcut(QKeySequence("Space"), self, activated=self._space_pressed)
+        QShortcut(QKeySequence("K"), self, activated=lambda: stage_view.step_frames(-1))
+        QShortcut(QKeySequence("J"), self, activated=lambda: stage_view.step_frames(1))
+        QShortcut(QKeySequence("Left"), self, activated=lambda: stage_view.step_seconds(-1.0))
+        QShortcut(QKeySequence("Right"), self, activated=lambda: stage_view.step_seconds(1.0))
+        # 审核：回车确认当前集（挂在工作台上，不限定具体焦点控件）
+        QShortcut(QKeySequence("Return"), self.workbench,
+                  activated=self.workbench.confirm_current)
+        QShortcut(QKeySequence("Enter"), self.workbench,
+                  activated=self.workbench.confirm_current)
+        # 检查器问题巡航：N 下一个 / P 上一个
         QShortcut(QKeySequence("N"), self, activated=lambda: self._cycle_issue(1))
         QShortcut(QKeySequence("P"), self, activated=lambda: self._cycle_issue(-1))
-        # F11 无边框全屏 ↔ 常规窗口；Esc 退出全屏（Qt 默认不提供这两个键）
+        # F11 全屏 ↔ 常规；Esc 先退全屏，再关对话框
         QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
-        # Esc 同时承担「关抽屉」：QShortcut 会先于抽屉的 keyPressEvent 收到
-        # 按键，必须在这里代为分发，否则抽屉永远收不到 Esc（§54）
         QShortcut(QKeySequence("Esc"), self, activated=self._escape_pressed)
+
+    def _space_pressed(self) -> None:
+        player = self.workbench.stage_view.player
+        if player.is_playing():
+            player.stop()
+        else:
+            self.workbench.stage_view.play_episode()
+
+    def _cycle_issue(self, delta: int) -> None:
+        self.workbench.inspector.cycle_issue(delta)
 
     def _toggle_fullscreen(self) -> None:
         """F11：全屏 ↔ 常规。showNormal 会恢复进入全屏前的窗口几何。"""
@@ -550,283 +493,15 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def _escape_pressed(self) -> None:
-        """Esc 的语义分层：先退全屏，再关抽屉；两者皆无则不动作。
+        """Esc 的语义分层：先退全屏，再关已打开的对话框。
 
-        抽屉关闭走 Drawer.hide()——与 ✕ 按钮、抽屉内 Esc 完全同一条
-        动画路径（closed 信号 → 导航状态复位）。
+        对话框关闭走 ``close()``——与 ✕ 按钮同一条路径（设置对话框因此也会
+        走「取消即回滚」）。
         """
         if self.isFullScreen():
             self.showNormal()
             return
-        for drawer in (self.settings_drawer, self.model_drawer):
-            if drawer.isVisible():
-                drawer.hide()
+        for dialog in (self.settings_dialog, self.model_dialog, self.export_dialog):
+            if dialog is not None and dialog.isVisible():
+                dialog.close()
                 return
-
-    def _space_pressed(self) -> None:
-        if self.stack.currentWidget() is self.review_page:
-            if self.review_page._player.is_playing() if hasattr(self.review_page._player, 'is_playing') else False:
-                self.review_page.preview.btn_stop.click()
-            else:
-                self.review_page.preview.btn_play.click()
-
-    def _start_export(self) -> None:
-        """Ctrl+E：切到导出页再启动（前置检查的提示框需要导出页可见才不突兀）。"""
-        self.nav.setCurrentRow(3)
-        self.export_page._start(None)
-
-    def _cycle_issue(self, delta: int) -> None:
-        """N/P：在检查器问题清单里按顺序巡航跳转（方案 §54）。"""
-        self.workbench_page.inspector.cycle_issue(delta)
-
-    def _jump_to_issue(self, target_ms: int) -> None:
-        """检查器「查看」：切到审核页，选中问题所在集并定位到该时间点。"""
-        self.nav.setCurrentRow(2)
-        seconds = Fraction(int(target_ms), 1000)
-        plan = self.state.current_plan
-        if plan is not None:
-            for row, episode in enumerate(plan.episodes()):
-                if episode.start_seconds <= seconds < episode.end_seconds:
-                    self.review_page.episode_table.selectRow(row)
-                    break
-        self.review_page._goto(seconds)
-
-    # ---- 导航 ---------------------------------------------------------
-
-    def _nav_changed(self, index: int) -> None:
-        if index < 0:
-            return
-        drawer = self.DRAWER_INDICES.get(index)
-        if drawer == "settings":
-            # 抽屉是浮层，不切 stack：底下仍停在用户原来的工作页
-            self.settings_drawer.show()
-            self.settings_page.refresh_from_state()
-        elif drawer == "model":
-            self.model_drawer.show()
-        else:
-            # 关闭所有抽屉
-            if self.settings_drawer.isVisible():
-                self.settings_drawer.hide()
-            if self.model_drawer.isVisible():
-                self.model_drawer.hide()
-            stack_index = self._STACK_INDEX.get(index)
-            if stack_index is not None:
-                self.stack.setCurrentIndex(stack_index)
-
-        self._refresh_nav_states()
-
-        if index in self._STEPPER_INDEX:
-            self.status_right.setText(
-                f"第 {self._STEPPER_INDEX[index] + 1} / {len(self.STEPPER_NAMES)} 步"
-            )
-        else:
-            self.status_right.setText("⚙ 设置" if drawer == "settings" else "🤖 模型")
-
-        self._on_page_shown(index)
-
-    def _update_stepper_for_drawer(self, open_: str) -> None:
-        """抽屉打开时，stepper 不显示 current 高亮（因为不在工作流中）。"""
-        # 直接由 _refresh_nav_states 统一处理
-        pass
-
-    def _refresh_nav_states(self) -> None:
-        """更新 stepper 的 4 个状态 + nav 内部 5 项状态（3 工作区 + 2 抽屉）。"""
-        cur = self.nav.currentRow()
-
-        # ---- nav 内部状态 ----
-        # 0 工作台：导入与分析合并，媒体就绪即算完成开头的导入环节
-        # 1 设置（抽屉）、4 模型（抽屉）：不在工作流上，只反映选中
-        # 2 审核、3 导出：沿用原来的阶段判定
-        has_plan = self.state.current_plan is not None
-        confirmed = bool(
-            has_plan and self.state.current_plan.semantic_review_status == "confirmed"
-        )
-
-        nav_states: list[StepState] = [StepState.FUTURE] * len(self.PAGES)
-        # 0 工作台
-        if has_plan:
-            nav_states[0] = StepState.DONE
-        else:
-            nav_states[0] = StepState.CURRENT if cur == 0 else StepState.FUTURE
-        # 1 设置（抽屉）
-        nav_states[1] = StepState.CURRENT if cur == 1 else StepState.FUTURE
-        # 2 审核
-        if has_plan:
-            nav_states[2] = StepState.DONE if confirmed else StepState.CURRENT
-        else:
-            nav_states[2] = StepState.FUTURE
-        # 3 导出
-        if self.state.exported:
-            nav_states[3] = StepState.DONE
-        elif has_plan:
-            nav_states[3] = StepState.CURRENT if cur == 3 else StepState.FUTURE
-        else:
-            nav_states[3] = StepState.FUTURE
-        # 4 模型（抽屉）
-        nav_states[4] = StepState.CURRENT if cur == 4 else StepState.FUTURE
-        if 0 <= cur < len(nav_states) and cur not in self.DRAWER_INDICES:
-            nav_states[cur] = StepState.CURRENT
-        self.nav.set_states(nav_states)
-
-        # stepper 4 项
-        step_states: list[StepState] = [StepState.FUTURE] * len(self.STEPPER_NAMES)
-        # 0: 导入
-        if self.state.media is not None:
-            step_states[0] = StepState.DONE
-        else:
-            step_states[0] = StepState.CURRENT
-        # 1: 分析
-        if self.state.current_plan is not None:
-            step_states[1] = StepState.DONE
-        elif self.state.media is not None:
-            step_states[1] = StepState.CURRENT
-        # 2: 审核
-        if self.state.current_plan is not None:
-            step_states[2] = (
-                StepState.DONE
-                if self.state.current_plan.semantic_review_status == "confirmed"
-                else StepState.CURRENT
-            )
-        # 3: 导出
-        if self.state.exported:
-            step_states[3] = StepState.DONE
-        elif self.state.current_plan is not None:
-            step_states[3] = StepState.CURRENT
-
-        # 抽屉打开时强制 stepper 不高亮（抽屉不在工作流上）
-        if cur in self.DRAWER_INDICES:
-            for i in range(len(step_states)):
-                if step_states[i] == StepState.CURRENT:
-                    step_states[i] = StepState.DONE
-        # 工作台同时承担「导入 + 分析」两步：停在 0 时按实际进度补一个高亮
-        if cur == 0 and not any(s == StepState.CURRENT for s in step_states):
-            if self.state.media is None:
-                step_states[0] = StepState.CURRENT
-            elif self.state.current_plan is None:
-                step_states[1] = StepState.CURRENT
-        # 当前 stepper index（若在工作区）
-        cur_step = self._STEPPER_INDEX.get(cur, -1)
-        if cur_step >= 0 and step_states[cur_step] != StepState.DONE:
-            step_states[cur_step] = StepState.CURRENT
-
-        done_indices = {i for i, s in enumerate(step_states) if s == StepState.DONE}
-        current_idx = next(
-            (i for i, s in enumerate(step_states) if s == StepState.CURRENT), 0
-        )
-        self.app_bar.set_step_state(current_idx, done_indices)
-
-        # 「继续」按钮文案
-        if cur == 0:
-            # 工作台：媒体没导进来先让用户导入；导进来后再按分析进度给文案
-            if self.state.media is None:
-                self.btn_continue.setText("继续  →")
-            elif self.analysis_page._worker and self.analysis_page._worker.isRunning():
-                self.btn_continue.setText("分析进行中…")
-                self.btn_continue.setEnabled(False)
-                return
-            else:
-                self.btn_continue.setText(
-                    "下一步：审核  →" if self.state.current_plan is not None
-                    else "▶  开始分析"
-                )
-        elif cur == 2:
-            self.btn_continue.setText("下一步：导出  →")
-        elif cur == 3:
-            self.btn_continue.setText("▶  开始导出")
-        else:
-            self.btn_continue.setText("继续  →")
-        self.btn_continue.setEnabled(cur in (0, 2, 3))
-
-        # 模型通知徽章：若全部模型未安装 → 提示
-        try:
-            from app.core.app_config import default_models_root
-            from app.core.model_manager import MODEL_CATALOG
-
-            root = default_models_root()
-            any_installed = any(
-                spec.target_dir(root).exists()
-                and any(spec.target_dir(root).glob("*"))
-                for spec in MODEL_CATALOG
-            )
-            self.app_bar.set_model_notify(not any_installed)
-        except Exception:
-            self.app_bar.set_model_notify(False)
-
-    def _on_page_shown(self, index: int) -> None:
-        self.hint.setText("")
-        if index == 0:
-            # 工作台：导入区与审核页共用切点数据，进入时刷新一次
-            self.workbench_page.inspector.set_tab(0)
-            self._refresh_inspector()
-        elif index == 2:
-            self.review_page.refresh()
-        # 状态条左
-        if self.state.media is not None:
-            self.status_left.setText(f"源文件：{self.state.media.path}")
-        else:
-            self.status_left.setText("未导入源视频")
-        # 顶栏标题跟随源文件状态
-        self._sync_top_bar()
-
-    def _refresh_inspector(self) -> None:
-        """把当前状态里能看出来的风险汇总到右栏检查器（方案 §二十四）。"""
-        issues: list[InspectorIssue] = []
-        state = self.state
-
-        # 兼容性阻断
-        if state.media is not None and state.binaries is not None:
-            for issue in check_compatibility(state.media, state.binaries):
-                if not issue.is_blocking:
-                    continue
-                issues.append(
-                    InspectorIssue(
-                        title=issue.message,
-                        detail=issue.detail or "",
-                        priority="P0",
-                        key=f"compat:{issue.code}",
-                    )
-                )
-
-        # 逐集复核风险（Phase 4 的 grade / risks）
-        for review in state.episode_reviews or []:
-            for risk in review.risks:
-                priority = "P0" if review.grade == "block" else "P1"
-                issues.append(
-                    InspectorIssue(
-                        title=risk,
-                        priority=priority,
-                        episode=review.episode,
-                        key=f"review:{review.episode}",
-                    )
-                )
-
-        self.workbench_page.inspector.set_issues(issues)
-
-    def _current_page(self):
-        """返回对应阶段的页面（仅工作区 3 个）。"""
-        mapping = {0: self.workbench_page, 2: self.review_page, 3: self.export_page}
-        return mapping.get(self.nav.currentRow())
-
-    def _navigate(self, delta: int) -> None:
-        """按 delta 在三个工作区之间移动（抽屉不参与）。"""
-        cur = self.nav.currentRow()
-        order = [0, 2, 3]
-        if cur not in order:
-            return
-        i = order.index(cur)
-        if delta > 0:
-            ok, message = self._current_page().can_continue()
-            if not ok:
-                self.hint.setText(message)
-                return
-            if i + 1 < len(order):
-                self.nav.setCurrentRow(order[i + 1])
-        elif delta < 0:
-            if i - 1 >= 0:
-                self.nav.setCurrentRow(order[i - 1])
-
-    # ---- 旧 nav 仍要保留 ----
-
-    def _legacy_nav_state(self) -> None:
-        """保留旧方法作为占位，避免破坏继承。"""
-        pass

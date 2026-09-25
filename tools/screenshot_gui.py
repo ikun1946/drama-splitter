@@ -3,6 +3,9 @@
 QT_QPA_PLATFORM=offscreen 下 QWidget.grab() 仍会真实走一遍布局与绘制，
 因此截图能反映实际版式，而不只是"控件都建出来了"。
 
+设置 / 模型 / 导出是对话框（真顶层窗口），直接对对话框 grab() 即可，不再需要
+"窗口 + 抽屉"的横向拼接 hack——抽屉被删除后连它一起没了。
+
 用法::
 
     python tools/screenshot_gui.py                # 浅色，输出到 docs/screenshots/
@@ -24,11 +27,12 @@ for path in (ROOT, ROOT / "tools"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPixmap  # noqa: E402
+from PySide6.QtGui import QFont, QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import app.gui.main_window as mw  # noqa: E402
 from app.core.ffmpeg import check_encoders, locate_ffmpeg  # noqa: E402
+from app.gui.stage import Stage  # noqa: E402
 
 OUT_DEFAULT = ROOT / "docs" / "screenshots"
 
@@ -108,8 +112,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     theme_mode = args.theme
     out_dir = OUT_DEFAULT if theme_mode == "light" else OUT_DEFAULT / theme_mode
-    # 抽屉拼接的画布底色必须跟着主题走，否则深色截图右侧会露一条白边
-    canvas_bg = "#202226" if theme_mode == "dark" else "#ffffff"
 
     asset = ROOT / "testdata" / "cfr_120s_25fps.mp4"
     if not asset.exists():
@@ -118,10 +120,12 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 截图时不要弹模态框
-    mw.QMessageBox.information = staticmethod(lambda *a, **k: None)
-    mw.QMessageBox.warning = staticmethod(lambda *a, **k: None)
-    mw.QMessageBox.critical = staticmethod(lambda *a, **k: None)
+    # 截图时不要弹模态框：统一走 app.gui.widgets.message，patch 一处即可
+    from app.gui.widgets import message as message_mod
+
+    message_mod.information = lambda *a, **k: None
+    message_mod.warning = lambda *a, **k: None
+    message_mod.critical = lambda *a, **k: None
 
     app = QApplication(sys.argv[:1])
     family = install_fonts(app)
@@ -141,126 +145,122 @@ def main(argv: list[str] | None = None) -> int:
     check_encoders(binaries)
     window.state.binaries = binaries
 
-    # 导入
-    window.import_page._probe(str(asset))
-    wait_until(app, lambda: window.import_page._worker and not window.import_page._worker.isRunning())
-    pump(app)
-
     hidden: list[str] = []
 
     def shot(name: str, widget) -> None:
-        """截取整个窗口。
+        """截取整个控件（窗口或对话框）。
 
         QMainWindow 的原生 QStatusBar 已在 MainWindow 里 hide()，不再单独裁剪；
         若哪天又冒出来，这里会记一笔而不是悄悄改变画面尺寸。
         """
         pixmap = widget.grab()
         status = getattr(window, "status_bar", None)
-        if status is not None and status.isVisible():
+        if widget is window and status is not None and status.isVisible():
             hidden.append("status_bar 可见，已从截图底部裁掉")
             pixmap = pixmap.copy(0, 0, pixmap.width(), status.y())
         target = out_dir / name
         pixmap.save(str(target), "PNG")
         print(f"  {target.relative_to(ROOT)}  {pixmap.width()}×{pixmap.height()}")
 
-    def shot_drawer(name: str) -> None:
-        """抽屉打开时，连同右侧面板一起截出来。
+    def shot_dialog(name: str, factory) -> object:
+        """打开对话框并截图。
 
-        窗口截图只包含 QMainWindow 的内容，而抽屉是 centralWidget 的子控件、
-        挂在布局之外——单独截窗口会漏掉抽屉本身。因此做横向拼接：
-        窗口左侧到抽屉左边界那一段，后面接抽屉面板。
-
-        直接拼「整窗 + 抽屉」会出问题：抽屉是浮在窗口之上的，窗口截图里
-        被遮住的区域仍然会被画进来，拼完就多出一份重复内容。
+        只允许 show() + pump()，禁止 exec()——实例级模态在离屏环境会永久阻塞
+        （实测挂过 25 分钟）。
         """
-        left = window.grab()
-        drawers = [
-            d for d in (window.settings_drawer, window.model_drawer) if d.isVisible()
-        ]
-        if not drawers:
-            shot(name, window)
-            return
-        drawer = drawers[0]
-        panel = drawer.grab()
-        cut = max(0, min(drawer.x(), left.width()))
-        canvas = QPixmap(cut + panel.width(), left.height())
-        canvas.fill(QColor(canvas_bg))
-        painter = QPainter(canvas)
-        painter.drawPixmap(0, 0, left, 0, 0, cut, left.height())
-        painter.drawPixmap(cut, 0, panel)
-        painter.end()
-        target = out_dir / name
-        canvas.save(str(target), "PNG")
-        print(
-            f"  {target.relative_to(ROOT)}  {canvas.width()}×{canvas.height()}"
-            f"（窗口 {cut} + 抽屉 {panel.width()}）"
-        )
-
-    def open_drawer(drawer) -> None:
-        """打开抽屉并等滑动动画真正结束。
-
-        抽屉的显示过程是 QPropertyAnimation（220ms）。此前截图工具只调用
-        nav.setCurrentRow(1) 就立刻抓图：此时抽屉刚定位到父窗口右外侧
-        （x = width），截图里只有占位页的提示文本。必须等动画 finished
-        才能抓到实际内容。
-        """
-        wait_until(app, lambda: drawer.isVisible() and drawer.x() < window.width())
+        dialog = factory()
+        dialog.show()
         pump(app, 0.4)
+        shot(name, dialog)
+        dialog.close()
+        pump(app, 0.1)
+        return dialog
 
     print("生成截图：")
-    # 工作台一页承担导入 + 分析：先抓「刚导入完」的状态（检查器已列兼容性问题）
-    shot("01-工作台-导入.png", window)
+    workbench = window.workbench
 
-    # 设置：目标 30 秒、0% 浮动 → 4 集
-    page = window.settings_page
-    page.radio_by_duration.setChecked(True)
-    page.range_percent.setChecked(True)
-    page.duration_spin.setValue(30.0)
-    page.tolerance_spin.setValue(0.0)
-    window.nav.setCurrentRow(1)
-    open_drawer(window.settings_drawer)
-    shot_drawer("02-设置.png")
+    # 先设定分集目标（目标 30 秒 / 0% 浮动 → 4 集）：分析需要完整参数才能跑，
+    # 否则 start() 会以「参数不完整」提前返回，截出来的"分析中"其实还是就绪态。
+    setup = window.build_settings_dialog()
+    setup.form.radio_by_duration.setChecked(True)
+    setup.form.range_percent.setChecked(True)
+    setup.form.duration_spin.setValue(30.0)
+    setup.form.tolerance_spin.setValue(0.0)
+    setup.apply_and_close()
 
-    # 分析：同一页的下半区，跑完后抓「工作台 + 检查器」的完整形态
-    window.nav.setCurrentRow(0)
-    pump(app)
-    window.analysis_page._start()
+    # 01 空态：中栏是拖放 hero，左栏让位（单页工作台的起点）
+    workbench.refresh()
+    pump(app, 0.4)
+    shot("01-工作台-空态.png", window)
+
+    # 02 素材就绪：左栏素材信息 + 中栏预览与整片时间轴
+    workbench.import_pane.probe(str(asset))
+    wait_until(
+        app,
+        lambda: workbench.import_pane.worker and not workbench.import_pane.worker.isRunning(),
+    )
+    pump(app, 0.6)
+    shot("02-工作台-素材就绪.png", window)
+
+    # 03 分析中：中栏换成阶段 + 进度 + 最近输出，右栏自动切到日志页签。
+    # 本素材分析很快（无对白，转写被跳过），因此只派发一次事件循环就抓图，
+    # 不去 sleep；若这一瞬已经跑完，日志里会记一笔而不是把别的画面冒充成"分析中"。
+    workbench.analysis_pane.start()
+    app.processEvents()
+    if workbench.stage is not Stage.ANALYZING:
+        print("  提示：分析在本机过快，03 抓到的是分析完成后的画面")
+    shot("03-工作台-分析中.png", window)
     wait_until(app, lambda: window.state.current_plan is not None)
-    pump(app, 0.5)
-    shot("03-工作台-分析.png", window)
-
-    # 审核
-    window.nav.setCurrentRow(2)
     pump(app, 0.6)
-    window.review_page.episode_table.selectRow(1)
-    pump(app, 0.6)
-    shot("04-审核.png", window)
 
-    # 导出
-    window.nav.setCurrentRow(3)
-    pump(app)
+    # 04 审核：左栏集列表 + 中栏预览与时间轴（含切点标记）+ 右栏检查器
+    workbench.select_episode(2)
+    pump(app, 0.6)
+    shot("04-工作台-审核.png", window)
+
+    # 05 设置对话框：目标 30 秒、0% 浮动 → 4 集
+    def _settings_dialog():
+        dialog = window.build_settings_dialog()
+        form = dialog.form
+        form.radio_by_duration.setChecked(True)
+        form.range_percent.setChecked(True)
+        form.duration_spin.setValue(30.0)
+        form.tolerance_spin.setValue(0.0)
+        pump(app, 0.2)
+        return dialog
+
+    shot_dialog("05-设置.png", _settings_dialog)
+
+    # 06 模型对话框：选中一个"未安装"的模型，让截图里能看到选择与状态的区别
+    def _model_dialog():
+        dialog = window.build_model_dialog()
+        form = dialog.form
+        uninstalled = [
+            row for row in range(form.table.rowCount())
+            if "未安装" in form.table.item(row, 2).text()
+        ]
+        if uninstalled:
+            form.table.selectRow(uninstalled[0])
+        form._append("模型：可直接选择并下载，无需命令行。")
+        pump(app, 0.2)
+        return dialog
+
+    shot_dialog("06-模型.png", _model_dialog)
+
+    # 07 导出对话框
     export_dir = ROOT / "testdata" / "_shot_out"
     export_dir.mkdir(parents=True, exist_ok=True)
     window.state.output_root = export_dir
-    window.export_page.output_edit.setText(str(export_dir))
-    window.export_page.refresh()
-    pump(app, 0.4)
-    shot("05-导出.png", window)
 
-    # 模型页：选中一个"未安装"的模型，让截图里能看到选择与状态的区别
-    models = window.model_page
-    uninstalled = [
-        row for row in range(models.table.rowCount())
-        if "未安装" in models.table.item(row, 2).text()
-    ]
-    if uninstalled:
-        models.table.selectRow(uninstalled[0])
-    models._append("模型页：可直接选择并下载所需模型，无需命令行。")
-    window.nav.setCurrentRow(4)
-    open_drawer(window.model_drawer)
-    shot_drawer("06-模型.png")
+    def _export_dialog():
+        dialog = window.build_export_dialog()
+        dialog.form.output_edit.setText(str(export_dir))
+        dialog.form.refresh()
+        return dialog
 
-    window.review_page._player.stop()
+    shot_dialog("07-导出.png", _export_dialog)
+
+    workbench.stage_view.player.stop()
     for note in hidden:
         print(f"  提示：{note}")
 

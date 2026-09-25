@@ -1,4 +1,7 @@
-"""页 6 模型：转写与语义模型的下载、删除、目录与磁盘空间管理。"""
+"""模型表单：转写与语义模型的下载、删除、目录与磁盘空间管理。
+
+由 ``app/gui/dialogs/model_dialog.py`` 的 ModelDialog 承载。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -35,6 +37,7 @@ from ..widgets import (
     Card,
     LogPanel,
 )
+from ..widgets import message
 from ..workers import (
     ModelDownloadWorker,
 )
@@ -43,10 +46,10 @@ from ._common import (
 )
 
 
-__all__ = ["ModelPage"]
+__all__ = ["ModelForm"]
 
 
-class ModelPage(QWidget):
+class ModelForm(QWidget):
     """模型选择与下载。"""
 
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
@@ -265,7 +268,7 @@ class ModelPage(QWidget):
         else:
             specs.extend(self._spec_from_quant())
         if not specs:
-            QMessageBox.information(self, "未选择", "请先在表格里选中要下载的模型。")
+            message.information(self, "未选择", "请先在表格里选中要下载的模型。")
             return
 
         self.btn_download.setEnabled(False)
@@ -305,13 +308,13 @@ class ModelPage(QWidget):
             except OSError:
                 pass
             self._refresh()
-            QMessageBox.information(
+            message.information(
                 self, "下载完成", f"{result.describe()}\n\n即可直接使用，无需重启。"
             )
         elif result.cancelled:
             self._append("已取消，临时文件已清理。", "warn")
         else:
-            QMessageBox.warning(self, "下载未完成", result.describe())
+            message.warning(self, "下载未完成", result.describe())
 
     def _cancel(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -321,18 +324,19 @@ class ModelPage(QWidget):
     def _delete_selected(self) -> None:
         spec = self._selected_spec()
         if spec is None:
-            QMessageBox.information(self, "未选择", "请先选中要删除的模型。")
+            message.information(self, "未选择", "请先选中要删除的模型。")
             return
-        answer = QMessageBox.question(
+        agreed = message.confirm(
             self,
             "确认删除",
             f"删除 {spec.label}？\n目录：{spec.target_dir(self._models_root())}\n"
             "只删除该模型自己的目录，不影响其他模型。",
+            ok_text="删除",
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not agreed:
             return
-        ok, message = delete_model(spec, self._models_root())
-        self._append(message)
+        ok, note = delete_model(spec, self._models_root())
+        self._append(note)
         self._refresh()
 
     def _append(self, text: str, level: str = "info") -> None:

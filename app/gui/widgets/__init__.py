@@ -2,42 +2,43 @@
 
 包含：
 - Card / LabeledField / StatusPill    —— 区段容器与状态展示
-- IssueList                            —— 兼容性问题表（代理原 QTableWidget 行为）
 - LogPanel                             —— 风格化日志面板
-- StepIndicator / StepNav              —— 步骤条与侧栏导航
 - MediaPreview                         —— 帧级预览（HUD + 时间码）
-- Drawer                               —— 右侧滑入抽屉（浮层，用于设置 / 模型）
+- TimelineRuler                        —— 轻量时间轴（切点 / 播放头 / 拖拽）
+- StageView                            —— 中栏舞台（预览 + 时间轴 + 播放控制）
+- DropZone                             —— 拖放导入区
+- BottomBar                            —— 单页工作台唯一的底部状态行
 - Inspector                            —— 右侧常驻检查器（问题 / 建议 / 日志）
+- scrollable / h_scrollable            —— 滚动容器助手
+- message                              —— 统一弹窗出口（子模块，用 message.xxx 调用）
 """
 
 from .app_bar import AppBar
+from .bottom_bar import BottomBar
 from .card import Card
-from .drawer import Drawer
 from .drop_zone import DropZone
-from .icon_button import IconButton
 from .inspector import Inspector, InspectorIssue
-from .issue_list import IssueList
 from .labeled_field import LabeledField
 from .log_panel import LogPanel
 from .media_preview import MediaPreview
+from .scroll_area import h_scrollable, scrollable
+from .stage_view import StageView
 from .status_pill import StatusPill
-from .step_indicator import StepIndicator
-from .step_nav import StepNav, StepState
+from .timeline import TimelineRuler
 
 __all__ = [
     "AppBar",
+    "BottomBar",
     "Card",
-    "Drawer",
     "DropZone",
-    "IconButton",
     "Inspector",
     "InspectorIssue",
-    "IssueList",
     "LabeledField",
     "LogPanel",
     "MediaPreview",
+    "StageView",
     "StatusPill",
-    "StepIndicator",
-    "StepNav",
-    "StepState",
+    "TimelineRuler",
+    "h_scrollable",
+    "scrollable",
 ]

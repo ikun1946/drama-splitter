@@ -89,6 +89,17 @@ TOKENS: dict[str, dict[str, str]] = {
         "TEXT_MUTED": "#5f6368",
         "TEXT_DISABLED": "#a0a3ac",
         "TEXT_INVERSE": "#ffffff",
+        # 时间轴（自绘控件取色）
+        "TL_TRACK": "#e4e7ef",
+        "TL_SEGMENT": "#f8f9fc",
+        "TL_SEGMENT_ALT": "#eef1f7",
+        # 视频画面区：亮色主题下也保持深底（视频画布的通行做法），
+        # 但与界面其余部分一样走令牌，避免再出现内联硬编码
+        "VIDEO_BG": "#0e0f13",
+        "VIDEO_BORDER": "#1a1c22",
+        "VIDEO_TEXT": "#bbbbbb",
+        "HUD_BG": "#1a1c22",
+        "HUD_TEXT": "#cfd2d8",
     },
     "dark": {
         "PRIMARY": "#4aa6ff",
@@ -115,6 +126,16 @@ TOKENS: dict[str, dict[str, str]] = {
         "TEXT_MUTED": "#9aa0a8",
         "TEXT_DISABLED": "#5c6169",
         "TEXT_INVERSE": "#0f1113",
+        # 时间轴（自绘控件取色）
+        "TL_TRACK": "#2a2d32",
+        "TL_SEGMENT": "#23262b",
+        "TL_SEGMENT_ALT": "#1e2126",
+        # 视频画面区（深色底下与界面同族，但仍是独立令牌）
+        "VIDEO_BG": "#0e0f13",
+        "VIDEO_BORDER": "#26292f",
+        "VIDEO_TEXT": "#bbbbbb",
+        "HUD_BG": "#1a1c22",
+        "HUD_TEXT": "#cfd2d8",
     },
 }
 
@@ -177,6 +198,7 @@ QMainWindow, QDialog {{
 
 /* ===== 工具栏 / 状态栏 ===== */
 QStatusBar {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {BG_ALT};
     border-top: 1px solid {BORDER};
     color: {TEXT_MUTED};
@@ -480,6 +502,7 @@ QLabel[role="card-title-text"] {{
 
 /* ===== 状态徽章 ===== */
 QLabel[role="pill"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     border-radius: {RADIUS_PILL}px;
     padding: 2px 8px;
     font-size: {FONT_SIZE_CAPTION}pt;
@@ -580,6 +603,7 @@ QAbstractScrollArea::corner {{
 
 /* ===== 工具提示 ===== */
 QToolTip {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {TEXT};
     color: {TEXT_INVERSE};
     border: 1px solid {TEXT};
@@ -684,30 +708,8 @@ QPushButton[role="ghost"]:hover {{
     border-radius: {RADIUS_SM}px;
 }}
 
-/* 顶栏图标按钮（⚙ / 🤖）：必须自带专属规则。
-   若只吃全局 QPushButton 的 padding: 6px 14px，36/40px 宽的按钮内容区
-   只剩 6px，Segoe UI Emoji 的大 em 字形会被横向压成竖条（f0d0899 起的
-   遗留缺陷）。扁平 + hover 浅蓝是 IconButton docstring 的既定设计。 */
-QPushButton[role="icon-button"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 17px;
-    padding: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: {RADIUS_SM}px;
-}}
-
-QPushButton[role="icon-button"]:hover {{
-    background: {PRIMARY_SOFT};
-    border-color: {PRIMARY};
-}}
-
-QPushButton[role="icon-button"]:pressed {{
-    background: {PRIMARY_HOVER};
-}}
-
 /* 预览控制条紧凑档：10 个按钮单行，默认 padding 6px 14px 时总宽
-   超过审核页右列可用宽度，「停止」会被推出视口（04-审核 截图缺陷） */
+   超过中栏可用宽度，控制条会横向滚动（见 MediaPreview 的 h_scrollable） */
 QPushButton[role="mini"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     padding: 4px 8px;
@@ -761,6 +763,7 @@ QLabel[role="drop-icon"] {{
 }}
 
 QLabel[role="drop-icon"][compact="true"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: 20pt;
 }}
 
@@ -773,6 +776,7 @@ QLabel[role="drop-title"] {{
 }}
 
 QLabel[role="drop-title"][compact="true"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: 10pt;
     font-weight: 400;
     color: {TEXT_MUTED};
@@ -783,6 +787,96 @@ QLabel[role="drop-hint"] {{
     font-size: 10pt;
     color: {TEXT_MUTED};
     background: transparent;
+}}
+
+/* ===== 底栏（单页工作台唯一的状态行） ===== */
+QFrame[role="bottom-bar"] {{
+    background: {BG_ALT};
+    border-top: 1px solid {BORDER};
+}}
+
+QLabel[role="bottom-caption"] {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {TEXT_MUTED};
+}}
+
+QLabel[role="bottom-hint"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {WARN};
+}}
+
+QProgressBar[role="bottom-progress"] {{
+    background: {BG};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+    min-height: 6px;
+    max-height: 6px;
+}}
+
+QProgressBar[role="bottom-progress"]::chunk {{
+    background: {PRIMARY};
+    border-radius: {RADIUS_SM_INNER}px;
+}}
+
+/* ===== 菜单栏 / 菜单 ===== */
+QMenuBar {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: {BG_ALT};
+    color: {TEXT};
+    border-bottom: 1px solid {BORDER};
+    padding: 2px 6px;
+}}
+
+QMenuBar::item {{
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: {RADIUS_SM}px;
+}}
+
+QMenuBar::item:selected {{
+    background: {BG_HOVER};
+}}
+
+QMenu {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: {BG_ALT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}}
+
+QMenu::item {{
+    padding: 6px 24px 6px 12px;
+    border-radius: {RADIUS_SM}px;
+}}
+
+QMenu::item:selected {{
+    background: {PRIMARY_SOFT};
+    color: {PRIMARY_PRESSED};
+}}
+
+QMenu::separator {{
+    height: 1px;
+    background: {BORDER};
+    margin: 4px 8px;
+}}
+
+/* ===== 视频画面区（原内联硬编码，改角色后深浅主题都可控） ===== */
+QLabel[role="video-canvas"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: {VIDEO_BG};
+    color: {VIDEO_TEXT};
+    border: 1px solid {VIDEO_BORDER};
+}}
+
+QLabel[role="mono-hud"] {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_MONO}pt;
+    color: {HUD_TEXT};
+    background: {HUD_BG};
+    padding: 4px 10px;
 }}
 """
 

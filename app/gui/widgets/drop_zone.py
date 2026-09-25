@@ -44,6 +44,8 @@ class DropZone(QFrame):
         self.title_label = QLabel("拖放视频到此处，或点击选择")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setProperty("role", "drop-title")
+        # 允许换行：否则标题的最小宽度会顶住整栏，中栏再也压不窄
+        self.title_label.setWordWrap(True)
 
         self.hint_label = QLabel("支持 .mp4 / .mov / .mkv / .avi / .ts / .m4v")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

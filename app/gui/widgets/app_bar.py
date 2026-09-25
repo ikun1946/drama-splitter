@@ -1,8 +1,8 @@
-"""AppBar —— 顶栏（标题 + stepper + 主题切换 + 更换视频 + 设置/模型）。
+"""顶栏：源文件名 + 保存状态 + 更换视频。
 
-方案 §七：顶栏只放「当前文件名 / 路径 / 更换视频」这类与源文件直接相关的
-信息，模型状态、GPU、token 一律不放。stepper 是本应用的工作流主轴（四步
-向导），保留在中央；标题在导入后让位给源文件名。
+只保留与"当前源文件"直接相关的信息（方案 §七）。原先这里还有四段 stepper、
+主题按钮、设置/模型图标按钮——stepper 已被单页工作台的阶段推进取代，主题与
+设置/模型入口收进菜单（见 ``MainWindow._build_menu``）。
 """
 
 from __future__ import annotations
@@ -17,9 +17,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .icon_button import IconButton
-from .step_indicator import StepIndicator
-
 __all__ = ["AppBar"]
 
 _APP_TITLE = "🎬  AI 短剧分集器"
@@ -28,80 +25,39 @@ _MAX_TITLE_CHARS = 36
 
 
 class AppBar(QFrame):
-    """顶栏：左侧标题/源文件名 + 中央 stepper + 右侧操作按钮。"""
+    """顶栏：源文件名（未导入时是应用名）+ 保存状态 + 更换视频。"""
 
-    step_clicked = Signal(int)        # 用户点击了 stepper 的第 N 项
-    settings_clicked = Signal()
-    model_clicked = Signal()
-    theme_clicked = Signal()          # 用户点了深浅主题切换
-    change_source_clicked = Signal()  # 用户点了「更换视频」
+    change_source_clicked = Signal()
 
-    def __init__(
-        self,
-        title: str,
-        steps: list[str],
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, title: str = _APP_TITLE, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setProperty("role", "app-bar")
-        # 背景 / 边框 / 标题颜色全部走全局 QSS（role="app-bar" 等），
-        # 深浅主题切换时自动跟随，不再 inline 硬编码。
-        self.setFixedHeight(56)
+        self.setFixedHeight(44)
         self._app_title = title
 
-        # 左：标题（导入后由 set_source() 换成源文件名）
         self.title_label = QLabel(title)
         self.title_label.setProperty("role", "app-bar-title")
-        f = QFont()
-        f.setBold(True)
-        f.setPointSize(11)
-        self.title_label.setFont(f)
+        font = QFont()
+        font.setBold(True)
+        font.setPointSize(11)
+        self.title_label.setFont(font)
 
-        # 中：stepper
-        self.stepper = StepIndicator(steps)
-        self.stepper.clicked.connect(self.step_clicked)
-
-        # 右：保存状态 + 主题切换 + 更换视频 + 设置/模型
         self.save_label = QLabel("")
         self.save_label.setProperty("role", "status-text")
-        self.save_label.setStyleSheet("padding: 0 4px;")
-
-        self.btn_theme = QPushButton("🌙 深色")
-        self.btn_theme.setProperty("role", "ghost")
-        self.btn_theme.setToolTip("切换深色 / 浅色主题（选择会记住）")
-        self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_theme.clicked.connect(self.theme_clicked)
 
         self.btn_change_source = QPushButton("更换视频")
         self.btn_change_source.setProperty("role", "ghost")
-        self.btn_change_source.setToolTip("重新选择源视频（也可直接拖入新文件）")
+        self.btn_change_source.setToolTip("重新选择源视频（也可直接把文件拖进窗口）")
         self.btn_change_source.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_change_source.clicked.connect(self.change_source_clicked)
 
-        self.btn_settings = IconButton("⚙")
-        self.btn_settings.setToolTip("设置（参数与可行性）")
-        self.btn_settings.clicked.connect(self.settings_clicked)
-
-        self.btn_model = IconButton("🤖")
-        self.btn_model.setToolTip("模型管理")
-        self.btn_model.clicked.connect(self.model_clicked)
-
-        right_holder = QHBoxLayout()
-        right_holder.setContentsMargins(8, 0, 16, 0)
-        right_holder.setSpacing(4)
-        right_holder.addWidget(self.save_label)
-        right_holder.addWidget(self.btn_theme)
-        right_holder.addWidget(self.btn_change_source)
-        right_holder.addWidget(self.btn_settings)
-        right_holder.addWidget(self.btn_model)
-
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 16, 0)
+        layout.setSpacing(8)
         layout.addWidget(self.title_label)
-        layout.addSpacing(20)
-        layout.addWidget(self.stepper, 1)
-        layout.addLayout(right_holder)
+        layout.addStretch(1)
+        layout.addWidget(self.save_label)
+        layout.addWidget(self.btn_change_source)
 
     # ---- 状态 ----------------------------------------------------------
 
@@ -120,24 +76,6 @@ class AppBar(QFrame):
             self.title_label.setText(self._app_title)
             self.title_label.setToolTip("")
 
-    def set_theme_label(self, mode: str) -> None:
-        """按当前主题更新切换按钮文案：显示的是「将要切过去的」那一档。"""
-        self.btn_theme.setText("☀ 浅色" if mode == "dark" else "🌙 深色")
-
     def set_save_status(self, text: str) -> None:
-        """顶栏保存状态（方案 §七：显示项目保存状态）。
-
-        常用文案：空（无可保存内容）、「● 未保存」、「已保存 HH:MM」、
-        「自动保存 HH:MM」。
-        """
+        """保存状态文案：空 / 「未保存」/「已保存 HH:MM」/「自动保存 HH:MM」。"""
         self.save_label.setText(text)
-
-    def set_steps(self, steps: list[str]) -> None:
-        self.stepper.set_steps(steps)
-
-    def set_step_state(self, current: int, done: set[int]) -> None:
-        self.stepper.set_current(current)
-        self.stepper.set_done(*done)
-
-    def set_model_notify(self, on: bool) -> None:
-        self.btn_model.set_notify(on)

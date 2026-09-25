@@ -99,8 +99,10 @@ def _ui_smoke() -> int:
     """离屏构建整个界面并自检。
 
     打包版的界面问题（漏打模块、缺 Qt 插件）无法靠 `--self-check` 发现——
-    那个入口根本不碰界面。这里把界面构建一遍并走一遍模型页，因此可以作为
-    "打包产物是否完整"的验收手段。
+    那个入口根本不碰界面。这里把界面构建一遍，并把三个对话框各构造一次、
+    走一遍模型清单，因此可以作为"打包产物是否完整"的验收手段。
+
+    对话框只 ``show()`` 不 ``exec()``：实例级模态在离屏环境会永久阻塞。
     """
     import os
 
@@ -112,12 +114,30 @@ def _ui_smoke() -> int:
 
     window = MainWindow()
     app.processEvents()
-    print(f"界面构建成功：{window.stack.count()} 页 + {len(window.DRAWER_INDICES)} 个抽屉")
-    for index, name in enumerate(window.PAGES):
-        kind = "抽屉" if index in window.DRAWER_INDICES else "页面"
-        print(f"  {index + 1}. {name}（{kind}）")
+    workbench = window.workbench
+    print(f"界面构建成功：单页工作台（{workbench.splitter.count()} 栏）+ 菜单 "
+          f"{len(window.menuBar().actions())} 组")
 
-    page = window.model_page
+    # 三栏与底栏都必须就位（漏打模块/缺插件在这里暴露）
+    assert workbench.splitter.count() == 3, "工作台应由三栏组成"
+    assert workbench.inspector is not None, "右栏检查器应常驻"
+    print(f"  底栏主动作：{window.bottom.action_text()}")
+
+    # 三个对话框都必须能构造并显示
+    for label, factory in (
+        ("分集设置", window.build_settings_dialog),
+        ("模型管理", window.build_model_dialog),
+        ("导出", window.build_export_dialog),
+    ):
+        dialog = factory()
+        dialog.show()
+        app.processEvents()
+        print(f"  {label}对话框：可构造、可显示（{dialog.width()}×{dialog.height()}）")
+        dialog.close()
+
+    model_dialog = window.build_model_dialog()
+    model_dialog.show()
+    page = model_dialog.form
     print(f"模型清单：{page.table.rowCount()} 项")
     for row in range(page.table.rowCount()):
         print(
@@ -128,19 +148,12 @@ def _ui_smoke() -> int:
     page._refresh()
     app.processEvents()
 
-    # 核心工作流只有三页（方案 §五），设置与模型降级为抽屉、不占 stack 位。
-    # 两者相加才是 PAGES 的长度 —— 用「stack 页数 + 抽屉数」来断言，
-    # 免得哪天漏挂一个页面却因为数字恰好对上而混过去。
-    expected_pages = len(window.PAGES) - len(window.DRAWER_INDICES)
-    if window.stack.count() != expected_pages:
-        print(
-            f"界面自检失败：stack 应为 {expected_pages} 页"
-            f"（PAGES {len(window.PAGES)} - 抽屉 {len(window.DRAWER_INDICES)}），"
-            f"实际 {window.stack.count()}"
-        )
-        return 1
+    # 核心工作流是单页三栏；设置与模型是对话框，不占工作区。
     if page.table.rowCount() == 0:
         print("界面自检失败：模型清单为空")
+        return 1
+    if len(window.menuBar().actions()) != 4:
+        print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")
         return 1
     print("界面自检通过")
     return 0

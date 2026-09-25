@@ -16,9 +16,10 @@ pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界�
 
 from fractions import Fraction  # noqa: E402
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
+from app.gui.stage import Stage  # noqa: E402
 from app.core.settings import (
     CountPolicy,
     RangeMode,
@@ -40,78 +41,108 @@ def window(qapp):
 
     win = MainWindow()
     yield win
-    win.review_page._player.stop()
+    win.workbench.stage_view.player.stop()
     win.close()
 
 
+@pytest.fixture(autouse=True)
+def message_recorder(monkeypatch):
+    """把统一弹窗出口（app.gui.widgets.message）换成录制器。
+
+    离屏环境里 QMessageBox 会永久阻塞——静态方法与实例 exec() 都一样，本
+    项目实测挂过 25 分钟。因此整份界面测试都不允许真弹窗；需要断言弹窗内容
+    的用例直接读这个夹具返回的列表。
+    """
+    from app.gui.widgets import message as message_mod
+
+    recorded: list[tuple] = []
+
+    def record(kind):
+        def inner(*args, **kwargs):
+            recorded.append((kind,) + args)
+            return None
+
+        return inner
+
+    monkeypatch.setattr(message_mod, "information", record("information"))
+    monkeypatch.setattr(message_mod, "warning", record("warning"))
+    monkeypatch.setattr(message_mod, "critical", record("critical"))
+    monkeypatch.setattr(message_mod, "confirm", lambda *a, **k: False)
+    monkeypatch.setattr(message_mod, "confirm_continue", lambda *a, **k: False)
+    return recorded
+
+
 class TestWindowConstruction:
-    def test_all_pages_are_present(self, window):
-        # 方案 §五：核心工作流只保留三页（工作台 / 审核 / 导出），
-        # 设置与模型降级为顶栏图标打开的抽屉，不占 stack 位。
-        assert window.stack.count() == 3
-        assert window.PAGES == ["工作台", "设置", "审核", "导出", "模型"]
-        assert set(window.DRAWER_INDICES.values()) == {"settings", "model"}
+    def test_single_page_workbench_has_three_columns(self, window):
+        """单页工作台：一页三栏（左/中/右），没有页面栈与抽屉。"""
+        wb = window.workbench
+        assert wb.splitter.count() == 3, "工作台应由三栏组成"
+        assert wb.inspector is not None, "右栏检查器常驻"
+        assert not hasattr(window, "stack"), "页面栈已退场"
+        assert window.menuBar().actions(), "菜单是设置/模型/导出的入口"
 
     def test_workbench_composes_import_and_analysis(self, window):
-        # 工作台一页承担导入 + 分析：两个子视图都在，且别名指向同一对象
-        wb = window.workbench_page
-        assert window.import_page is wb.import_view
-        assert window.analysis_page is wb.analysis_view
-        assert wb.import_view.parent() is not None
-        assert wb.analysis_view.parent() is not None
+        wb = window.workbench
+        assert wb.import_pane.parent() is not None
+        assert wb.analysis_pane.parent() is not None
+        assert wb.review_pane.parent() is not None
+        assert wb.stage_view.parent() is not None
 
     def test_workbench_splitter_is_actually_resizable(self, window, qapp):
-        """分割条必须能被程序与用户调整。
+        """三栏分割条必须能被程序与用户调整。
 
-        回归用例：导入区四张卡片叠起来最小高度接近 700px，两个子控件的最小
-        高度之和超过可视高度时，Qt 会静默忽略 setSizes() 与 moveSplitter()——
-        实测表现为 sizes() 恒等于均分、moveSplitter() 直接返回 None。
-        修法是给两半各套一层滚动容器。这里断言"能设得动"，而不是断言某个
-        具体比例（比例随窗口尺寸变化）。
+        回归用例：子控件最小宽度之和超过可视宽度时，Qt 会静默忽略 setSizes()
+        与 moveSplitter()——实测表现为 sizes() 恒等于均分。修法是左右两栏各套
+        一层滚动容器。这里断言"能设得动"，而不是断言某个具体比例。
         """
-        wb = window.workbench_page
+        wb = window.workbench
         window.resize(1440, 900)
-        window.show()          # 布局只在 show 之后才真正分配高度
+        window.show()          # 布局只在 show 之后才真正分配尺寸
         qapp.processEvents()
         try:
-            total = sum(wb.splitter.sizes())
-            assert total > 0, "分割器未获得可用高度"
-
-            upper = max(1, int(total * 0.25))
-            wb.splitter.setSizes([upper, total - upper])
+            wb.left_stack.setVisible(True)   # 空态会隐藏左栏；测分割器时显式显示
             qapp.processEvents()
-            got_upper, got_lower = wb.splitter.sizes()
-            assert abs(got_upper - upper) <= 2, (
-                f"分割器忽略了 setSizes：请求上半 {upper}px，实际 {got_upper}px"
-                f"（{wb.splitter.sizes()}）——子控件最小高度可能又超过了可用高度"
+            total = sum(wb.splitter.sizes())
+            assert total > 0, "分割器未获得可用宽度"
+
+            left = max(1, int(total * 0.2))
+            center = int(total * 0.6)
+            wb.splitter.setSizes([left, center, total - left - center])
+            qapp.processEvents()
+            got = wb.splitter.sizes()
+            assert abs(got[0] - left) <= 4, (
+                f"分割器忽略了 setSizes：请求左栏 {left}px，实际 {got[0]}px（{got}）"
+                "——子控件最小宽度可能又超过了可用宽度"
             )
-            assert got_lower > got_upper, "分析区应拿到更多高度"
+            assert got[1] > got[0] and got[1] > got[2], "中栏应拿到最多宽度"
         finally:
             window.hide()      # 恢复 fixture 原状，不影响同模块后续用例
 
-    def test_page_rows_map_to_stack(self, window):
-        # 抽屉行（1/4）不切 stack；工作区行（0/2/3）依次对应 stack 0/1/2
-        for row, expected in ((0, 0), (2, 1), (3, 2)):
-            window.nav.setCurrentRow(row)
-            assert window.stack.currentIndex() == expected
+    def test_dialog_does_not_replace_workbench(self, window, qapp):
+        """设置 / 模型是对话框（真顶层窗口），打开时底下仍是工作台。"""
+        dialog = window.build_settings_dialog()
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible(), "设置对话框应能直接显示（工厂 + show，不 exec）"
+        assert window.workbench.isVisible() or not window.isVisible()
+        dialog.close()
 
-    def test_drawer_rows_do_not_switch_stack(self, window):
-        window.nav.setCurrentRow(0)
-        before = window.stack.currentIndex()
-        for row in (1, 4):
-            window.nav.setCurrentRow(row)
-            assert window.stack.currentIndex() == before
-
-    def test_navigation_starts_at_import(self, window):
-        window.nav.setCurrentRow(0)
-        assert window.stack.currentIndex() == 0
-        assert not window.btn_prev.isEnabled()
-
-    def test_next_is_blocked_without_media(self, window):
-        window.nav.setCurrentRow(0)
+    def test_starts_in_empty_stage(self, window):
+        """空态：阶段 EMPTY，底栏主动作是「选择源视频…」。"""
         window.state.reset_media()
-        ok, message = window.import_page.can_continue()
-        assert not ok and "导入" in message
+        window.workbench.refresh()
+        assert window.workbench.stage is Stage.EMPTY
+        assert window.bottom.action_text().startswith("选择源视频")
+
+    def test_analysis_requires_media(self, window, message_recorder):
+        window.state.reset_media()
+        ok, reason = window.workbench.can_start_analysis()
+        assert not ok and "导入" in reason
+
+        window.workbench.analysis_pane.start()
+        assert any(kind == "warning" for kind, *_ in message_recorder), (
+            "没有素材时应弹「尚未导入」而不是静默失败"
+        )
 
 
 class TestThemeAndTopBar:
@@ -136,7 +167,8 @@ class TestThemeAndTopBar:
             flipped = current_mode()
             assert flipped != start
             assert qapp.styleSheet() == theme.build_stylesheet(flipped)
-            assert window.app_bar.btn_theme.text() != ""
+            # 菜单里的勾选态要跟着走，否则用户看到的是错的当前主题
+            assert window.action_dark.isChecked() == (flipped == "dark")
 
             # 再切回来，确认可逆
             window._on_theme_toggled()
@@ -150,7 +182,7 @@ class TestThemeAndTopBar:
         finally:
             # 无论断言成败，把主题拨回起点，不影响同模块其他用例
             apply_theme(mode="light")
-            window.app_bar.set_theme_label(current_mode())
+            window.action_dark.setChecked(False)
 
     def test_theme_toggle_persists_to_config(self, monkeypatch, tmp_path):
         from app.core.app_config import AppConfig, config_path
@@ -187,11 +219,23 @@ class TestThemeAndTopBar:
         assert len(bar.title_label.text()) <= 37 and bar.title_label.text().endswith("…")
         bar.set_source(None)
 
-    def test_model_button_targets_drawer_row(self, window):
-        """回归：🤖 按钮曾指向不存在的第 6 行，抽屉永远打不开。"""
-        window.app_bar.model_clicked.emit()
-        assert window.nav.currentRow() == 4
-        window.nav.setCurrentRow(0)
+    def test_model_button_targets_drawer_row(self, window, monkeypatch):
+        """回归：设置/模型入口曾指向不存在的行，永远打不开。
+
+        现在入口在「工具」菜单；这里断言菜单项存在且分别调到对应对话框工厂。
+        """
+        opened: list[str] = []
+        monkeypatch.setattr(window, "open_settings_dialog", lambda: opened.append("settings"))
+        monkeypatch.setattr(window, "open_model_dialog", lambda: opened.append("model"))
+
+        tools_menu = next(
+            a.menu() for a in window.menuBar().actions() if a.text() == "工具"
+        )
+        actions = {a.text(): a for a in tools_menu.actions()}
+        assert "分集设置…" in actions and "模型管理…" in actions
+        actions["分集设置…"].trigger()
+        actions["模型管理…"].trigger()
+        assert opened == ["settings", "model"]
 
 
 class TestProjectPersistence:
@@ -232,10 +276,10 @@ class TestProjectPersistence:
         from app.core.settings import RangeSpec, SplitSettings
 
         window.state.binaries = binaries
-        window.import_page._probe(str(assets["cfr"]))
+        window.workbench.import_pane.probe(str(assets["cfr"]))
         assert self._wait(
             qapp,
-            lambda: window.import_page._worker and not window.import_page._worker.isRunning(),
+            lambda: window.workbench.import_pane.worker and not window.workbench.import_pane.worker.isRunning(),
         ), "探测超时"
         qapp.processEvents()
 
@@ -274,10 +318,10 @@ class TestProjectPersistence:
         self, window, qapp, binaries, assets, tmp_path
     ):
         window.state.binaries = binaries
-        window.import_page._probe(str(assets["cfr"]))
+        window.workbench.import_pane.probe(str(assets["cfr"]))
         assert self._wait(
             qapp,
-            lambda: window.import_page._worker and not window.import_page._worker.isRunning(),
+            lambda: window.workbench.import_pane.worker and not window.workbench.import_pane.worker.isRunning(),
         )
         qapp.processEvents()
 
@@ -319,8 +363,9 @@ class TestProjectPersistence:
             strategy=Strategy.SUSPENSE,
             allow_episode_exceptions=True,
         )
-        window.settings_page.apply_settings(original)
-        collected = window.settings_page.collect_settings()
+        form = window.build_settings_dialog().form
+        form.apply_settings(original)
+        collected = form.collect_settings()
         assert collected.split_mode == SplitMode.TARGET_EPISODE_COUNT
         assert collected.target_episode_count == 12
         assert collected.count_policy == CountPolicy.FLEXIBLE
@@ -416,7 +461,7 @@ class TestSettingsPageBehaviour:
         window.state.media = media
         window.state.binaries = binaries
 
-        page = window.settings_page
+        page = window.build_settings_dialog().form
         page.radio_by_duration.setChecked(True)
         page.range_percent.setChecked(True)
         page.duration_spin.setValue(30.0)
@@ -433,7 +478,7 @@ class TestSettingsPageBehaviour:
         media = probe_media(binaries, assets["cfr"])
         window.state.media = media
 
-        page = window.settings_page
+        page = window.build_settings_dialog().form
         page.radio_by_count.setChecked(True)
         page.policy_exact.setChecked(True)
         page.count_spin.setValue(60)
@@ -456,7 +501,7 @@ class TestSettingsPageBehaviour:
         media = probe_media(binaries, assets["cfr"])
         window.state.media = media
 
-        page = window.settings_page
+        page = window.build_settings_dialog().form
         page.radio_by_duration.setChecked(True)
         page.range_manual.setChecked(True)
         page.min_spin.setValue(200.0)
@@ -470,7 +515,7 @@ class TestSettingsPageBehaviour:
     def test_mode_switch_updates_settings_object(self, window, binaries, assets):
         """界面控件是唯一事实来源，切换后设置对象必须同步。"""
         window.state.media = probe_media(binaries, assets["cfr"])
-        page = window.settings_page
+        page = window.build_settings_dialog().form
 
         page.radio_by_count.setChecked(True)
         page.policy_flexible.setChecked(True)
@@ -485,7 +530,7 @@ class TestSettingsPageBehaviour:
     def test_strict_mode_ignores_manual_range_for_target(self, window, binaries, assets):
         """§4.1 两种范围来源互斥：百分比模式下手动上下限不参与计算。"""
         window.state.media = probe_media(binaries, assets["cfr"])
-        page = window.settings_page
+        page = window.build_settings_dialog().form
         page.radio_by_count.setChecked(True)
         page.range_percent.setChecked(True)
         page.tolerance_spin.setValue(20.0)
@@ -497,53 +542,78 @@ class TestSettingsPageBehaviour:
         assert derived.max_duration == Fraction(36)
 
 
-class _FakeDialog:
-    """录制型 QMessageBox 替身。
+class TestSettingsDialogRollback:
+    """设置对话框的「取消即回滚」语义。
 
-    类方法拦截 warning/information/critical 并记录入参；实例方法支持
-    addButton/exec/clickedButton，供导出前置检查对话框（§37）的流程测试。
+    表单是实时写回 ``state.settings`` 的（控件一变就 collect），所以"取消"
+    必须是显式回滚，否则用户试出来的参数会被当成确认值留下。
     """
 
-    calls: list[tuple] = []
-    ButtonRole = QMessageBox.ButtonRole
+    def test_cancel_restores_snapshot(self, window):
+        from fractions import Fraction
 
-    @classmethod
-    def warning(cls, *args):
-        cls.calls.append(("warning",) + args)
+        from app.core.settings import SplitSettings
 
-    @classmethod
-    def information(cls, *args):
-        cls.calls.append(("information",) + args)
+        window.state.settings = SplitSettings(target_duration_seconds=Fraction(45))
+        dialog = window.build_settings_dialog()
+        form = dialog.form
+        assert form.duration_spin.value() == 45.0, "打开时应把当前参数回填到控件"
 
-    @classmethod
-    def critical(cls, *args):
-        cls.calls.append(("critical",) + args)
+        form.duration_spin.setValue(12.0)     # 用户试参数（实时写回）
+        assert window.state.settings.target_duration_seconds == Fraction(12)
 
-    def __init__(self, *args, **kwargs):
-        self.text_value = ""
-        self.informative = ""
-        self.buttons: list[tuple] = []
-        self.clicked = None
+        dialog.cancel_and_close()
+        assert window.state.settings.target_duration_seconds == Fraction(45), (
+            "「取消」应把参数恢复成打开时的快照"
+        )
 
-    def setWindowTitle(self, title):
-        pass
+    def test_close_button_also_rolls_back(self, window):
+        """✕ / Esc 与「取消」同语义（reject 路径）。"""
+        from fractions import Fraction
 
-    def setText(self, text):
-        self.text_value = text
+        from app.core.settings import SplitSettings
 
-    def setInformativeText(self, text):
-        self.informative = text
+        window.state.settings = SplitSettings(target_duration_seconds=Fraction(30))
+        dialog = window.build_settings_dialog()
+        dialog.form.duration_spin.setValue(8.0)
+        assert window.state.settings.target_duration_seconds == Fraction(8)
 
-    def addButton(self, text, role):
-        token = (text, role)
-        self.buttons.append(token)
-        return token
+        dialog.reject()
+        assert window.state.settings.target_duration_seconds == Fraction(30)
 
-    def exec(self):
-        pass
 
-    def clickedButton(self):
-        return self.clicked
+class TestExportDialogContracts:
+    """§37 的纯逻辑：返回审核时的定位目标、前置检查文案。"""
+
+    def test_review_target_points_at_problem_episode(self):
+        from app.core.plan import BoundaryPlan, PlanProblem
+        from app.core.timebase import TimeBase
+        from app.gui.panes.export_form import review_target
+
+        plan = BoundaryPlan.uniform(4, TimeBase(1, 25), 3000)   # 0/30/60/90/120 秒
+        episode, ms = review_target(
+            plan, [PlanProblem(code="X", level="warn", message="超长", episode=3)]
+        )
+        assert episode == 3
+        assert ms == 90_000, "问题落在第 3 集片尾（90 秒）"
+
+    def test_review_target_falls_back_without_episode(self):
+        from app.core.plan import BoundaryPlan, PlanProblem
+        from app.core.timebase import TimeBase
+        from app.gui.panes.export_form import review_target
+
+        plan = BoundaryPlan.uniform(4, TimeBase(1, 25), 3000)
+        episode, ms = review_target(
+            plan, [PlanProblem(code="Y", level="warn", message="全局问题")]
+        )
+        assert (episode, ms) == (0, 0), "没有集号时只回审核态、不定位"
+
+    def test_precheck_prompt_mentions_both_counts(self):
+        from app.gui.panes.export_form import precheck_prompt
+
+        text = precheck_prompt([], 3)
+        assert "3 个切点未审核" in text
+        assert "继续" in text and "返回审核" in text
 
 
 class _FakeSignal:
@@ -593,11 +663,12 @@ class TestStep5Refinement:
         window.state.media = media
         window.state.binaries = binaries
         window.state.add_plan(plan)
+        window.workbench.refresh()
         return media, plan
 
     def test_export_precheck_counts_unreviewed_cuts(self, window, binaries, assets):
         """§37：未确认方案 → 未审核切点数 = 集数 - 1（首尾是片头片尾）。"""
-        from app.gui.pages.export_page import export_precheck
+        from app.gui.panes.export_form import export_precheck
 
         _, plan = self._seed(window, binaries, assets)
         blocking, warnings, unreviewed = export_precheck(plan, window.state.settings)
@@ -610,70 +681,74 @@ class TestStep5Refinement:
         assert unreviewed == 0
 
     def test_precheck_dialog_back_to_review(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
-        """§37：前置检查弹「继续导出 / 返回审核」，选返回 → 切审核页、不导出。"""
-        from app.gui.pages import export_page as ep
+        """§37：前置检查选「返回审核」→ 关对话框、回审核态、不导出。"""
+        from app.gui.dialogs import ExportDialog
+        from app.gui.panes import export_form as ep
 
         _, plan = self._seed(window, binaries, assets)
         window.state.output_root = tmp_path
         assert plan.semantic_review_status == "pending"
 
-        captured = {}
-        window.export_page.review_requested.connect(lambda: captured.update(fired=True))
-
-        _FakeDialog.calls = []
-        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
         monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
         _FakeWorker.instances = []
+        monkeypatch.setattr(
+            ExportDialog, "request_precheck", lambda self, warnings, unreviewed: "review"
+        )
 
-        def choose_back(self_dialog):
-            self_dialog.clicked = self_dialog.buttons[-1]   # 「返回审核」
+        dialog = window.build_export_dialog()
+        dialog.show()
+        dialog.start_export()
+        qapp.processEvents()
 
-        monkeypatch.setattr(_FakeDialog, "exec", choose_back)
-        window.export_page._start(None)
-
-        assert captured.get("fired"), "选择「返回审核」应发出 review_requested"
-        assert window.nav.currentRow() == 2, "应切回审核页"
+        assert window.workbench.stage is Stage.REVIEW, "应回到审核态（左栏切回集列表）"
         assert not _FakeWorker.instances, "不应启动导出线程"
+        assert not dialog.isVisible(), "选「返回审核」应关闭导出对话框"
 
     def test_precheck_dialog_continue_exports(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
         """§37：选「继续导出」→ 走到启动导出（用户有意忽略未审核项）。"""
-        from app.gui.pages import export_page as ep
+        from app.gui.dialogs import ExportDialog
+        from app.gui.panes import export_form as ep
 
         self._seed(window, binaries, assets)
         window.state.output_root = tmp_path
 
-        _FakeDialog.calls = []
-        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
         monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
         _FakeWorker.instances = []
+        monkeypatch.setattr(
+            ExportDialog, "request_precheck", lambda self, warnings, unreviewed: "continue"
+        )
 
-        def choose_continue(self_dialog):
-            self_dialog.clicked = self_dialog.buttons[0]    # 「继续导出」
-
-        monkeypatch.setattr(_FakeDialog, "exec", choose_continue)
-        window.export_page._start(None)
+        dialog = window.build_export_dialog()
+        dialog.show()
+        dialog.start_export()
 
         assert len(_FakeWorker.instances) == 1, "继续导出应启动一次导出线程"
         worker = _FakeWorker.instances[0]
         assert worker.kwargs.get("only_episodes") is None
 
-    def test_hard_constraints_still_block_export(self, window, qapp, binaries, assets, tmp_path, monkeypatch):
-        """§37：硬约束问题仍直接拦截，不给「继续导出」的选项。"""
-        from app.gui.pages import export_page as ep
+    def test_hard_constraints_still_block_export(
+        self, window, qapp, binaries, assets, tmp_path, monkeypatch, message_recorder
+    ):
+        """§37：硬约束问题仍直接拦截，连前置检查都不给。"""
+        from app.gui.dialogs import ExportDialog
+        from app.gui.panes import export_form as ep
 
         _, plan = self._seed(window, binaries, assets)
         window.state.output_root = tmp_path
         # 破坏硬约束：起点不再从 0 开始 → NOT_START_AT_ZERO（阻断）
         plan.boundary_ticks = [plan.boundary_ticks[0] + 1000, plan.boundary_ticks[-1]]
 
-        _FakeDialog.calls = []
-        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
         monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
         _FakeWorker.instances = []
+        monkeypatch.setattr(
+            ExportDialog, "request_precheck", lambda self, warnings, unreviewed: "continue"
+        )
 
-        window.export_page._start(None)
+        dialog = window.build_export_dialog()
+        dialog.show()
+        dialog.start_export()
 
-        assert any(call[0] == "warning" for call in _FakeDialog.calls), "硬约束应弹警告"
+        assert any(kind == "warning" for kind, *_ in message_recorder), "硬约束应弹警告"
         assert not _FakeWorker.instances, "硬约束问题必须拦住导出"
 
     def test_shortcut_sequences_registered(self, window):
@@ -695,75 +770,58 @@ class TestStep5Refinement:
         assert not window.isFullScreen(), "第二次 F11 应退出全屏"
 
     def test_esc_exits_fullscreen_first(self, window, qapp):
-        """Esc 分层：全屏时 Esc 只退全屏，不关抽屉（优先级最高）。"""
-        window.settings_drawer.show()
+        """Esc 分层：全屏时 Esc 只退全屏，不关对话框（优先级最高）。"""
+        dialog = window.build_settings_dialog()
+        dialog.show()
+        qapp.processEvents()
         try:
             window._toggle_fullscreen()
             window._escape_pressed()
-            assert not window.isFullScreen(), "全屏 + 抽屉同开时 Esc 应先退全屏"
+            assert not window.isFullScreen(), "全屏 + 对话框同开时 Esc 应先退全屏"
+            assert dialog.isVisible(), "同一次 Esc 不该顺手把对话框也关掉"
         finally:
-            self._hide_drawer(qapp, window.settings_drawer)
-
-    def test_esc_closes_open_drawer(self, window, qapp):
-        """Esc 分层：非全屏时 Esc 关闭打开中的抽屉（与 ✕ 同一条动画路径）。"""
-        import time
-
-        window.settings_drawer.show()
-        try:
-            assert window.settings_drawer.isVisible(), "前置：抽屉已打开"
-            window._escape_pressed()
-            deadline = time.time() + 5.0
-            while time.time() < deadline:
-                qapp.processEvents()
-                if not window.settings_drawer.isVisible():
-                    break
-                time.sleep(0.02)
-            assert not window.settings_drawer.isVisible(), "Esc 应关闭抽屉"
-        finally:
-            self._hide_drawer(qapp, window.settings_drawer)
-
-    @staticmethod
-    def _hide_drawer(qapp, drawer) -> None:
-        """模块级 window 夹具是共享的：把抽屉彻底关掉，避免动画残留污染后续用例。"""
-        import time
-
-        drawer.hide()
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
+            dialog.close()
             qapp.processEvents()
-            if not drawer.isVisible():
-                return
-            time.sleep(0.02)
 
-    def test_ctrl_e_navigates_and_warns_without_plan(self, window, qapp, monkeypatch):
-        """Ctrl+E：无方案时切到导出页并弹「请先完成导入、分析与审核」。"""
-        from app.gui.pages import export_page as ep
+    def test_esc_closes_open_dialog(self, window, qapp):
+        """Esc 分层：非全屏时 Esc 关闭打开中的对话框。"""
+        dialog = window.build_model_dialog()
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible(), "前置：对话框已打开"
+        window._escape_pressed()
+        qapp.processEvents()
+        assert not dialog.isVisible(), "Esc 应关闭对话框"
 
+    def test_ctrl_e_opens_export_dialog_and_warns_without_plan(
+        self, window, qapp, monkeypatch, message_recorder
+    ):
+        """Ctrl+E：无方案时打开导出对话框并给「请先完成导入、分析与审核」。"""
         window.state.reset_media()
         window.state.plans = []
         window.state.plan_cursor = 0
-        window.nav.setCurrentRow(0)
-
-        _FakeDialog.calls = []
-        monkeypatch.setattr(ep, "QMessageBox", _FakeDialog)
+        window.workbench.refresh()
 
         window._start_export()
-        assert window.nav.currentRow() == 3
-        assert any("请先完成导入、分析与审核" in str(call) for call in _FakeDialog.calls)
 
-    def test_return_confirms_episode_on_review_page(self, window, qapp, binaries, assets):
-        """§54：回车 = 确认当前集（挂在审核页上，仅审核页内触发）。"""
+        assert window.export_dialog is not None, "Ctrl+E 应打开导出对话框"
+        assert any(
+            "请先完成导入、分析与审核" in str(call) for call in message_recorder
+        ), f"应给出可操作提示，实际弹窗：{message_recorder}"
+        window.export_dialog.close()
+
+    def test_return_confirms_episode(self, window, qapp, binaries, assets):
+        """§54：回车 = 确认当前集（快捷键挂在工作台上，走同一条确认路径）。"""
         from PySide6.QtGui import QShortcut
 
         _, plan = self._seed(window, binaries, assets)
         assert plan.semantic_review_status == "pending"
-        window.nav.setCurrentRow(2)
 
         return_shortcuts = [
             sc for sc in window.findChildren(QShortcut)
-            if sc.parent() is window.review_page and sc.key().toString() == "Return"
+            if sc.parent() is window.workbench and sc.key().toString() == "Return"
         ]
-        assert len(return_shortcuts) == 1, "Return 快捷键应唯一且挂在审核页上"
+        assert len(return_shortcuts) == 1, "Return 快捷键应唯一且挂在工作台上"
         return_shortcuts[0].activated.emit()
 
         assert plan.semantic_review_status == "confirmed", "回车应触发确认当前集"
@@ -772,7 +830,7 @@ class TestStep5Refinement:
         """N/P 巡航：只走有定位的问题项，N/P 方向相反且可循环。"""
         from app.gui.widgets import InspectorIssue
 
-        inspector = window.workbench_page.inspector
+        inspector = window.workbench.inspector
         got = []
         inspector.jump_requested.connect(got.append)
         inspector.set_issues([
@@ -787,19 +845,17 @@ class TestStep5Refinement:
         assert got == [1000, 2000, 1000], f"巡航顺序错误：{got}"
 
     def test_jump_requested_opens_review_page_at_position(self, window, qapp, binaries, assets):
-        """检查器「查看」：切到审核页、选中所在集、定位到问题时间点。"""
-        window.nav.setCurrentRow(0)
+        """检查器「查看」：选中所在集、定位到问题时间点。"""
         self._seed(window, binaries, assets)
 
-        window._jump_to_issue(45_000)
-        assert window.nav.currentRow() == 2
-        assert window.review_page._current_episode == 2, "45s 应落在第 2 集（30-60s）"
-        assert window.review_page._position == Fraction(45)
+        window.workbench._on_jump_requested(45_000)
+        assert window.workbench.selected_episode == 2, "45s 应落在第 2 集（30-60s）"
+        assert window.workbench.stage_view.position == Fraction(45)
 
     def test_review_ops_buttons_have_hard_minimums(self, window):
         """回归：QSS min-height 不进 minimumSizeHint，按钮曾被布局压成细条、
         文字互相叠印（docs/screenshots/04-审核.png 缺陷）。"""
-        page = window.review_page
+        page = window.workbench.review_pane
         for btn in (
             page.btn_set_boundary,
             page.btn_lock,

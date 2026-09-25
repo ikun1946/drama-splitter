@@ -1,4 +1,8 @@
-"""页 5 导出：编码参数、预计空间、事务式批量导出与失败重试。"""
+"""导出表单：编码参数、预计空间、事务式批量导出与失败重试。
+
+由 ``app/gui/dialogs/export_dialog.py`` 的 ExportDialog 承载；对话框负责
+§37 前置检查的决策（可覆写 ``request_precheck``），本表单只负责执行。
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -33,6 +36,7 @@ from ..widgets import (
     Card,
     LabeledField,
 )
+from ..widgets import message
 from ..workers import (
     ExportWorker,
 )
@@ -41,7 +45,7 @@ from ._common import (
 )
 
 
-__all__ = ["ExportPage", "export_precheck"]
+__all__ = ["ExportForm", "export_precheck", "precheck_prompt", "review_target"]
 
 
 def export_precheck(
@@ -51,7 +55,7 @@ def export_precheck(
     """§37 导出前置检查：返回 (硬约束问题, 警告, 未审核切点数)。
 
     硬约束必须拦住；警告与未审核只提示、不禁止——用户可能有意忽略。
-    与审核页「方案层校验」用同一套 ``plan.validate(settings)`` 入参，
+    与审核态「方案层校验」用同一套 ``plan.validate(settings)`` 入参，
     保证「返回审核」后用户看到的问题清单与导出前检查一致。
     """
     problems = plan.validate(settings, None)
@@ -65,14 +69,47 @@ def export_precheck(
     return blocking, warnings, unreviewed
 
 
-class ExportPage(QWidget):
-    # §37：用户在导出前置检查中选择「返回审核」时发出，由主窗口负责切页
-    review_requested = Signal()
+def precheck_prompt(warnings: list, unreviewed: int) -> str:
+    """§37 前置检查的提示文案（对话框与表单默认实现共用一份）。"""
+    parts = []
+    if unreviewed:
+        parts.append(f"还有 {unreviewed} 个切点未审核")
+    if warnings:
+        parts.append(f"方案层校验有 {len(warnings)} 条警告")
+    text = "；".join(parts) + "。是否继续？"
+    text += "\n\n返回审核处理后再导出更稳妥；也可以选择继续导出（自行承担风险）。"
+    if warnings:
+        text += "\n\n警告：\n" + "\n".join(p.describe() for p in warnings)
+    return text
 
-    def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
+
+def review_target(plan: BoundaryPlan, problems: list) -> tuple[int, int]:
+    """「返回审核」时的定位目标：首条带集号的问题 → (集号, 毫秒)。
+
+    毫秒取该集的片尾切点（问题就出在那条边界上）。没有带集号的问题时返回
+    ``(0, 0)``——只回到审核态，不定位到具体位置。
+    """
+    episodes = plan.episodes()
+    for problem in problems:
+        if not problem.episode:
+            continue
+        index = max(1, min(int(problem.episode), len(episodes)))
+        return index, int(float(episodes[index - 1].end_seconds) * 1000)
+    return 0, 0
+
+
+class ExportForm(QWidget):
+    # 前置检查里选「返回审核」时发出，带 (集号, 毫秒位置)；集号 0 表示不定位
+    review_requested = Signal(int, int)
+
+    def __init__(self, state: ProjectState, parent: QWidget | None = None,
+                 precheck=None) -> None:
         super().__init__(parent)
         self.state = state
-        self._worker: ExportWorker | None = None
+        self.worker: ExportWorker | None = None
+        # 前置检查的决策函数：(warnings, unreviewed) -> "continue" | "review"。
+        # 由对话框注入它的 request_precheck，测试则直接覆写对话框的方法。
+        self.precheck = precheck or self._default_precheck
 
         self.crf_spin = QSpinBox()
         self.crf_spin.setRange(0, 51)
@@ -143,7 +180,7 @@ class ExportPage(QWidget):
         self.btn_cancel = QPushButton("取消")
         self.btn_retry.setEnabled(False)
         self.btn_cancel.setEnabled(False)
-        self.btn_start.clicked.connect(lambda: self._start(None))
+        self.btn_start.clicked.connect(lambda: self.start_export(None))
         self.btn_retry.clicked.connect(self._retry)
         self.btn_cancel.clicked.connect(self._cancel)
 
@@ -207,19 +244,19 @@ class ExportPage(QWidget):
             audio_bitrate=self.audio_bitrate_combo.currentText(),
         )
 
-    def _start(self, only: list[int] | None) -> None:
+    def start_export(self, only: list[int] | None = None) -> None:
         plan = self.state.current_plan
         media = self.state.media
         if plan is None or media is None or self.state.binaries is None:
-            QMessageBox.warning(self, "无法导出", "请先完成导入、分析与审核。")
+            message.warning(self, "无法导出", "请先完成导入、分析与审核。")
             return
         if self.state.output_root is None:
-            QMessageBox.warning(self, "缺少输出目录", "请先选择输出目录。")
+            message.warning(self, "缺少输出目录", "请先选择输出目录。")
             return
 
         blocking, warnings, unreviewed = export_precheck(plan, self.state.settings)
         if blocking:
-            QMessageBox.warning(
+            message.warning(
                 self,
                 "方案不可导出",
                 "存在硬约束问题：\n" + "\n".join(p.describe() for p in blocking),
@@ -229,8 +266,8 @@ class ExportPage(QWidget):
         # §37 导出前置检查：非阻断问题不禁止导出——用户可能有意忽略。
         # 给「继续导出」与「返回审核」两条路，让用户自己决定。
         if warnings or unreviewed:
-            if not self._confirm_precheck(warnings, unreviewed):
-                self.review_requested.emit()
+            if self.precheck(warnings, unreviewed) != "continue":
+                self.review_requested.emit(*review_target(plan, warnings))
                 return
 
         self.progress.setValue(0)
@@ -238,7 +275,7 @@ class ExportPage(QWidget):
         self.btn_retry.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
-        self._worker = ExportWorker(
+        self.worker = ExportWorker(
             self.state.binaries,
             media,
             plan,
@@ -249,35 +286,24 @@ class ExportPage(QWidget):
             transcript=self.state.transcript,
             parent=self,
         )
-        self._worker.episode_done.connect(self._on_episode_done)
-        self._worker.completed.connect(self._on_completed)
-        self._worker.failed.connect(self._on_failed)
-        register_worker(self, "export", self._worker)
-        self._worker.start()
+        self.worker.episode_done.connect(self._on_episode_done)
+        self.worker.completed.connect(self._on_completed)
+        self.worker.failed.connect(self._on_failed)
+        register_worker(self, "export", self.worker)
+        self.worker.start()
 
-    def _confirm_precheck(self, warnings: list, unreviewed: int) -> bool:
-        """§37 前置检查对话框。返回 True=继续导出，False=返回审核。
+    def _default_precheck(self, warnings: list, unreviewed: int) -> str:
+        """§37 前置检查的默认实现：返回 "continue" 或 "review"。
 
-        单独提方法而不是内联弹窗：自动化环境（tools/gui_smoke.py）覆写它
-        即可绕过模态——QMessageBox 实例的 exec() 无法通过拦截静态方法替代，
-        离屏跑链路时会永久阻塞（实测踩过）。
+        对话框承载时会把自己的 ``request_precheck`` 注入进来；测试与离屏冒烟
+        覆写对话框的那个方法即可绕过模态——QMessageBox 实例的 exec() 无法
+        通过拦截静态方法替代，离屏跑链路时会永久阻塞（实测挂过 25 分钟）。
         """
-        parts = []
-        if unreviewed:
-            parts.append(f"还有 {unreviewed} 个切点未审核")
-        if warnings:
-            parts.append(f"方案层校验有 {len(warnings)} 条警告")
-        box = QMessageBox(self)
-        box.setWindowTitle("导出前置检查")
-        box.setText("；".join(parts) + "。是否继续？")
-        informative = "返回审核处理后再导出更稳妥；也可以选择继续导出（自行承担风险）。"
-        if warnings:
-            informative += "\n\n警告：\n" + "\n".join(p.describe() for p in warnings)
-        box.setInformativeText(informative)
-        box.addButton("继续导出", QMessageBox.ButtonRole.AcceptRole)
-        btn_back = box.addButton("返回审核", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        return box.clickedButton() is not btn_back
+        agreed = message.confirm_continue(
+            self, "导出前置检查", precheck_prompt(warnings, unreviewed),
+            "继续导出", "返回审核",
+        )
+        return "continue" if agreed else "review"
 
     def _retry(self) -> None:
         plan = self.state.current_plan
@@ -289,14 +315,14 @@ class ExportPage(QWidget):
             if episode.index not in self.state.exported
         ]
         if not failed:
-            QMessageBox.information(self, "没有失败项", "所有集都已成功导出。")
+            message.information(self, "没有失败项", "所有集都已成功导出。")
             return
-        self._start(failed)
+        self.start_export(failed)
 
     def _cancel(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
-            self._worker.wait(5000)
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(5000)
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
 
@@ -314,10 +340,10 @@ class ExportPage(QWidget):
         self.queue.setItem(row, 2, QTableWidgetItem(checks))
         if result.actual_duration is not None:
             self.queue.setItem(row, 3, QTableWidgetItem(format_seconds_brief(result.actual_duration)))
-        message = result.message
+        note = result.message
         if result.warnings:
-            message = message + "；" + "；".join(result.warnings)
-        self.queue.setItem(row, 4, QTableWidgetItem(message))
+            note = note + "；" + "；".join(result.warnings)
+        self.queue.setItem(row, 4, QTableWidgetItem(note))
 
         if result.success and result.output_path:
             self.state.exported[result.episode_index] = (result.output_path, plan.version)
@@ -332,7 +358,7 @@ class ExportPage(QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_retry.setEnabled(bool(batch.failed))
         if batch.cancelled:
-            QMessageBox.information(self, "已取消", batch.summary())
+            message.information(self, "已取消", batch.summary())
             return
         text = batch.summary() + f"\n输出目录：{batch.plan_directory}"
         if batch.plan_layer_problems:
@@ -359,12 +385,12 @@ class ExportPage(QWidget):
                         text += f"\n  第{result.episode:02d}集有 {len(result.clipped)} 条字幕被截断"
             else:
                 text += "\n字幕：未生成（分析阶段未产出转写）"
-        QMessageBox.information(self, "导出结束", text)
+        message.information(self, "导出结束", text)
 
-    def _on_failed(self, message: str) -> None:
+    def _on_failed(self, text: str) -> None:
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        QMessageBox.critical(self, "导出失败", message)
+        message.critical(self, "导出失败", text)
 
     def can_continue(self) -> tuple[bool, str]:
         if self.state.output_root is None:
