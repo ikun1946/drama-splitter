@@ -94,6 +94,11 @@ class WorkbenchPage(QWidget):
         self._original_start = self.analysis_view._start
         self.analysis_view._start = self._start_with_scroll
 
+        # 探针完成后让外层窗口同步一次顶栏标题（方案 §七：顶栏显示当前文件名）。
+        # 与日志镜像同一手法：包装页面的私有回调，不动 ImportPage 内部。
+        self._original_on_probed = self.import_view._on_probed
+        self.import_view._on_probed = self._on_probed_with_sync
+
     # ---- 自动跟随 ------------------------------------------------------
 
     def _focus_analysis(self) -> None:
@@ -111,6 +116,15 @@ class WorkbenchPage(QWidget):
     def _on_stage_with_scroll(self, name: str) -> None:
         self._original_stage(name)
         self._focus_analysis()
+
+    def _on_probed_with_sync(self, info, issues) -> None:
+        self._original_on_probed(info, issues)
+        # window() 上溯与 register_worker 同一约定：拿不到就跳过，
+        # 单测直接构造页面时不受影响
+        top = self.window()
+        sync = getattr(top, "_sync_top_bar", None)
+        if callable(sync):
+            sync()
 
     # ---- 属性转发 ------------------------------------------------------
 

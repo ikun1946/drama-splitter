@@ -562,6 +562,22 @@ QSplitter::handle:vertical {{
     height: 1px;
 }}
 
+/* ===== 滚动容器 ===== */
+/* viewport 默认用调色板 Base（浅色下是白），深色主题里会顶出一块块白底。
+   全部改透明，让窗口背景透出来；滚动条另按主题着色。 */
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+
+QAbstractScrollArea::corner {{
+    background: transparent;
+}}
+
 /* ===== 工具提示 ===== */
 QToolTip {{
     background: {TEXT};
@@ -667,6 +683,73 @@ QPushButton[role="ghost"]:hover {{
     background: {PRIMARY_SOFT};
     border-radius: {RADIUS_SM}px;
 }}
+
+/* ===== 顶栏 / 状态条 / 底栏（原先散在各控件里的硬编码颜色收拢于此） ===== */
+QFrame[role="app-bar"] {{
+    background: {BG_ALT};
+    border-bottom: 1px solid {BORDER};
+}}
+
+QLabel[role="app-bar-title"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-weight: 600;
+    color: {TEXT};
+    padding: 0 16px;
+}}
+
+QFrame[role="status-strip"] {{
+    background: {BG};
+    border-bottom: 1px solid {BORDER};
+}}
+
+QLabel[role="status-text"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {TEXT_MUTED};
+    padding: 0 16px;
+}}
+
+QFrame[role="footer-bar"] {{
+    background: {BG_ALT};
+    border-top: 1px solid {BORDER};
+}}
+
+QLabel[role="hint"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {WARN};
+    padding: 0 16px;
+}}
+
+/* ===== 拖放导入区文字（inline 样式改角色，深浅主题各取令牌） ===== */
+QLabel[role="drop-icon"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: 48pt;
+    background: transparent;
+}}
+
+QLabel[role="drop-icon"][compact="true"] {{
+    font-size: 20pt;
+}}
+
+QLabel[role="drop-title"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: 14pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QLabel[role="drop-title"][compact="true"] {{
+    font-size: 10pt;
+    font-weight: 400;
+    color: {TEXT_MUTED};
+}}
+
+QLabel[role="drop-hint"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: 10pt;
+    color: {TEXT_MUTED};
+    background: transparent;
+}}
 """
 
 
@@ -710,6 +793,18 @@ def apply_theme(app: QApplication | None = None, mode: str = DEFAULT_MODE) -> No
     sheet = build_stylesheet(mode)
     if app.styleSheet() != sheet:
         app.setStyleSheet(sheet)
+    global _CURRENT_MODE
+    _CURRENT_MODE = mode if mode in MODES else DEFAULT_MODE
+
+
+# 运行时当前模式。apply_theme 是唯一写入口，供自绘控件（DropZone 等）
+# 在 paintEvent 里取当前主题的令牌——避免每处都自己保存一份 mode。
+_CURRENT_MODE = DEFAULT_MODE
+
+
+def current_mode() -> str:
+    """返回 apply_theme 最近一次应用的主题模式。"""
+    return _CURRENT_MODE
 
 
 def is_dark(mode: str = DEFAULT_MODE) -> bool:

@@ -114,6 +114,86 @@ class TestWindowConstruction:
         assert not ok and "导入" in message
 
 
+class TestThemeAndTopBar:
+    """第 3 步：运行时主题切换 + 顶栏动态标题。
+
+    主题切换是全局 QSS 重注入，切不回去就是事故——这里两个方向各切一次。
+    配置持久化用 tmp_path 替换 config_path，绝不污染开发机上的 config.json。
+    """
+
+    def test_theme_toggle_round_trip(self, window, qapp, monkeypatch, tmp_path):
+        from app.gui import theme
+        from app.gui.theme import apply_theme, current_mode
+
+        # 配置写到临时目录，测试不碰真实 config.json
+        monkeypatch.setattr(
+            "app.core.app_config.config_path", lambda: tmp_path / "config.json"
+        )
+        start = current_mode()
+        try:
+            window._on_theme_toggled()
+            qapp.processEvents()
+            flipped = current_mode()
+            assert flipped != start
+            assert qapp.styleSheet() == theme.build_stylesheet(flipped)
+            assert window.app_bar.btn_theme.text() != ""
+
+            # 再切回来，确认可逆
+            window._on_theme_toggled()
+            qapp.processEvents()
+            assert current_mode() == start
+
+            # 配置应记录最后一次的选择
+            from app.core.app_config import AppConfig
+
+            assert AppConfig.load().theme == start
+        finally:
+            # 无论断言成败，把主题拨回起点，不影响同模块其他用例
+            apply_theme(mode="light")
+            window.app_bar.set_theme_label(current_mode())
+
+    def test_theme_toggle_persists_to_config(self, monkeypatch, tmp_path):
+        from app.core.app_config import AppConfig, config_path
+
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("app.core.app_config.config_path", lambda: cfg_path)
+
+        cfg = AppConfig()
+        cfg.theme = "dark"
+        cfg.save()
+        reloaded = AppConfig.load()
+        assert reloaded.theme == "dark"
+
+        # 旧配置文件没有 theme 字段 → 回落浅色
+        cfg_path.write_text('{"models_dir": null}', encoding="utf-8")
+        assert AppConfig.load().theme == "light"
+        # 非法值同样回落浅色
+        cfg_path.write_text('{"theme": "solarized"}', encoding="utf-8")
+        assert AppConfig.load().theme == "light"
+        assert config_path()  # 引用存活，防误删
+
+    def test_top_bar_shows_source_name(self, window):
+        bar = window.app_bar
+        app_title = bar.title_label.text()
+        bar.set_source("某个很长很长的剧名_全集.mp4", "D:/drama/某个很长很长的剧名_全集.mp4")
+        assert bar.title_label.text() == "某个很长很长的剧名_全集.mp4"
+        assert "D:/drama" in bar.title_label.toolTip()
+        bar.set_source(None)
+        assert bar.title_label.text() == app_title
+
+        # 超长文件名截断且带省略号
+        long_name = "超" * 60 + ".mp4"
+        bar.set_source(long_name, long_name)
+        assert len(bar.title_label.text()) <= 37 and bar.title_label.text().endswith("…")
+        bar.set_source(None)
+
+    def test_model_button_targets_drawer_row(self, window):
+        """回归：🤖 按钮曾指向不存在的第 6 行，抽屉永远打不开。"""
+        window.app_bar.model_clicked.emit()
+        assert window.nav.currentRow() == 4
+        window.nav.setCurrentRow(0)
+
+
 class TestWorkers:
     """工作线程的构造参数与信号契约。
 

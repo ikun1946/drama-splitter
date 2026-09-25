@@ -261,9 +261,9 @@ app/core/          引擎（不依赖界面，可独立测试）
   recommend.py       剧情/悬念/时长三种策略
   episode_files.py   单集字幕导出（SRT）
   model_manager.py   模型清单、体积探测、下载与删除
-  app_config.py      应用配置持久化（模型目录等）
+  app_config.py      应用配置持久化（模型目录、界面主题等）
 app/gui/           界面（PySide6-Essentials）
-  theme.py           设计令牌与全局 QSS（浅色 / 深色双套）
+  theme.py           设计令牌与全局 QSS（浅色 / 深色双套，顶栏可运行时切换并记住）
   widgets/           通用控件（卡片/抽屉/步骤条/下拉区/日志面板等 12 个）
   pages/             页面实现，每页一个文件（方案 §五：核心工作流三页）
     _common.py         页面层共享符号（等级映射、任务登记、滚动容器）

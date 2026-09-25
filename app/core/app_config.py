@@ -50,6 +50,7 @@ class AppConfig:
     models_dir: str | None = None       # 用户指定的模型根目录
     endpoint: str = "https://hf-mirror.com"
     last_download_key: str | None = None  # 上次选择的模型（下次打开时预选中）
+    theme: str = "light"                # 界面主题：light / dark
     extra: dict = field(default_factory=dict)
 
     # ---- 读写 ----------------------------------------------------------
@@ -63,10 +64,14 @@ class AppConfig:
             return cls()
         if not isinstance(data, dict):
             return cls()
+        theme = str(data.get("theme") or "light")
+        if theme not in ("light", "dark"):
+            theme = "light"
         return cls(
             models_dir=data.get("models_dir"),
             endpoint=str(data.get("endpoint") or "https://hf-mirror.com"),
             last_download_key=data.get("last_download_key"),
+            theme=theme,
             extra=dict(data.get("extra") or {}),
         )
 

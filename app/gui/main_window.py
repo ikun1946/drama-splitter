@@ -13,6 +13,8 @@ MainWindow 与装配逻辑（页面构建、页面切换、顶栏 stepper、抽�
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.app_config import AppConfig
 from ..core.probe import check_compatibility
 from .pages import (
     ExportPage,
@@ -37,7 +40,7 @@ from .pages import (
     scrollable,
 )
 from .state import ProjectState
-from .theme import apply_theme
+from .theme import apply_theme, current_mode
 from .widgets import (
     AppBar,
     Drawer,
@@ -84,36 +87,39 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 600)
         self.setMaximumSize(4096, 2160)
 
-        apply_theme()
+        # 主题取自应用配置（记住上次选择）；非法值在 AppConfig.load 已兜底
+        self.config = AppConfig.load()
+        apply_theme(mode=self.config.theme)
         self.state = ProjectState()
 
         # 活跃任务登记：名 → BaseWorker。用于统一判断「现在忙什么」、
         # 阻止并发启动互相干扰的任务，以及退出时等它们收尾。
         self._workers: dict[str, object] = {}
 
-        # 顶栏（含 stepper + 设置/模型按钮）
+        # 顶栏（stepper + 主题切换 + 更换视频 + 设置/模型）
         self.app_bar = AppBar("🎬  AI 短剧分集器", self.STEPPER_NAMES)
+        self.app_bar.set_theme_label(current_mode())
         self.app_bar.step_clicked.connect(self._on_stepper_clicked)
         self.app_bar.settings_clicked.connect(lambda: self.nav.setCurrentRow(1))
-        self.app_bar.model_clicked.connect(lambda: self.nav.setCurrentRow(5))
+        self.app_bar.model_clicked.connect(lambda: self.nav.setCurrentRow(4))
+        self.app_bar.theme_clicked.connect(self._on_theme_toggled)
+        self.app_bar.change_source_clicked.connect(self._on_change_source)
 
         # StepNav 实例保留（兼容测试 + 作为导航数据模型），但不可见
         self.nav = StepNav(self.PAGES)
         self.nav.setVisible(False)
         self.nav.currentRowChanged.connect(self._nav_changed)
 
-        # 状态条（极简）
+        # 状态条（极简）：颜色全部走 QSS 角色，深浅主题自动跟随
         self.status_strip = QFrame()
-        self.status_strip.setStyleSheet(
-            "QFrame { background: #f5f6fa; border-bottom: 1px solid #d9dce4; }"
-        )
+        self.status_strip.setProperty("role", "status-strip")
         self.status_strip.setFixedHeight(32)
         self.status_left = QLabel("未导入源视频")
-        self.status_left.setStyleSheet("color: #5f6368; padding: 0 16px;")
+        self.status_left.setProperty("role", "status-text")
         self.status_progress = QLabel("")
-        self.status_progress.setStyleSheet("color: #5f6368;")
+        self.status_progress.setProperty("role", "status-text")
         self.status_right = QLabel(f"第 1 / {len(self.STEPPER_NAMES)} 步")
-        self.status_right.setStyleSheet("color: #5f6368; padding: 0 16px;")
+        self.status_right.setProperty("role", "status-text")
 
         strip_layout = QHBoxLayout(self.status_strip)
         strip_layout.setContentsMargins(0, 0, 0, 0)
@@ -145,7 +151,7 @@ class MainWindow(QMainWindow):
 
         # 底部 action bar：提示 + 继续按钮
         self.hint = QLabel("")
-        self.hint.setStyleSheet("color:#9a6700; padding: 0 16px;")
+        self.hint.setProperty("role", "hint")
 
         self.btn_continue = QPushButton("继续  →")
         self.btn_continue.setProperty("role", "primary")
@@ -166,11 +172,9 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.hint, 1)
         footer.addWidget(self.btn_continue)
         footer_widget = QFrame()
+        footer_widget.setProperty("role", "footer-bar")
         footer_widget.setLayout(footer)
         footer_widget.setFixedHeight(56)
-        footer_widget.setStyleSheet(
-            "QFrame { background:#ffffff; border-top:1px solid #d9dce4; }"
-        )
 
         # 主内容区（占满 stack）
         body = QHBoxLayout()
@@ -268,6 +272,40 @@ class MainWindow(QMainWindow):
         inv = {v: k for k, v in self._STEPPER_INDEX.items()}
         if index in inv:
             self.nav.setCurrentRow(inv[index])
+
+    # ---- 顶栏：主题切换 / 更换视频 / 标题同步 -------------------------
+
+    def _on_theme_toggled(self) -> None:
+        """深浅主题互切：重设全局 QSS、更新按钮文案、写回配置。"""
+        next_mode = "dark" if current_mode() == "light" else "light"
+        apply_theme(mode=next_mode)
+        self.app_bar.set_theme_label(next_mode)
+        self.config.theme = next_mode
+        try:
+            self.config.save()
+        except OSError:
+            # 配置写失败只影响「下次记住」，不阻断本次切换
+            pass
+        # DropZone 等自绘控件要重绘一次才能拿到新令牌
+        self.update()
+
+    def _on_change_source(self) -> None:
+        """顶栏「更换视频」：与导入区的选择文件入口等价。"""
+        if self.is_busy():
+            self.hint.setText("后台任务进行中，等它结束或取消后再更换视频。")
+            return
+        self.import_page._choose_file()
+
+    def _sync_top_bar(self) -> None:
+        """按当前状态刷新顶栏标题（方案 §七：显示当前文件名与路径）。
+
+        在页面展示与探针完成两处调用；未导入时回到应用标题。
+        """
+        media = self.state.media
+        if media is not None:
+            self.app_bar.set_source(Path(media.path).name, str(media.path))
+        else:
+            self.app_bar.set_source(None)
 
     def _on_drawer_closed(self, pages_index: int) -> None:
         # 抽屉关闭时把 nav 跳回工作区，否则 nav 停在抽屉项上，
@@ -508,6 +546,8 @@ class MainWindow(QMainWindow):
             self.status_left.setText(f"源文件：{self.state.media.path}")
         else:
             self.status_left.setText("未导入源视频")
+        # 顶栏标题跟随源文件状态
+        self._sync_top_bar()
 
     def _refresh_inspector(self) -> None:
         """把当前状态里能看出来的风险汇总到右栏检查器（方案 §二十四）。"""
