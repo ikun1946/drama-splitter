@@ -1,4 +1,4 @@
-﻿"""模型表单：按用途分组的下载 / 删除 / 「使用中」切换。
+"""模型表单：按用途分组的下载 / 删除 / 「使用中」切换。
 
 界面为什么这样组织
 ------------------
@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -66,6 +68,7 @@ from ..state import ProjectState
 from ..theme import current_mode, qcolor
 from ..widgets import (
     Card,
+    LabeledField,
     LogPanel,
     NoWheelComboBox,
     StatusPill,
@@ -278,6 +281,10 @@ class ModelForm(QWidget):
         # 默认全关：档案未启用、未勾选「允许外发素材」时零外发（见 providers.py）。
         # 「启用」不是随手勾的开关——必须点「保存并测试连通性」通过之后才允许，
         # 否则会出现"以为通了、真正分析时才回退本地"。
+        #
+        # 版式：地址与模型名并成两列、能力开关收进分组框并各带一行说明。
+        # 此前是"标签＋输入框"一路平铺下来，卡片独占整页近一半高度，
+        # 读的人找不到"哪几项是凭据、哪几项是能力开关"。
         self.cloud_card = Card("云端模型（厂商 API）", parent=self, body_layout=QVBoxLayout())
         self.cloud_combo = NoWheelComboBox()
         self.cloud_combo.currentIndexChanged.connect(self._on_cloud_profile_changed)
@@ -294,8 +301,8 @@ class ModelForm(QWidget):
         self.cloud_allow = QCheckBox(
             "允许外发素材（转写＝整条音轨；语义判断＝候选点前后台词文本，不含画面）"
         )
-        self.cloud_asr_enable = QCheckBox("语音转写使用云端（整条音轨分块上传，约 10 分钟/块）")
-        self.cloud_enable = QCheckBox("语义判断使用云端（只发候选点前后台词文本）")
+        self.cloud_enable = QCheckBox("语义判断使用云端")
+        self.cloud_asr_enable = QCheckBox("语音转写使用云端")
         self.btn_cloud_save = QPushButton("保存并测试连通性")
         self.btn_cloud_save.clicked.connect(self._save_cloud)
         self.cloud_hint = QLabel("")
@@ -309,21 +316,53 @@ class ModelForm(QWidget):
         cloud_note.setWordWrap(True)
         cloud_note.setProperty("role", "muted")
 
-        self.cloud_card.body_layout.addWidget(self.cloud_combo)
-        self.cloud_card.body_layout.addWidget(QLabel("接口地址（base_url）"))
-        self.cloud_card.body_layout.addWidget(self.cloud_base_url)
-        self.cloud_card.body_layout.addWidget(QLabel("模型名（judge_model）"))
-        self.cloud_card.body_layout.addWidget(self.cloud_model)
-        self.cloud_card.body_layout.addWidget(QLabel("API Key"))
-        self.cloud_card.body_layout.addWidget(self.cloud_key)
+        profile_field = LabeledField("厂商档案")
+        profile_field.attach(self.cloud_combo)
+
+        url_field = LabeledField("接口地址（base_url）")
+        url_field.attach(self.cloud_base_url)
+        model_field = LabeledField("模型名（judge_model）")
+        model_field.attach(self.cloud_model)
+        endpoint_row = QHBoxLayout()
+        endpoint_row.setContentsMargins(0, 0, 0, 0)
+        endpoint_row.setSpacing(12)
+        endpoint_row.addWidget(url_field, 3)
+        endpoint_row.addWidget(model_field, 2)
+
+        key_field = LabeledField("API Key")
+        key_field.attach(self.cloud_key)
+
+        # 两条能力各占一行：勾选框 + 它自己的外发范围说明。
+        # 说明不塞进勾选框文本，否则一行长句会把"勾的是什么"淹掉。
+        ability_box = QGroupBox("云端能力开关", parent=self)
+        ability_grid = QGridLayout(ability_box)
+        ability_grid.setContentsMargins(12, 8, 12, 10)
+        ability_grid.setHorizontalSpacing(16)
+        ability_grid.setVerticalSpacing(6)
+        for row, (switch, note) in enumerate(
+            (
+                (self.cloud_enable, "只发候选点前后台词文本"),
+                (self.cloud_asr_enable, "整条音轨分块上传，约 10 分钟/块"),
+            )
+        ):
+            note_label = QLabel(note)
+            note_label.setProperty("role", "muted")
+            ability_grid.addWidget(switch, row, 0)
+            ability_grid.addWidget(note_label, row, 1)
+        ability_grid.setColumnStretch(2, 1)
+
+        cloud_action_row = QHBoxLayout()
+        cloud_action_row.setContentsMargins(0, 0, 0, 0)
+        cloud_action_row.setSpacing(12)
+        cloud_action_row.addWidget(self.btn_cloud_save)
+        cloud_action_row.addWidget(self.cloud_hint, 1)
+
+        self.cloud_card.body_layout.addWidget(profile_field)
+        self.cloud_card.body_layout.addLayout(endpoint_row)
+        self.cloud_card.body_layout.addWidget(key_field)
         self.cloud_card.body_layout.addWidget(self.cloud_allow)
-        self.cloud_card.body_layout.addWidget(self.cloud_enable)
-        self.cloud_card.body_layout.addWidget(self.cloud_asr_enable)
-        cloud_row = QHBoxLayout()
-        cloud_row.addWidget(self.btn_cloud_save)
-        cloud_row.addStretch(1)
-        self.cloud_card.body_layout.addLayout(cloud_row)
-        self.cloud_card.body_layout.addWidget(self.cloud_hint)
+        self.cloud_card.body_layout.addWidget(ability_box)
+        self.cloud_card.body_layout.addLayout(cloud_action_row)
         self.cloud_card.body_layout.addWidget(cloud_note)
 
         # ---- 进度（只在下load时出现）-----------------------------------
