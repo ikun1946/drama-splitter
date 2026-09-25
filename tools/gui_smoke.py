@@ -311,21 +311,32 @@ def main() -> int:
     app.processEvents()
     assert model_dialog.isVisible(), "模型对话框未显示"
     models = model_dialog.form
-    print(f"  表格行数：{models.table.rowCount()}")
-    assert models.table.rowCount() > 0, "模型清单不应为空"
-    rows = []
-    for row in range(models.table.rowCount()):
-        label = models.table.item(row, 0).text()
-        status = models.table.item(row, 2).text()
-        rows.append((label, status))
-        print(f"    {label:34s} {status}")
-    assert any(status for _, status in rows), "每行都应报出安装状态"
-    installed = [label for label, status in rows if "已安装" in status]
+    rows = models.rows()
+    print(f"  模型行数：{len(rows)}（语音转写 / 语义判断两组卡片）")
+    assert rows, "模型清单不应为空"
+    for row in rows:
+        print(
+            f"    {row['label']:22s} {row['size_text']:16s} {row['state']:26s}"
+            f" {'● 使用中' if row['in_use'] else '○':6s} [{row['action']}]"
+        )
+    assert all(row["state"] for row in rows), "每行都应报出安装状态"
+    assert all(row["action"] in ("下载", "继续下载", "删除") for row in rows), (
+        "每行都应带行内动作（未装→下载 / 已装→删除）"
+    )
+    asr_active = [row for row in rows if row["in_use"] and row["kind"] == "whisper"]
+    assert len(asr_active) == 1, f"转写组「使用中」应恰有一个，实际 {len(asr_active)}"
+    assert len([row for row in rows if row["in_use"] and row["kind"] == "llm"]) <= 1, (
+        "语义组「使用中」最多一个"
+    )
+    print(f"  使用中：{models.asr_status.text()}")
+    print(f"          {models.llm_status.text()}")
+    print(f"  推理栈：{models.stack_label.text()}")
+    installed = [row["label"] for row in rows if row["installed"]]
     if installed:
         print(f"  已安装模型：{'、'.join(installed)}")
     else:
         # 不是失败：模型体积大、不入版本库，干净机器上就是全未安装。
-        print("  本机未安装任何模型（属正常）；状态列已按实际探测结果填充")
+        print("  本机未安装任何模型（属正常）；状态徽章已按实际探测结果填充")
     print(f"  模型目录：{models.dir_edit.text()}")
     print(f"  {models.free_label.text()}")
     models._refresh()

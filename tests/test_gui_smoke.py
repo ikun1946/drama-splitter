@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
+from app.core.model_manager import llm_spec, whisper_spec  # noqa: E402
 from app.gui.stage import Stage  # noqa: E402
 from app.core.settings import (
     CountPolicy,
@@ -143,6 +146,438 @@ class TestWindowConstruction:
         window.workbench.analysis_pane.start()
         assert any(kind == "warning" for kind, *_ in message_recorder), (
             "没有素材时应弹「尚未导入」而不是静默失败"
+        )
+
+
+class TestPlayback:
+    """回归：播放按钮曾完全没有反应。
+
+    根因是 ``StreamPlayer`` 里实例属性 ``self._frame_size = (0, 0)`` 与同名方法
+    ``_frame_size()`` 撞名，属性把方法遮蔽，``self._frame_size()`` 抛 TypeError；
+    异常发生在 Qt 槽里被打印后吞掉，界面上只表现为"点了没反应"。这段代码从最早
+    的提交起就是这样，而当时的测试只调用单帧解码 ``frame_at``，从没真播过。
+    """
+
+    def test_frame_size_cache_and_source_switch(self, qapp):
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("a.mp4", size=(1920, 1080))
+        assert player._frame_size() == (960, 540), "已知分辨率时应直接算出输出尺寸"
+
+        player.set_source("b.mp4", size=(640, 360))
+        assert player._frame_size() == (640, 360), "换源必须清掉尺寸缓存，否则按旧尺寸解码"
+
+        player.set_source(None)
+        assert player._frame_size() == (0, 0)
+
+    def test_play_streams_frames_and_advances(self, qapp, binaries, assets):
+        """真播放 1.2 秒：必须产出画面且位置推进（不靠目测）。"""
+        from PySide6.QtCore import QTimer
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source(assets["cfr"], size=(320, 180))
+        player.set_fps(Fraction(25))
+        frames: list = []
+        errors: list[str] = []
+        positions: list[float] = []
+        player.frame_ready.connect(frames.append)
+        player.error.connect(errors.append)
+        player.position_changed.connect(positions.append)
+        player.set_range(0.0, 2.0)
+        player.play()
+
+        QTimer.singleShot(1200, qapp.quit)
+        qapp.exec()
+        playing_position = player.position    # stop() 会把位置复位到起点，先记下来
+        player.stop()
+
+        assert not errors, f"播放不应报错：{errors}"
+        assert frames, "播放应产出真实解码帧（此前一次都没有）"
+        assert positions, "播放头位置应有回调（时间轴/底栏靠它刷新）"
+        assert playing_position > 0.4, f"播放位置应推进，实际 {playing_position:.3f}s"
+        assert max(positions) > playing_position - 0.2, "位置回调应覆盖播放过程"
+
+
+def _import_and_wait(window, qapp, path, timeout: float = 30.0) -> None:
+    """走真实的导入路径并等探针线程结束（离屏测试没有事件循环，只能手动泵）。"""
+    import time
+
+    window.workbench.import_pane.probe(str(path))
+    worker = window.workbench.import_pane.worker
+    deadline = time.time() + timeout
+    while time.time() < deadline and worker.isRunning():
+        qapp.processEvents()
+        time.sleep(0.02)
+    qapp.processEvents()
+
+
+class TestPreviewAfterImport:
+    """回归：导入完成后预览区必须立刻有画面，且播放头在片头。
+
+    此前 ``StageView.set_project()`` 只换了解码器/播放器源与时间轴，没有解一帧，
+    画面区一直停在「尚未选择源文件」的占位文字上；要等用户点「下一帧」「−1s」
+    或拖时间轴触发 ``goto()`` 才第一次出图——用户看到的就是"导入后必须点下一帧
+    才显示视频画面"。这里直接复现导入路径并断言首帧已渲染。
+    """
+
+    @staticmethod
+    def _clean(window):
+        window.state.reset_media()
+        window.workbench.refresh()
+
+    def test_first_frame_rendered_without_stepping(self, window, qapp, binaries, assets):
+        window.state.binaries = binaries
+        self._clean(window)
+        try:
+            _import_and_wait(window, qapp, assets["cfr"])
+
+            assert window.workbench.stage is Stage.READY, "前置：探测完成后应进入就绪态"
+            preview = window.workbench.stage_view.preview
+            assert preview._image is not None, (
+                "导入完成后应立刻解出首帧，而不是等用户点「下一帧」"
+            )
+            assert preview.view.text() == "", "画面区不应仍显示占位文字"
+            assert preview._frame_index == 0, "首帧应定位到第 0 帧"
+        finally:
+            # 窗口是 module 级共享的：导入会改变顶栏标题，必须复位，
+            # 否则后面的用例（顶栏标题）会拿到被污染的初始值。
+            self._clean(window)
+
+    def test_switching_source_rewinds_playhead(self, window, qapp, binaries, assets):
+        """换一部片子后播放头必须回到片头。
+
+        回归：``StageView.position`` 原先跨换片保留，新片子会在上一部片子的
+        播放头位置起播——预览/时间轴/播放起点三处同时停在错误位置。
+        """
+        window.state.binaries = binaries
+        self._clean(window)
+        try:
+            _import_and_wait(window, qapp, assets["cfr"])
+            stage = window.workbench.stage_view
+            stage.goto(Fraction(60))
+            assert stage.position == Fraction(60), "前置：播放头已移离片头"
+
+            _import_and_wait(window, qapp, assets["nonzero_pts"])
+
+            assert stage.position == Fraction(0), (
+                f"换片后播放头应回到片头，实际 {float(stage.position):.3f}s"
+            )
+            assert stage.preview._frame_index == 0, "预览应显示新片子的首帧"
+        finally:
+            self._clean(window)
+
+
+class TestPlayPauseToggle:
+    """播放与暂停合并成一个键（按钮文案随状态变，暂停后再点续播）。
+
+    原先控制条上是「▶ 播放本集」+「■ 停止」两个键，而 ``stop()`` 只停表、
+    不复位播放头，和暂停没有可感知差别——用户要的就是一个键两态。
+    """
+
+    def test_no_stop_button_and_label_is_play(self, window):
+        from PySide6.QtWidgets import QPushButton
+
+        from app.gui.widgets.media_preview import MediaPreview
+
+        preview = window.workbench.stage_view.preview
+        labels = [b.text() for b in preview.findChildren(QPushButton)]
+        assert "■ 停止" not in labels, "停止键应与暂停合并，不再单独存在"
+        assert preview.btn_play.text() == MediaPreview.PLAY_TEXT
+
+    def test_toggle_pauses_and_resumes_from_playhead(
+        self, window, qapp, binaries, assets
+    ):
+        from PySide6.QtCore import QTimer
+
+        from app.core.probe import probe_media
+        from app.gui.widgets.media_preview import MediaPreview
+
+        window.state.reset_media()
+        window.state.media = probe_media(binaries, assets["cfr"])
+        window.state.binaries = binaries
+        window.workbench.refresh()
+
+        stage = window.workbench.stage_view
+        preview = stage.preview
+        try:
+            stage.goto(Fraction(10))
+            stage.toggle_playback()
+            assert stage.player.is_playing, "第一次点是播放"
+            assert preview.btn_play.text() == MediaPreview.PAUSE_TEXT
+
+            QTimer.singleShot(800, qapp.quit)
+            qapp.exec()
+            paused_at = stage.player.position
+
+            stage.toggle_playback()          # 第二个状态：暂停
+            assert not stage.player.is_playing
+            assert preview.btn_play.text() == MediaPreview.PLAY_TEXT
+            assert paused_at > 10.0, "播放头应真的往前走了"
+
+            stage.toggle_playback()          # 再点：从暂停处续播
+            assert stage.player.is_playing
+            assert stage.player.position >= paused_at - 0.05, (
+                "暂停后再点应接着播，而不是跳回片头/集首"
+            )
+        finally:
+            stage.player.stop()
+            window.state.reset_media()
+            window.workbench.refresh()
+
+
+class TestSettingsAutoFill:
+    """设置表单：派生目标值只读并实时反算。
+
+    - 按目标时长：时长是输入，**集数只读**且由 T÷D 反算（夹到可行区间）
+    - 按目标集数：集数 是输入，**时长只读**且由 T÷N 反算
+    反算值只用于展示/确认；内核在该模式下本来就只读另一个字段。
+    """
+
+    def _form_with_media(self, window, binaries, assets):
+        window.state.binaries = binaries
+        window.state.media = probe_media(binaries, assets["cfr"])   # 120 秒
+        form = window.build_settings_dialog().form
+        form.radio_by_duration.setChecked(True)
+        form.range_percent.setChecked(True)
+        form.tolerance_spin.setValue(0.0)
+        return form
+
+    def test_mode_a_fills_count_from_duration(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        form.duration_spin.setValue(30.0)
+
+        assert not form.duration_spin.isReadOnly(), "目标时长是用户输入，应可编辑"
+        assert form.count_spin.isReadOnly(), "按目标时长时集数是算出来的，应只读"
+        assert form.count_spin.value() == 4, (
+            f"120 秒 ÷ 30 秒应为 4 集，实际 {form.count_spin.value()}"
+        )
+        assert form._count_field._title.text() == "预计集数（自动）"
+        assert "自动计算" in form._count_field._help.text()
+
+    def test_mode_a_recomputes_live(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        for duration, expected in ((40.0, 3), (60.0, 2), (24.0, 5)):
+            form.duration_spin.setValue(duration)
+            assert form.count_spin.value() == expected, (
+                f"D={duration} 应反算为 {expected} 集，实际 {form.count_spin.value()}"
+            )
+
+    def test_mode_b_fills_duration_from_count(self, window, binaries, assets):
+        form = self._form_with_media(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.count_spin.setValue(5)
+
+        assert form.duration_spin.isReadOnly(), "按目标集数时时长是算出来的，应只读"
+        assert not form.count_spin.isReadOnly(), "目标集数是用户输入，应可编辑"
+        assert form.duration_spin.value() == pytest.approx(24.0, abs=1e-6), (
+            f"120 秒 ÷ 5 集应为 24 秒，实际 {form.duration_spin.value()}"
+        )
+        assert form._duration_field._title.text() == "预计目标时长（自动）"
+        assert form._count_field._title.text() == "目标集数 N"
+
+    def test_no_solution_does_not_guess_a_value(self, window, binaries, assets):
+        """无解时不猜集数：保留原值，理由交给可行性面板与 help 文案。"""
+        form = self._form_with_media(window, binaries, assets)
+        form.duration_spin.setValue(30.0)
+        # 切到手动上下限并设成对 120 秒源片明显无解的区间（每集 200–300 秒）
+        form.range_manual.setChecked(True)
+        form.min_spin.setValue(200.0)
+        form.max_spin.setValue(300.0)
+        before = form.count_spin.value()
+        assert "无解" in form._count_field._help.text()
+
+        # 无解状态下继续动输入：不得写入任何猜出来的集数
+        form.duration_spin.setValue(25.0)
+        assert form.count_spin.value() == before, "无解时不应写入一个猜出来的集数"
+        assert "无解" in form._count_field._help.text()
+
+    def test_without_media_keeps_value_and_hints(self, window, qapp):
+        window.state.reset_media()
+        window.workbench.refresh()
+        form = window.build_settings_dialog().form
+        assert "导入源片后自动计算" in form._count_field._help.text()
+
+
+class TestAllowedCountInterval:
+    """允许集数区间：默认隐藏，只在「按目标集数 + 弹性集数」下出现且自洽。
+
+    原先它一直显示但灰掉，默认值 58–62 对多数素材既无意义又与名义目标冲突
+    （校验要求 N 落在区间内），一切到「弹性集数」就报"参数不完整"。
+    """
+
+    def _form(self, window, binaries, assets):
+        window.state.binaries = binaries
+        window.state.media = probe_media(binaries, assets["cfr"])
+        return window.build_settings_dialog().form
+
+    def test_hidden_unless_flexible_count_mode(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        assert form._flexible_row.isHidden(), "按目标时长模式下不该出现"
+
+        form.radio_by_count.setChecked(True)
+        assert form._flexible_row.isHidden(), "严格集数下也不该出现"
+
+        form.policy_flexible.setChecked(True)
+        assert not form._flexible_row.isHidden(), "弹性集数下应出现"
+
+        form.radio_by_duration.setChecked(True)
+        assert form._flexible_row.isHidden(), "切回按目标时长应再隐藏"
+
+    def test_seeded_around_nominal_count(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.count_spin.setValue(5)
+        form.policy_flexible.setChecked(True)
+
+        assert (form.allowed_min.value(), form.allowed_max.value()) == (4, 6), (
+            "刚切到弹性集数时应给出围绕名义目标的区间（N±1）"
+        )
+        text = form.feasibility.toPlainText()
+        assert "参数不完整" not in text, "切到弹性集数不该立刻报参数不完整"
+        assert "名义目标 5 集" in text
+
+    def test_user_edit_is_not_overwritten(self, window, binaries, assets):
+        form = self._form(window, binaries, assets)
+        form.radio_by_count.setChecked(True)
+        form.policy_flexible.setChecked(True)
+        form.allowed_min.setValue(3)
+        form.allowed_max.setValue(9)
+
+        form.count_spin.setValue(6)   # 之后改名义目标，区间不应被自动覆盖
+        assert (form.allowed_min.value(), form.allowed_max.value()) == (3, 9), (
+            "用户亲手改过的区间不应再被自动跟随覆盖"
+        )
+
+
+class TestWheelDoesNotChangeValues:
+    """滚轮不改值：数值框与下拉框把滚轮量交给滚动区，页面照常滚动。"""
+
+    @staticmethod
+    def _wheel_event(widget, angle_y: int = -120):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+
+        center = QPointF(widget.rect().center())
+        return QWheelEvent(
+            center, center, QPoint(0, 0), QPoint(0, angle_y),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+
+    def _scroll_area_with(self, qapp, widget):
+        from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+        from app.gui.widgets import scrollable
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(widget)
+        for index in range(30):
+            layout.addWidget(QLabel(f"占位 {index}"))
+
+        area = scrollable(content)
+        area.resize(320, 200)
+        area.show()
+        qapp.processEvents()
+        return area
+
+    def test_spinbox_wheel_scrolls_instead_of_stepping(self, qapp):
+        from app.gui.widgets import NoWheelSpinBox
+
+        spin = NoWheelSpinBox()
+        spin.setRange(1, 9999)
+        spin.setValue(60)
+        area = self._scroll_area_with(qapp, spin)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_value, before_scroll = spin.value(), bar.value()
+
+            qapp.sendEvent(spin, self._wheel_event(spin))
+            qapp.processEvents()
+
+            assert spin.value() == before_value, "滚轮不得改变数值"
+            assert bar.value() == before_scroll + 120, "滚轮量应交给滚动区（页面照常滚）"
+        finally:
+            area.close()
+
+    def test_combo_wheel_does_not_switch_option(self, qapp):
+        from app.gui.widgets import NoWheelComboBox
+
+        combo = NoWheelComboBox()
+        combo.addItems(["a", "b", "c"])
+        combo.setCurrentIndex(1)
+        area = self._scroll_area_with(qapp, combo)
+        try:
+            bar = area.verticalScrollBar()
+            bar.setValue(100)
+            before_index, before_scroll = combo.currentIndex(), bar.value()
+
+            qapp.sendEvent(combo, self._wheel_event(combo))
+            qapp.processEvents()
+
+            assert combo.currentIndex() == before_index, "滚轮不得切换下拉选项"
+            assert bar.value() == before_scroll + 120
+        finally:
+            area.close()
+
+
+class TestNoStrayTopLevelWindows:
+    """回归：打开分集设置时不得弹出任何多余的小窗口。
+
+    ``LabeledField`` 的后缀标签原先没有父级，构造时又调了
+    ``setVisible(True)``——Qt 里这等于"显示一个真正的顶层窗口"，于是 4 个带
+    单位（秒 / ％）的字段各弹出一个十几像素的小窗，这正是用户看到的"奇怪的小
+    窗口"。这里用 app 级事件过滤器抓全过程被 show 过的窗口，比"事后看顶层窗口"
+    更严：一闪而过的也逃不掉（事后它们已被重新设父并隐藏）。
+    """
+
+    def test_settings_dialog_shows_no_stray_window(self, window, qapp):
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QWidget
+
+        shown: list[str] = []
+
+        class _ShowSpy(QObject):
+            def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+                # 离屏平台下同一事件也会发给 QWindow（没有 isWindow()），
+                # 我们只关心"被显示成一个窗口的控件"
+                if (
+                    event.type() == QEvent.Type.Show
+                    and isinstance(obj, QWidget)
+                    and obj.isWindow()
+                ):
+                    shown.append(type(obj).__name__)
+                return False
+
+        spy = _ShowSpy()
+        qapp.installEventFilter(spy)
+        dialog = window.build_settings_dialog()
+        dialog.show()
+        qapp.processEvents()
+        qapp.removeEventFilter(spy)
+        try:
+            assert set(shown) == {"SettingsDialog"}, (
+                f"打开分集设置只应显示对话框本身，实际还弹出了：{shown}"
+            )
+        finally:
+            dialog.close()
+            qapp.processEvents()
+
+    def test_suffix_still_lands_in_the_field_row(self, window):
+        """后缀必须真的挂进字段行：修"小窗口"不能把单位（秒 / ％）修没了。"""
+        from PySide6.QtWidgets import QLineEdit
+
+        from app.gui.widgets import LabeledField
+
+        field = LabeledField("目标时长", suffix="秒")
+        field.attach(QLineEdit())
+        assert field._suffix_lbl.text() == "秒"
+        assert field._row.indexOf(field._suffix_lbl) >= 0, "后缀没挂进字段行"
+        assert field._suffix_lbl.parent() is field, (
+            "后缀标签必须有父级，否则 setVisible(True) 会把它变成顶层小窗口"
         )
 
 
@@ -639,6 +1074,24 @@ class TestSettingsPageBehaviour:
         assert "浮动比例为 0%" in text, "0% 浮动必须给出提示"
         assert "参数可行" in text
 
+    def test_recommend_mode_takes_over_strategy_choice(self, window, binaries, assets):
+        """推荐方案＝分析时自动比较三种策略，此时手选「策略」应置灰并说明原因。
+
+        回归：这个选项原先只是换了个名字，内核与「按目标时长」一字不差，
+        手选的「策略」照样生效——用户以为选了推荐，其实什么都没变。
+        """
+        window.state.media = probe_media(binaries, assets["cfr"])
+        page = window.build_settings_dialog().form
+
+        page.radio_recommend.setChecked(True)
+        assert page.collect_settings().split_mode == SplitMode.RECOMMEND
+        assert not page.strategy_combo.isEnabled(), "推荐模式下不该再手选策略"
+        assert "自动比较三种策略" in page._strategy_field._help.text()
+
+        page.radio_by_duration.setChecked(True)
+        assert page.strategy_combo.isEnabled(), "切回按目标时长后策略要恢复可选"
+        assert page._strategy_field._help.text() == ""
+
     def test_infeasible_parameters_block_progress(self, window, binaries, assets):
         """§5.1 参数无解必须在调用分析之前就拦住（§17.4），且提示要可操作。"""
         media = probe_media(binaries, assets["cfr"])
@@ -1108,3 +1561,224 @@ class TestStep5Refinement:
             page.btn_snap,
         ):
             assert btn.minimumHeight() >= 32, f"「{btn.text()}」缺少显式最小高度"
+
+
+# ---------------------------------------------------------------------------
+# 模型界面：两组卡片 + 「使用中」（用户曾看不出"选了没"与"在用哪个"）
+# ---------------------------------------------------------------------------
+
+
+def _touch_big_file(path: Path, megabytes: int) -> None:
+    """快速造一个大文件（truncate 不实写内容，避免为体积下限白写几百 MB）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(megabytes * 1024 * 1024)
+
+
+def _install_whisper(root: Path, tier: str) -> None:
+    spec = whisper_spec(tier)
+    directory = spec.target_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text("{}", encoding="utf-8")
+    _touch_big_file(directory / "model.bin", 1)
+    (directory / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (directory / "vocabulary.txt").write_text("a", encoding="utf-8")
+
+
+def _install_llm(root: Path, size: str, quant: str) -> None:
+    spec = llm_spec(size, quant)
+    _touch_big_file(spec.target_dir(root) / spec.big_file, 64)
+
+
+class TestModelFormChoices:
+    """模型界面：只测"看得清、控得住"这两件事——分组与「使用中」。"""
+
+    @pytest.fixture
+    def model_form(self, window, qapp, tmp_path, monkeypatch):
+        """指向临时模型目录与临时配置：绝不碰真实的 config.json / models/。"""
+        from app.core.app_config import AppConfig
+
+        models_root = tmp_path / "models"
+        models_root.mkdir()
+        config_file = tmp_path / "config.json"
+        real_load = AppConfig.load.__func__
+
+        def fake_load(cls, path=None):
+            return real_load(cls, config_file)
+
+        monkeypatch.setattr(AppConfig, "load", classmethod(fake_load))
+
+        dialog = window.build_model_dialog()
+        form = dialog.form
+        form._config.models_dir = str(models_root)
+        form._config_path = config_file      # 保存也写到临时文件
+        form.dir_edit.setText(str(models_root))
+        form.refresh()
+        yield form
+        dialog.close()
+        qapp.processEvents()
+
+    def test_two_group_cards_with_explicit_actions(self, model_form):
+        """两组卡片；每行都有行内动作与状态徽章，不再靠"选中态"猜。"""
+        assert model_form.asr_card.title() == "语音转写"
+        assert model_form.llm_card.title() == "语义判断"
+
+        asr = [row for row in model_form.rows() if row["kind"] == "whisper"]
+        assert [row["label"] for row in asr] == [
+            "whisper-tiny", "whisper-base", "whisper-small",
+            "whisper-medium", "whisper-large-v3",
+        ], "五档必须全列出（未安装的也要看得见体积与下载入口）"
+        assert all(row["action"] == "下载" for row in asr)
+        assert all(not row["installed"] for row in asr), "临时目录里什么都没装"
+
+    def test_default_tier_is_marked_in_use(self, model_form):
+        """转写组必须恰有一个「使用中」，且默认落在默认档位。"""
+        from app.core.model_manager import default_whisper_tier
+
+        active = [row for row in model_form.rows() if row["in_use"]]
+        assert len(active) == 1, f"「使用中」应唯一，实际 {len(active)}"
+        assert active[0]["label"] == f"whisper-{default_whisper_tier()}"
+        assert active[0]["kind"] == "whisper"
+        # 没装也要写明后果，而不是让分析悄悄跳过转写
+        assert "使用中：whisper-" in model_form.asr_status.text()
+        assert "未安装" in model_form.asr_status.text()
+
+    def test_uninstalled_rows_cannot_be_picked(self, model_form):
+        """未安装的行不可设为「使用中」：避免"选了却用不了"的假状态。"""
+        from app.core.model_manager import default_whisper_tier
+
+        rows = model_form.rows()
+        assert all(not row["pickable"] for row in rows if not row["installed"])
+        tiny = next(row for row in model_form._rows if row.spec.key == "whisper:tiny")
+        tiny.radio.click()   # 对 disabled 的圆钮无效
+        assert model_form.active_whisper_tier() == default_whisper_tier()
+
+    def test_pick_installed_tier_persists(self, model_form, window, qapp):
+        """点已安装档位 → 立刻生效、写进配置，重开对话框仍是它。"""
+        _install_whisper(model_form._models_root(), "tiny")
+        model_form.refresh()
+
+        tiny = next(row for row in model_form._rows if row.spec.key == "whisper:tiny")
+        assert tiny.radio.isEnabled(), "已安装的档位应当可设为使用中"
+        assert tiny.button.text() == "删除", "已安装的行给删除入口"
+        tiny.radio.click()
+
+        assert model_form.active_whisper_tier() == "tiny"
+        assert "使用中：whisper-tiny" in model_form.asr_status.text()
+        saved = json.loads(model_form._config_path.read_text(encoding="utf-8"))
+        assert saved["asr_model_tier"] == "tiny", "必须落盘，重开才记得住"
+
+        dialog = window.build_model_dialog()
+        try:
+            opened = dialog.form
+            opened._config_path = model_form._config_path
+            opened.dir_edit.setText(str(model_form._models_root()))
+            opened.refresh()
+            assert opened.active_whisper_tier() == "tiny"
+            chosen = [row["label"] for row in opened.rows() if row["in_use"]]
+            assert chosen == ["whisper-tiny"], f"重开后应仍指向 tiny，实际 {chosen}"
+        finally:
+            dialog.close()
+            qapp.processEvents()
+
+    def test_llm_rows_come_from_installed_gguf(self, model_form):
+        """语义组列出本机实际装了哪些档位（清单里只有一个预置项，必须扫目录）。"""
+        _install_llm(model_form._models_root(), "2B", "Q4_K_M")
+        _install_llm(model_form._models_root(), "2B", "Q8_0")
+        model_form.refresh()
+
+        llm = [row for row in model_form.rows() if row["kind"] == "llm"]
+        assert [row["label"] for row in llm] == [
+            "Qwen3.5-2B Q4_K_M", "Qwen3.5-2B Q8_0",
+        ]
+        # 未显式指定时也要指出"正在用哪个"（否则用户又要猜）
+        assert len([row for row in llm if row["in_use"]]) == 1
+        assert "使用中：" in model_form.llm_status.text()
+
+        target = next(row for row in model_form._rows if row.spec.key == "llm:2B:Q8_0")
+        target.radio.click()
+        assert model_form.active_llm_key() == "llm:2B:Q8_0"
+        saved = json.loads(model_form._config_path.read_text(encoding="utf-8"))
+        assert saved["llm_model_key"] == "llm:2B:Q8_0"
+        assert "Q8_0" in model_form.llm_status.text()
+
+    def test_unrecognized_gguf_is_reported(self, model_form):
+        """解析不出档位的 gguf 不能静默消失：文件在、界面里看不见才最坑人。"""
+        _install_llm(model_form._models_root(), "2B", "Q4_K_M")
+        stray = model_form._models_root() / "llm" / "other-GGUF"
+        _touch_big_file(stray / "my-custom.gguf", 64)
+        model_form.refresh()
+
+        # 未 show 的窗口上 isVisible() 恒为 False，所以看的是"有没有被显式藏起来"
+        assert not model_form.unknown_label.isHidden()
+        assert "my-custom.gguf" in model_form.unknown_label.text()
+        assert [row["label"] for row in model_form.rows() if row["kind"] == "llm"] == [
+            "Qwen3.5-2B Q4_K_M"
+        ]
+
+
+class TestActiveModelWiring:
+    """「使用中」必须真的被分析线程采用——只写进配置好看是不算数的。"""
+
+    @pytest.fixture
+    def patched_config(self, tmp_path, monkeypatch):
+        """把 AppConfig.load 指到临时配置，返回 (配置文件, 保存函数)。"""
+        from app.core.app_config import AppConfig
+
+        config_file = tmp_path / "config.json"
+        real_load = AppConfig.load.__func__
+        monkeypatch.setattr(
+            AppConfig, "load",
+            classmethod(lambda cls, path=None: real_load(cls, config_file)),
+        )
+        return config_file
+
+    def test_active_whisper_tier_follows_config(self, patched_config):
+        from app.core.app_config import AppConfig
+        from app.core.model_manager import default_whisper_tier
+        from app.gui.workers import active_whisper_tier
+
+        assert active_whisper_tier() == default_whisper_tier(), "未配置时用默认档位"
+        AppConfig(asr_model_tier="tiny").save(patched_config)
+        assert active_whisper_tier() == "tiny", "配置里的档位必须被分析线程采用"
+
+    def test_configured_judge_uses_pinned_model(self, tmp_path, patched_config, monkeypatch):
+        """语义模型的「使用中」要落到 Ollama 模型名上（命名规则与自动路径一致）。"""
+        from app.core import semantic
+        from app.core.app_config import AppConfig
+        from app.gui import workers
+
+        _install_llm(tmp_path, "2B", "Q4_K_M")
+        AppConfig(
+            models_dir=str(tmp_path), llm_model_key="llm:2B:Q4_K_M"
+        ).save(patched_config)
+
+        seen = {}
+
+        def fake_create_judge(*, ollama_model=None, model_dir=None):
+            seen["model"] = ollama_model
+            return None
+
+        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
+        workers.create_configured_judge()
+        assert seen["model"] == "qwen3.5-2b-judge"
+
+    def test_missing_pinned_model_falls_back_to_auto(self, tmp_path, patched_config, monkeypatch):
+        """指定的档位被删掉后不能卡死：退回自动规则（日志会如实报出实际用的是谁）。"""
+        from app.core import semantic
+        from app.core.app_config import AppConfig
+        from app.gui import workers
+
+        AppConfig(
+            models_dir=str(tmp_path), llm_model_key="llm:2B:Q8_0"
+        ).save(patched_config)
+
+        seen = {}
+
+        def fake_create_judge(*, ollama_model=None, model_dir=None):
+            seen["model"] = ollama_model
+            return None
+
+        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
+        workers.create_configured_judge()
+        assert seen["model"] is None, "未安装时应退回自动选择"

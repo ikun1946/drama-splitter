@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,10 @@ __all__ = [
     "llm_spec",
     "spec_by_key",
     "installed_state",
+    "default_whisper_tier",
+    "installed_whisper_tiers",
+    "installed_llm_specs",
+    "installed_llm_file",
     "download_model",
     "remote_size",
     "list_remote_gguf",
@@ -228,6 +233,61 @@ def installed_state(spec: ModelSpec, models_root: str | Path) -> InstallState:
         if size < item.min_bytes:
             state.truncated.append(item.name)
     return state
+
+
+def default_whisper_tier() -> str:
+    """默认的语音转写档位。
+
+    与 `AsrSettings.model_tier` 的默认值必须一致——界面、配置校验、分析线程
+    三处都引用这里，任何一处各自写死 "small" 都会在改默认档位时悄悄漂移。
+    """
+    return "small"
+
+
+def installed_whisper_tiers(models_root: str | Path) -> list[str]:
+    """本机已完整安装的转写档位，按清单顺序返回（未安装的不出现）。"""
+    return [
+        tier
+        for tier, _, _ in WHISPER_TIERS
+        if installed_state(whisper_spec(tier), models_root).ready
+    ]
+
+
+# llm_spec() 的固定命名：Qwen3.5-{size}-{quant}.gguf
+_LLM_GGUF_RE = re.compile(r"^Qwen3\.5-(?P<size>[^-]+)-(?P<quant>.+)$")
+
+
+def installed_llm_specs(models_root: str | Path) -> list[ModelSpec]:
+    """扫描本机已安装的语义模型档位（`llm/*/*.gguf` 按文件名反解）。
+
+    各量化档位**共用一个目录**、只靠文件名区分（见 `llm_spec()` 的命名约定），
+    因此"装了哪些档位"必须扫目录才知道——`MODEL_CATALOG` 里只有预置那一个。
+    文件名解析不出的 GGUF 直接跳过：宁可少列，也不猜一个不存在的档位。
+    """
+    directory = Path(models_root) / "llm"
+    if not directory.exists():
+        return []
+    order = {size: index for index, (size, _) in enumerate(LLM_SIZES)}
+    found: dict[str, ModelSpec] = {}
+    for path in sorted(directory.glob("*/*.gguf")):
+        match = _LLM_GGUF_RE.match(path.stem)
+        if match is None:
+            continue
+        spec = llm_spec(match.group("size"), match.group("quant"))
+        found.setdefault(spec.key, spec)
+    return sorted(
+        found.values(),
+        key=lambda spec: (order.get(spec.key.split(":")[1], len(order)), spec.key),
+    )
+
+
+def installed_llm_file(spec: ModelSpec, models_root: str | Path) -> Path | None:
+    """返回该档位权重文件的实际路径；未安装返回 None。
+
+    供 Ollama 名字推导使用（`semantic.ollama_model_name_for` 只看文件名）。
+    """
+    path = spec.target_dir(models_root) / spec.big_file
+    return path if path.is_file() else None
 
 
 def validate_models_root(models_root: str | Path) -> tuple[bool, str]:

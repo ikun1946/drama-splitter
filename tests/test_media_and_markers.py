@@ -26,6 +26,77 @@ EXPECTED_FRAMES = 3000
 EXPECTED_SECONDS = 120
 
 
+class TestVfrSampling:
+    """VFR 抽样的两条不变量（改读包时间戳后必须守住）。
+
+    背景：``-show_entries frame=pts_time`` 会让 ffprobe **解码**窗口里每一帧，
+    实测 1080p60 长 GOP 素材上 3 窗 24 秒画面要 4.8 秒；换成 ``packet=pts_time``
+    只要 0.18 秒，条数与相邻间隔逐值一致。但包的顺序是**解码顺序**（B 帧错序），
+    因此必须排序去重；包不带 PTS 时要退回解码帧。
+    """
+
+    class _Info:
+        video_start_time = Fraction(0)
+        path = "dummy.mp4"
+
+    def test_packets_are_sorted_before_use(self, monkeypatch):
+        from app.core import probe
+
+        seen: list[str] = []
+
+        def fake_probe(binaries, args, timeout=600.0):
+            entry = args[args.index("-show_entries") + 1]
+            seen.append(entry)
+            # B 帧场景：包按解码顺序给出（PTS 乱序，且首个不是最小）
+            return {
+                "packets": [
+                    {"pts_time": "0.033334"},
+                    {"pts_time": "0.000000"},
+                    {"pts_time": "0.016667"},
+                ]
+            }
+
+        monkeypatch.setattr(probe, "run_ffprobe_json", fake_probe)
+        pts, error = probe._window_pts(object(), self._Info(), 0, "0.000000%+8.000")
+
+        assert seen == ["packet=pts_time"], "应优先读包时间戳（不解码）"
+        assert error == ""
+        assert pts == [Fraction("0"), Fraction("0.016667"), Fraction("0.033334")], (
+            "必须按 PTS 排序去重，否则 B 帧会算出负的帧间隔"
+        )
+
+    def test_falls_back_to_decoded_frames_without_packet_pts(self, monkeypatch):
+        from app.core import probe
+
+        seen: list[str] = []
+
+        def fake_probe(binaries, args, timeout=600.0):
+            entry = args[args.index("-show_entries") + 1]
+            seen.append(entry)
+            if entry.startswith("packet"):
+                return {"packets": [{"pts_time": "N/A"}, {"pts_time": "N/A"}]}
+            return {"frames": [{"pts_time": "0.040000"}, {"pts_time": "0.000000"}]}
+
+        monkeypatch.setattr(probe, "run_ffprobe_json", fake_probe)
+        pts, error = probe._window_pts(object(), self._Info(), 0, "0.000000%+8.000")
+
+        assert seen == ["packet=pts_time", "frame=pts_time"], "包读不到时必须退回解码帧"
+        assert error == ""
+        assert pts == [Fraction(0), Fraction("0.04")]
+
+    def test_reports_failure_when_both_ways_yield_nothing(self, monkeypatch):
+        from app.core import probe
+
+        def fake_probe(binaries, args, timeout=600.0):
+            return {}   # 两种方式都没有可用时间戳
+
+        monkeypatch.setattr(probe, "run_ffprobe_json", fake_probe)
+        pts, error = probe._window_pts(object(), self._Info(), 0, "0.000000%+8.000")
+
+        assert pts is None
+        assert "时间戳" in error, "拿不到时间戳必须如实报错，不能返回空列表当成功"
+
+
 class TestMarkerCodec:
     def test_bit_roundtrip_at_boundaries(self):
         from markers import decode_marker_bits

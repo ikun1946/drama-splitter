@@ -1,12 +1,16 @@
 """MediaPreview —— 帧级预览（带 HUD 与时间码）。
 
 公开 API：
-- set_image(image) / clear(text) / set_frame_info(frame_index, pts)
+- set_image(image) / clear(text) / set_frame_info(frame_index, pts) / set_playing(bool)
 - timecode (QLabel)
 - btn_play / btn_boundary / btn_stitch / btn_prev_frame / btn_next_frame /
-  btn_back_1s / btn_fwd_1s / btn_back_5s / btn_fwd_5s / btn_stop
+  btn_back_1s / btn_fwd_1s / btn_back_5s / btn_fwd_5s
 
-控制条放在横向滚动容器里：10 个按钮的单行最小宽度接近 900px，直接放进布局
+btn_play 是播放与暂停**共用**的一个键：由 set_playing() 在「▶ 播放」与
+「⏸ 暂停」之间切文案，不再单独设暂停键（原先那个「■ 停止」只停表、不复位
+播放头，与暂停无可感知差别）。
+
+控制条放在横向滚动容器里：9 个按钮的单行最小宽度接近 900px，直接放进布局
 会顶住整栏的最小宽度（中栏就再也不能被压窄了）。装进容器后空间不足时横向
 滚动，按钮不会被压扁、也不会把窗口最小宽度顶上去。
 """
@@ -29,6 +33,9 @@ from .scroll_area import h_scrollable
 class MediaPreview(QWidget):
     """带 HUD 的帧级预览。"""
 
+    PLAY_TEXT = "▶ 播放"
+    PAUSE_TEXT = "⏸ 暂停"
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._image: QImage | None = None
@@ -46,7 +53,7 @@ class MediaPreview(QWidget):
         self.timecode.setProperty("role", "mono-hud")
 
         # 控制按钮
-        self.btn_play = QPushButton("▶ 播放本集")
+        self.btn_play = QPushButton(self.PLAY_TEXT)
         self.btn_boundary = QPushButton("⊞ 切点前后")
         self.btn_stitch = QPushButton("⟳ 成片连看")
         self.btn_prev_frame = QPushButton("|◀ 上一帧")
@@ -55,7 +62,6 @@ class MediaPreview(QWidget):
         self.btn_fwd_1s = QPushButton("+1s")
         self.btn_back_5s = QPushButton("−5s")
         self.btn_fwd_5s = QPushButton("+5s")
-        self.btn_stop = QPushButton("■ 停止")
 
         for b in (
             self.btn_play,
@@ -67,7 +73,6 @@ class MediaPreview(QWidget):
             self.btn_fwd_1s,
             self.btn_back_5s,
             self.btn_fwd_5s,
-            self.btn_stop,
         ):
             b.setMinimumWidth(0)
             if b in (self.btn_play, self.btn_boundary):
@@ -77,7 +82,7 @@ class MediaPreview(QWidget):
                 b.style().unpolish(b)
                 b.style().polish(b)
             else:
-                # 紧凑档：控制条 10 个按钮单行，默认 padding 会把「停止」
+                # 紧凑档：控制条多个按钮单行，默认 padding 会把右端按钮
                 # 挤出审核页右列视口（QSS role="mini"）
                 b.setProperty("role", "mini")
 
@@ -97,7 +102,6 @@ class MediaPreview(QWidget):
             self.btn_back_1s,
             self.btn_fwd_1s,
             self.btn_fwd_5s,
-            self.btn_stop,
         ):
             controls.addWidget(b)
 
@@ -120,6 +124,10 @@ class MediaPreview(QWidget):
             self._frame_index = frame_index
         if pts is not None:
             self._pts = pts
+
+    def set_playing(self, playing: bool) -> None:
+        """播放键兼作暂停键：按实际状态切文案（唯一的状态展示出口）。"""
+        self.btn_play.setText(self.PAUSE_TEXT if playing else self.PLAY_TEXT)
 
     def clear(self, text: str = "尚未选择源文件") -> None:
         self._image = None

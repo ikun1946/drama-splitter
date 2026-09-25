@@ -36,6 +36,7 @@ from PySide6.QtCore import QThread, Signal
 from ..core.app_config import AppConfig
 from ..core.export import ExportBatchResult, ExportPreset, Exporter
 from ..core.ffmpeg import check_encoders
+from ..core.model_manager import default_whisper_tier, installed_llm_file, spec_by_key
 from ..core.plan import BoundaryPlan
 from ..core.planner import PlanningError, plan_rule_based
 from ..core.probe import MediaInfo, check_compatibility, probe_media
@@ -48,6 +49,7 @@ __all__ = [
     "AnalysisWorker",
     "ExportWorker",
     "ModelDownloadWorker",
+    "JudgeProbeWorker",
 ]
 
 
@@ -166,6 +168,34 @@ class PlanWorker(BaseWorker):
         self.completed.emit(plan, report, problems)
 
 
+def active_whisper_tier(config: AppConfig | None = None) -> str:
+    """本地转写要用的档位：配置里"使用中"的档位，未配置则用默认档位。
+
+    只对**本地**路径有意义（云端转写由厂商承担）；`config` 可注入，便于测试
+    与复用同一份配置（`AnalysisWorker` 先读一次，再传进来）。
+    """
+    config = config if config is not None else AppConfig.load()
+    return config.asr_model_tier or default_whisper_tier()
+
+
+def configured_ollama_model(config: AppConfig | None = None) -> str | None:
+    """配置里"使用中的本地语义模型"对应的 Ollama 名字；未指定返回 None。
+
+    `None` 不是错误：它表示沿用"按体积取最大 GGUF"的自动规则。
+    这里只管**用哪个 GGUF**；本次到底走本地还是云端，由
+    `semantic.select_judge()` 按后端偏好决定。
+    """
+    from app.core.semantic import ollama_model_name_for
+
+    config = config if config is not None else AppConfig.load()
+    key = config.llm_model_key
+    if not key:
+        return None
+    spec = spec_by_key(key)
+    path = installed_llm_file(spec, config.resolved_models_dir()) if spec else None
+    return ollama_model_name_for(path) if path is not None else None
+
+
 class AnalysisWorker(BaseWorker):
     """阶段3 分析流水线：字幕 → 语音转写 → 镜头与黑场 → 候选数据库。
 
@@ -235,7 +265,10 @@ class AnalysisWorker(BaseWorker):
 
         # ---- 语音转写 ----------------------------------------------
         self.stage_started.emit("语音转写")
-        settings = AsrSettings()
+        settings = AsrSettings(model_tier=active_whisper_tier(config))
+        self.stage_log.emit(
+            f"本地转写档位：whisper-{settings.model_tier}（可在 工具 → 模型管理 中切换）"
+        )
         if not settings.vad_filter:
             self.stage_log.emit("VAD 已关闭。")
         engine, engine_notes = select_asr_engine(
@@ -335,7 +368,10 @@ class AnalysisWorker(BaseWorker):
         # 后端由用户配置决定（本地 / 云端档案）；select_judge 返回的 notes 是
         # "为什么这样选"的唯一说明来源，必须原样上日志——否则用户只会看到
         # 判定没生效，却不知道该去开哪个开关。
-        judge, judge_notes = select_judge(config)
+        # 本地路径用"使用中"的档位指定 Ollama 模型（模型对话框里可切换）。
+        judge, judge_notes = select_judge(
+            config, ollama_model=configured_ollama_model(config)
+        )
         for note in judge_notes:
             self.stage_log.emit(note)
         if judge is None:
@@ -370,19 +406,28 @@ class AnalysisWorker(BaseWorker):
                 for point in candidates.points
             }
             try:
-                plan, solution, problems, notes = solve_from_candidates(
-                    candidates,
-                    self._media,
-                    report.derived,
-                    settings_count_exact=exact,
-                    target_episode_count=self._settings.target_episode_count
-                    or report.allowed_min,
-                    allowed_min=report.allowed_min,
-                    allowed_max=report.allowed_max,
-                    baseline=baseline,
-                    strategy=strategy,
-                    ends_with_question=ends_question,
-                )
+                if self._settings.split_mode == SplitMode.RECOMMEND:
+                    # 「推荐方案」：同一份候选、同一套约束下把三种策略各解一遍，
+                    # 取总代价最低者当方案，落选者也写进日志（§20.3 的延伸）。
+                    plan, solution, problems, notes = self._solve_recommended(
+                        candidates, report, exact, ends_question
+                    )
+                    if plan is None:
+                        return          # 已在 _solve_recommended 里报错
+                else:
+                    plan, solution, problems, notes = solve_from_candidates(
+                        candidates,
+                        self._media,
+                        report.derived,
+                        settings_count_exact=exact,
+                        target_episode_count=self._settings.target_episode_count
+                        or report.allowed_min,
+                        allowed_min=report.allowed_min,
+                        allowed_max=report.allowed_max,
+                        baseline=baseline,
+                        strategy=strategy,
+                        ends_with_question=ends_question,
+                    )
             except Exception as exc:  # noqa: BLE001 - 含 PlanningError
                 self.fail(str(exc))
                 return
@@ -391,7 +436,9 @@ class AnalysisWorker(BaseWorker):
             if blocking:
                 # §4.2：无解必须明确报错，不能把空方案当结果交给用户。
                 # 典型成因：对白句末不落在目标时长允许的窗口内（§10.4）。
-                self.fail(blocking[0].message + " " + blocking[0].describe())
+                # 只报 describe()：它的文本里已经含 message，再拼一次整段话会
+                # 在报错框里原样重复两遍。
+                self.fail(blocking[0].describe())
                 return
 
             self.stage_log.emit("边界由候选图动态规划求得（阶段2 §10.2）。")
@@ -424,6 +471,40 @@ class AnalysisWorker(BaseWorker):
             )
 
         self.completed.emit(plan, report, problems, candidates, reviews)
+
+    def _solve_recommended(self, candidates, report, exact: bool, ends_question):
+        """「推荐方案」（模式C）：三策略各解一遍，取代价最低者当方案。
+
+        与手选策略的区别只在这里：手选是"你说了算"，推荐是"同一代价函数下
+        数值最优的那个说了算"，且**落选者不隐藏**（各自代价与集数一并写进
+        日志，用户能看出差在哪）。全部无解时返回 None 并已 fail（§4.2）。
+        """
+        from app.core.recommend import recommend_plan
+
+        result = recommend_plan(
+            candidates,
+            self._media,
+            report.derived,
+            settings_count_exact=exact,
+            target_episode_count=self._settings.target_episode_count
+            or report.allowed_min,
+            allowed_min=report.allowed_min,
+            allowed_max=report.allowed_max,
+            ends_with_question=ends_question,
+        )
+        for line in result.describe().splitlines():
+            self.stage_log.emit(line)
+
+        chosen = result.chosen
+        if chosen is None:
+            causes = [c.problems[0].message for c in result.comparisons if c.problems]
+            self.fail(
+                "三种策略都没有可行解。\n"
+                + (causes[0] if causes else "请放宽集长范围后重试。")
+            )
+            return None, None, None, None
+        notes = list(chosen.notes) + list(result.notes) + [f"采用推荐策略：{chosen.label}"]
+        return chosen.plan, chosen.solution, chosen.problems, notes
 
 
 class ExportWorker(BaseWorker):
@@ -539,3 +620,30 @@ class ModelDownloadWorker(BaseWorker):
             self.finish_cancelled()
         self.log.emit(result.describe())
         self.finished_with.emit(result)
+
+
+class JudgeProbeWorker(BaseWorker):
+    """后台探测语义判断后端（云端档案 / 本地推理栈），供模型界面如实显示。
+
+    为什么必须后台：本地探测自身有 3 秒超时，还可能加载进程内 llama.cpp 模型，
+    放主线程会让对话框一打开就卡住。
+    """
+
+    probed = Signal(object)  # str（判定器描述 [+ 选择原因]）| None（不可用，降级）
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.semantic import select_judge
+
+        try:
+            config = AppConfig.load()
+            judge, notes = select_judge(
+                config, ollama_model=configured_ollama_model(config)
+            )
+        except Exception:  # noqa: BLE001 - 探测失败就是"不可用"，不该让对话框报错
+            judge, notes = None, []
+        if judge is None:
+            self.probed.emit(None)
+            return
+        # notes 里是"为什么这样选"（例如"选了云端但没开外发开关，本次仍用本地"），
+        # 只显示判定器名字会让用户以为配置没生效。
+        self.probed.emit(f"{judge.describe()}（{notes[0]}）" if notes else judge.describe())

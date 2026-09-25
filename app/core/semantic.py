@@ -64,6 +64,7 @@ __all__ = [
     "locate_llm_model",
     "create_judge",
     "select_judge",
+    "ollama_model_name_for",
     "parse_verdict",
     "DialogueEvent",
     "VERDICT_GOOD",
@@ -429,6 +430,22 @@ class LocalLlmJudge(SemanticJudge):
         return parse_verdict(text, self.judge_id)
 
 
+def ollama_model_name_for(path: str | Path) -> str:
+    """按 GGUF 文件路径推导 Ollama 模型名。
+
+    目录约定与 `tools/fetch_llm.py` 一致：
+    `models/llm/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_K_M.gguf` → `qwen3.5-2b-judge`。
+    单独提成公开函数，是为了让界面里"手动指定使用中的档位"复用同一套命名规则。
+
+    注：`.replace("--", "-")` 兜住"文件名里没有 2b"的分支（size 为空串），
+    使 `qwen3.5--judge` 收敛为 `qwen3.5-judge`。
+    """
+    stem = Path(path).stem
+    base = stem.split("-")[0].lower()  # "qwen3.5"
+    size = "2b" if "2b" in stem.lower() else ""
+    return f"{base}-{size}-judge".replace("--", "-")
+
+
 class OllamaJudge(SemanticJudge):
     """Ollama 本地判定器（http://127.0.0.1:11434）。
 
@@ -453,12 +470,7 @@ class OllamaJudge(SemanticJudge):
     def auto_model_name(cls) -> str | None:
         """按已下载的 GGUF 推导 Ollama 模型名（与 fetch_llm.py 的目录约定一致）。"""
         path = locate_llm_model()
-        if path is None:
-            return None
-        # models/llm/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_K_M.gguf → qwen3.5-2b-judge
-        stem = path.stem.split("-")[0].lower()  # "qwen3.5"
-        size = "2b" if "2b" in path.stem.lower() else ""
-        return f"{stem}{size}-judge".replace("--", "-")
+        return ollama_model_name_for(path) if path is not None else None
 
     def available(self) -> bool:
         import urllib.request

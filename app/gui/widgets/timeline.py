@@ -429,7 +429,16 @@ class TimelineRuler(QWidget):
             self.update()
             return
         if self._drag == "playhead":
-            self.seek_requested.emit(float(self._drag_seconds))
+            seconds = self._drag_seconds
+            # 必须先清掉拖动标记再发信号：接收方（StageView.goto）会同步回写
+            # set_playhead，而它在拖动期间是"忽略外部驱动"的护栏——顺序反了
+            # 这次回写就会被吞掉，松手后播放头弹回原处（实测就是这个 bug）。
+            self._drag = None
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._drag_seconds = Fraction(0)
+            self.seek_requested.emit(float(seconds))
+            self.update()
+            return
         self._drag = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update()

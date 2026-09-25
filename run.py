@@ -155,19 +155,36 @@ def _ui_smoke() -> int:
     model_dialog = window.build_model_dialog()
     model_dialog.show()
     page = model_dialog.form
-    print(f"模型清单：{page.table.rowCount()} 项")
-    for row in range(page.table.rowCount()):
+    rows = page.rows()
+    print(f"模型清单：{len(rows)} 行（语音转写 {sum(1 for r in rows if r['kind'] == 'whisper')} 档"
+          f" + 语义判断 {sum(1 for r in rows if r['kind'] == 'llm')} 档）")
+    for row in rows:
         print(
-            f"  {page.table.item(row, 0).text():34s} "
-            f"{page.table.item(row, 2).text()}"
+            f"  {row['label']:22s} {row['size_text']:16s} {row['state']:24s} "
+            f"{'● 使用中' if row['in_use'] else '○'}  [{row['action']}]"
         )
     print(f"模型目录：{page.dir_edit.text()}")
     page._refresh()
     app.processEvents()
 
     # 核心工作流是单页三栏；设置与模型是对话框，不占工作区。
-    if page.table.rowCount() == 0:
-        print("界面自检失败：模型清单为空")
+    rows = page.rows()
+    asr_rows = [row for row in rows if row["kind"] == "whisper"]
+    llm_rows = [row for row in rows if row["kind"] == "llm"]
+    if page.asr_card.title() != "语音转写" or page.llm_card.title() != "语义判断":
+        print("界面自检失败：模型清单应分为「语音转写 / 语义判断」两组卡片")
+        return 1
+    if len(asr_rows) != 5:
+        print(f"界面自检失败：转写档位应列出 5 档，实际 {len(asr_rows)}")
+        return 1
+    if sum(1 for row in asr_rows if row["in_use"]) != 1:
+        print("界面自检失败：转写组「使用中」应恰有一个")
+        return 1
+    if sum(1 for row in llm_rows if row["in_use"]) > 1:
+        print("界面自检失败：语义组「使用中」最多一个")
+        return 1
+    if not page.asr_status.text().startswith("使用中："):
+        print(f"界面自检失败：转写组应写明使用中的档位，实际「{page.asr_status.text()}」")
         return 1
     if len(window.menuBar().actions()) != 4:
         print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")

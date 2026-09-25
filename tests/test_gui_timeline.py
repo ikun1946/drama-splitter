@@ -216,6 +216,30 @@ class TestInteraction:
 
         assert seeks[-1] == pytest.approx(50.0, abs=0.05)
 
+    def test_playhead_drag_stays_where_released(self, ruler):
+        """回归：拖动播放头松手后必须停在松手处。
+
+        曾经的现象是"拖完弹回原位"：松手时先发 seek_requested、后清拖动标记，
+        而接收方（StageView.goto）会同步回写 set_playhead，此时护栏仍生效 →
+        这次回写被吞掉，重绘时又用回旧的 _playhead。
+        """
+        ruler.set_project(_Media(), _plan(), {}, 1)
+
+        # 忠实模拟 StageView 的接线：seek → goto(秒) → 回写播放头
+        ruler.seek_requested.connect(lambda seconds: ruler.set_playhead(seconds))
+
+        x0 = ruler._x_from_seconds(Fraction(10))
+        ruler.mousePressEvent(_Event(x0))
+        end_x = ruler._x_from_seconds(Fraction(50))
+        ruler.mouseMoveEvent(_Event(end_x))
+
+        ruler.mouseReleaseEvent(_Event(end_x))
+
+        assert ruler.playhead_seconds() == Fraction(50), (
+            f"松手后播放头应停在 50s，实际 {float(ruler.playhead_seconds()):.3f}s"
+        )
+        assert ruler._drag is None, "松手后拖动状态必须清掉"
+
     def test_vfr_source_paints_hint_without_crash(self, ruler):
         ruler.set_project(_Media(vfr=True), _plan(), {}, 1)
         _paint(ruler)

@@ -1,10 +1,20 @@
-"""页 2 设置：分集参数（模式 / 集数 / 时长 / 浮动 / 策略）与可行性实时反馈。"""
+"""设置：分集参数（模式 / 集数 / 时长 / 浮动 / 策略）与可行性实时反馈。
+
+两种模式下"用户输入哪个、哪个是算出来的"是相反的：
+
+- 按目标时长：时长可编辑，**集数只读并实时反算**（N = round(T/D)，夹到可行区间）
+- 按目标集数：集数可编辑，**时长只读并实时反算**（D = T/N）
+
+派生值只作展示与确认，不反向影响内核：``SplitSettings.derive()`` 在该模式下
+本来就用另一个字段（模式B 用 ``Fraction(T, N)``，模式A 用用户输入的目标时长）。
+"""
 
 from __future__ import annotations
 
 from fractions import Fraction
 
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QFormLayout,
     QHBoxLayout,
@@ -22,7 +32,7 @@ from ...core.settings import (
     Strategy,
     check_feasibility,
 )
-from ...core.timebase import format_seconds_brief, format_timecode
+from ...core.timebase import format_seconds_brief, format_timecode, round_half_up
 from ..state import ProjectState
 from ..widgets import (
     Card,
@@ -41,15 +51,19 @@ class SettingsForm(QWidget):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
-        # 本页会被装进 420px 宽的抽屉里。默认尺寸策略下，双栏布局的最小
-        # 宽度之和会把版面挤成"一列 90px"，文字被迫竖排并溢出卡片——
-        # 因此显式给出能容纳双栏的最小宽度，并允许横向滚动兜底。
+        # 反算写回派生控件时会再次触发 _refresh，用它挡住递归
+        self._syncing = False
+        # 上一次刷新时「允许集数区间」是否可见：只在"刚切进弹性集数"那一次
+        # 做自洽兜底，之后用户怎么改都不再插手
+        self._was_flexible = False
+        # 本表单由设置对话框承载（对话框正文套滚动容器）。显式给出能容纳双栏的
+        # 最小宽度，窄窗口下横向滚动兜底，而不是把两栏压成"一列 90px"。
         self.setMinimumWidth(640)
 
         # ---- 模式 ----
         self.radio_by_duration = QRadioButton("按目标时长（系统求集数）")
         self.radio_by_count = QRadioButton("按目标集数")
-        self.radio_recommend = QRadioButton("推荐方案（先按时长估算，分析后再给剧情建议）")
+        self.radio_recommend = QRadioButton("推荐方案（自动比较剧情/悬念/时长三种策略）")
         self.radio_by_duration.setChecked(True)
         for w in (self.radio_by_duration, self.radio_by_count, self.radio_recommend):
             w.toggled.connect(self._refresh)
@@ -86,25 +100,33 @@ class SettingsForm(QWidget):
         for w in (self.allowed_min, self.allowed_max):
             w.valueChanged.connect(self._refresh)
 
-        flexible_row = QHBoxLayout()
+        # 允许集数区间只在「按目标集数 + 弹性集数」下有意义，其余情况整行隐藏
+        # （原先是一直显示但灰掉，默认值 58–62 对多数素材都是无意义且自相矛盾的）
+        self._flexible_row = QWidget(self)
+        flexible_row = QHBoxLayout(self._flexible_row)
+        flexible_row.setContentsMargins(0, 0, 0, 0)
         flexible_row.addWidget(QLabel("允许集数区间："))
         flexible_row.addWidget(self.allowed_min)
         flexible_row.addWidget(QLabel("–"))
         flexible_row.addWidget(self.allowed_max)
         flexible_row.addStretch(1)
+        # 默认隐藏：只有「按目标集数 + 弹性集数」下它才有定义（见 _refresh）
+        self._flexible_row.setVisible(False)
 
         count_card = Card("目标集数 / 时长", parent=self)
-        # 用 LabeledField 风格
+        # 同一个框在两种模式下含义不同：手里的输入 vs 系统算出来的值
         dfield = LabeledField("目标时长", suffix="秒")
         dfield.attach(self.duration_spin)
         count_card.body_layout.addWidget(dfield)
-        nfield = LabeledField("目标集数 N")
+        nfield = LabeledField("预计集数（自动）")
         nfield.attach(self.count_spin)
         count_card.body_layout.addWidget(nfield)
+        self._duration_field = dfield
+        self._count_field = nfield
         count_card.body_layout.addSpacing(4)
         count_card.body_layout.addWidget(self.policy_exact)
         count_card.body_layout.addWidget(self.policy_flexible)
-        count_card.body_layout.addLayout(flexible_row)
+        count_card.body_layout.addWidget(self._flexible_row)
         self._count_card = count_card
 
         # ---- 范围来源 ----
@@ -167,6 +189,7 @@ class SettingsForm(QWidget):
         strategy_card.body_layout.addWidget(sfield)
         strategy_card.body_layout.addWidget(self.allow_exception)
         self._strategy_card = strategy_card
+        self._strategy_field = sfield
 
         # ---- 可行性 ----
         self._feas_pill = StatusPill("可行", tone="success")
@@ -277,15 +300,24 @@ class SettingsForm(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
+        if self._syncing:
+            # 反算写回派生控件会再次触发刷新，直接跳过，避免递归
+            return
         settings = self.collect_settings()
 
         by_count = settings.split_mode == SplitMode.TARGET_EPISODE_COUNT
-        self.duration_spin.setEnabled(not by_count)
-        self.count_spin.setEnabled(by_count)
+        self._sync_editable_fields(by_count)
         self.policy_exact.setEnabled(by_count)
         self.policy_flexible.setEnabled(by_count)
-        self.allowed_min.setEnabled(by_count and settings.count_policy == CountPolicy.FLEXIBLE)
-        self.allowed_max.setEnabled(by_count and settings.count_policy == CountPolicy.FLEXIBLE)
+        # 允许集数区间只在「按目标集数 + 弹性集数」下有定义，其余情况整行隐藏
+        flexible = by_count and settings.count_policy == CountPolicy.FLEXIBLE
+        self._flexible_row.setVisible(flexible)
+        if flexible and not self._was_flexible:
+            # 刚切进弹性集数：若区间与名义目标自相矛盾（如默认 58–62）先兜底一次，
+            # 此后用户怎么改都不再插手
+            self._seed_allowed_range(settings)
+            settings = self.collect_settings()   # 把兜底后的区间纳入本次校验与判定
+        self._was_flexible = flexible
         manual = self.range_manual.isChecked()
         self.min_spin.setEnabled(manual)
         self.max_spin.setEnabled(manual)
@@ -294,6 +326,7 @@ class SettingsForm(QWidget):
         lines: list[str] = []
         total = self.state.total_seconds
         if total is None:
+            self._set_derived_help(by_count, "导入源片后自动计算")
             lines.append("尚未导入源片，无法检查可行性。")
             self.feasibility.setPlainText("\n".join(lines))
             self._feas_pill.set_text("就绪")
@@ -302,6 +335,7 @@ class SettingsForm(QWidget):
 
         problems = settings.validate()
         if problems:
+            self._set_derived_help(by_count, "参数不完整，暂不反算")
             lines.append("【参数不完整】")
             lines.extend(f"  · {text}" for text in problems)
             self.feasibility.setPlainText("\n".join(lines))
@@ -310,6 +344,7 @@ class SettingsForm(QWidget):
             return
 
         report = check_feasibility(settings, total)
+        self._apply_derived(settings, total, report, by_count)
 
         lines.append(f"源片总时长：{format_timecode(total)}")
         if report.derived is not None:
@@ -365,6 +400,104 @@ class SettingsForm(QWidget):
                 self._feas_pill.set_tone("success")
 
         self.feasibility.setPlainText("\n".join(lines))
+
+    # ---- 自动反算（派生字段只读） --------------------------------------
+
+    def _seed_allowed_range(self, settings) -> None:
+        """刚切进弹性集数时的一次性兜底：区间不含名义目标就收回 N-1 – N+1。
+
+        58–62 这类与名义目标冲突的默认值（或项目里残留的旧值）会让校验直接报
+        「名义目标 N 不在允许区间内」，一选弹性就卡住。**只在切进来的这一次**
+        做，且只在区间确实不含名义目标时做——用户随后的任何修改都不再被覆盖。
+        """
+        nominal = settings.target_episode_count or 0
+        if nominal <= 0:
+            return
+        low = settings.allowed_count_min or 0
+        high = settings.allowed_count_max or 0
+        if low <= nominal <= high:
+            return
+        self._set_value(self.allowed_min, max(1, nominal - 1))
+        self._set_value(self.allowed_max, nominal + 1)
+
+    def _sync_editable_fields(self, by_count: bool) -> None:
+        """源字段可编辑、派生字段只读；标题随模式说明哪个是算出来的。
+
+        只读字段去掉步进箭头（``NoButtons``）：既避免误触，也不给它"可以改"
+        的暗示；控件保持 enabled 以便正常读出数值。
+        """
+        self.duration_spin.setReadOnly(by_count)
+        self.count_spin.setReadOnly(not by_count)
+        self.duration_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+            if by_count
+            else QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        )
+        self.count_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.UpDownArrows
+            if by_count
+            else QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self._duration_field.set_label("预计目标时长（自动）" if by_count else "目标时长")
+        self._count_field.set_label("目标集数 N" if by_count else "预计集数（自动）")
+
+        # 推荐方案：分析时由系统把三种策略各解一遍再取代价最低者，此时手选
+        # 「策略」既不会决定最终取向、又让人以为"我选的生效了"，索性置灰说清。
+        recommend = self.radio_recommend.isChecked()
+        self.strategy_combo.setEnabled(not recommend)
+        self._strategy_field.set_help(
+            "推荐方案会自动比较三种策略，取总代价最低者" if recommend else ""
+        )
+
+    def _set_derived_help(self, by_count: bool, text: str) -> None:
+        field = self._duration_field if by_count else self._count_field
+        field.set_help(text)
+
+    def _apply_derived(self, settings, total, report, by_count: bool) -> None:
+        """把派生目标值写回只读控件：模式A 反算集数，模式B 反算时长。"""
+        if by_count:
+            count = settings.target_episode_count or 0
+            if count <= 0:
+                self._duration_field.set_help("目标集数未设置，无法反算时长")
+                return
+            self._set_value(self.duration_spin, float(Fraction(total, count)))
+            self._duration_field.set_help(
+                "由总时长 ÷ 目标集数自动计算（内部全精度，界面显示才取整）"
+            )
+            return
+
+        target = settings.target_duration_seconds
+        if target is None or target <= 0:
+            self._count_field.set_help("目标时长未设置，无法反算集数")
+            return
+        if report.min_episodes > report.max_episodes:
+            # 无解时不猜值：保留上一次的数值，理由交给可行性面板说清楚
+            self._count_field.set_help("当前参数无解，无法反算集数")
+            return
+
+        nominal = round_half_up(Fraction(total) / target)
+        clamped = max(report.min_episodes, min(nominal, report.max_episodes))
+        self._set_value(self.count_spin, clamped)
+        if report.min_episodes == report.max_episodes:
+            self._count_field.set_help(
+                f"由总时长 ÷ 目标时长自动计算（只读）：{report.min_episodes} 集"
+            )
+        else:
+            self._count_field.set_help(
+                "由总时长 ÷ 目标时长自动计算（只读）；求解器可在 "
+                f"{report.min_episodes}–{report.max_episodes} 集间择优"
+            )
+
+    def _set_value(self, spin, value) -> None:
+        """写派生控件：置 _syncing 挡递归，临时断信号防多余的刷新。"""
+        previous = self._syncing
+        self._syncing = True
+        try:
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        finally:
+            self._syncing = previous
 
     def can_continue(self) -> tuple[bool, str]:
         settings = self.collect_settings()

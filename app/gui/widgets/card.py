@@ -12,7 +12,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 class Card(QFrame):
@@ -34,11 +35,13 @@ class Card(QFrame):
         if title:
             header = QFrame(self)
             header.setProperty("role", "card-title")
-            header_layout = QVBoxLayout(header)
+            header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(0, 0, 0, 0)
             self._title_label = QLabel(title)
             self._title_label.setProperty("role", "card-title-text")
             header_layout.addWidget(self._title_label)
+            header_layout.addStretch(1)
+            self._header_layout = header_layout
             outer.addWidget(header)
 
         self.body = QFrame(self)
@@ -62,6 +65,15 @@ class Card(QFrame):
     def set_title(self, text: str) -> None:
         if hasattr(self, "_title_label"):
             self._title_label.setText(text)
+
+    def add_header_widget(self, widget: QWidget) -> None:
+        """在标题右侧挂一个控件（如"使用中：whisper-small"或展开按钮）。
+
+        没有标题的卡片会被忽略——头部不存在，无从挂起。
+        """
+        if not hasattr(self, "_header_layout"):
+            return
+        self._header_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight)
 
     def title(self) -> str:
         return self._title_label.text() if hasattr(self, "_title_label") else ""
