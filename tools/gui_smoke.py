@@ -172,7 +172,9 @@ def main() -> int:
     # 断言日志内容，而不是只看 current_plan：槽函数中途抛异常时方案仍已入状态，
     # 但日志会缺行（真实案例：签名漏了参数，函数体抛 NameError，界面完全看不出来）。
     log_text = inspector.log_text()
-    for required in ("候选点：", "整集复核", "覆盖校验：", "方案层校验："):
+    # 「本地转写档位：whisper-X」必须在日志里：模型页的「使用中」不是装饰品，
+    # 它得真的落到分析线程上——缺这一行时，用户与工具都看不出实际用了哪一档。
+    for required in ("候选点：", "整集复核", "覆盖校验：", "方案层校验：", "本地转写档位："):
         assert required in log_text, (
             f"检查器日志缺少「{required}」——完成回调可能中途失败。"
             f"日志尾部：\n{log_text[-600:]}"
