@@ -78,6 +78,23 @@ def _self_check() -> int:
         judge = create_judge()
         print("  语义判断 : " + (judge.describe() if judge else "模型已就位但推理栈不可用（降级运行）"))
 
+    # 云端档案的状态也要报：只看本地模型会给"已启用云端"的用户一个误导结论
+    from app.core.app_config import LOCAL_BACKEND, AppConfig
+    from app.core.semantic import cloud_block_reason
+
+    config = AppConfig.load()
+    profile = config.active_profile("judge")
+    if profile is None:
+        backend = config.backend_for("judge")
+        if backend != LOCAL_BACKEND:
+            print(f"  云端语义 : 选了 {backend} 但该档案没配语义判断，实际走本地")
+    else:
+        reason = cloud_block_reason(profile)
+        print(
+            "  云端语义 : "
+            + (f"未生效 — {reason}" if reason else f"就绪 {profile.label}／{profile.judge_model}")
+        )
+
     print("结论：" + ("运行前提齐备" if ok else "缺少必需组件，请按上面提示处理"))
     return 0 if ok else 1
 

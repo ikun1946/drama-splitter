@@ -33,6 +33,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from ..core.app_config import AppConfig
 from ..core.export import ExportBatchResult, ExportPreset, Exporter
 from ..core.ffmpeg import check_encoders
 from ..core.plan import BoundaryPlan
@@ -178,12 +179,19 @@ class AnalysisWorker(BaseWorker):
     completed = Signal(object, object, object, object, object)  # 方案,报告,问题,候选,整集复核
 
     def __init__(self, binaries, media: MediaInfo, audio_stream_index: int | None,
-                 settings: SplitSettings, parent=None) -> None:
+                 settings: SplitSettings, parent=None, *, config: AppConfig | None = None,
+                 cache_dir: Path | None = None) -> None:
         super().__init__(parent)
         self._binaries = binaries
         self._media = media
         self._audio_stream_index = audio_stream_index
         self._settings = settings
+        # 厂商档案与后端偏好：给定时用它（测试注入），否则运行时读配置文件——
+        # 模型对话框把改动写在同一份 config.json 上，因此两边看到的是同一状态。
+        self._config = config
+        # 缓存目录：默认就是项目根的 cache/；测试与端到端脚本可注入临时目录，
+        # 免得把假结果写进开发机缓存（否则后续跑测试会静默命中假数据）。
+        self._cache_dir = cache_dir
         # 中间产出：取消或失败时也保留已算出的部分，供调用方按需取用
         self.transcript = None
         self.subtitle_tracks: list = []
@@ -198,16 +206,19 @@ class AnalysisWorker(BaseWorker):
         from pathlib import Path
 
         from app.core import subtitles as subs
-        from app.core.asr import AsrEngine, AsrSettings
+        from app.core.asr import AsrSettings
         from app.core.cache import CacheStore, SourceFingerprint
+        from app.core.cloud_asr import select_asr_engine
         from app.core.shots import detect_all
         from app.core.candidates import build_candidate_set
 
         project_root = Path(__file__).resolve().parent.parent.parent
-        cache_dir = project_root / "cache"
+        cache_dir = self._cache_dir or (project_root / "cache")
         store = CacheStore(cache_dir)
         fingerprint = SourceFingerprint.of(self._media.path)
         ffmpeg = str(self._binaries.ffmpeg)
+        # 厂商档案与后端偏好：转写与语义判断共用这一份（模型对话框写的是同一个文件）
+        config = self._config if self._config is not None else AppConfig.load()
 
         transcript = None
         subtitle_tracks = []
@@ -227,7 +238,11 @@ class AnalysisWorker(BaseWorker):
         settings = AsrSettings()
         if not settings.vad_filter:
             self.stage_log.emit("VAD 已关闭。")
-        engine = AsrEngine(settings, cache=store, fingerprint=fingerprint)
+        engine, engine_notes = select_asr_engine(
+            config, settings, cache=store, fingerprint=fingerprint
+        )
+        for note in engine_notes:
+            self.stage_log.emit(note)
         try:
             transcript, hit = engine.transcribe_cached(
                 self._media.path,
@@ -240,11 +255,34 @@ class AnalysisWorker(BaseWorker):
                 ffmpeg=ffmpeg,
             )
         except RuntimeError as exc:
-            self.stage_log.emit(f"跳过语音转写：{exc}")
+            if getattr(engine, "is_cloud", False) and config.fallback_to_local:
+                # §7：块级失败一律整体回退本地重跑，不做"半云端半本地"的拼接——
+                # 混合来源的时间码难以核实，宁可贵一点重跑。失败原因要带上"第几段"。
+                detail = getattr(engine, "last_chunk_failure", "") or str(exc)
+                self.stage_log.emit(f"云端转写失败（{detail}），已回退本地模型重跑。")
+                local, _ = select_asr_engine(None, settings, cache=store, fingerprint=fingerprint)
+                try:
+                    transcript, hit = local.transcribe_cached(
+                        self._media.path,
+                        fingerprint,
+                        store,
+                        audio_stream_index=self._audio_stream_index,
+                        duration_seconds=self._media.timeline_duration,
+                        on_progress=lambda ratio, text: self.stage_progress.emit(text, ratio),
+                        cancel_check=lambda: self.cancelled,
+                        ffmpeg=ffmpeg,
+                    )
+                except RuntimeError as exc2:
+                    self.stage_log.emit(f"跳过语音转写：{exc2}")
+            else:
+                self.stage_log.emit(f"跳过语音转写：{exc}")
         else:
             if hit:
                 self.stage_log.emit("转写命中缓存。")
             self.stage_log.emit(transcript.describe())
+            if getattr(engine, "is_cloud", False) and not hit:
+                # 外发流水（设计 §6）：这一轮到底传了多少音频出去
+                self.stage_log.emit(engine.egress_line(transcript))
             for issue in transcript.issues:
                 self.stage_log.emit(f"  风险 {issue.code}：{issue.message}")
         # 转写在被取消后也要可见：main_window 靠它决定导出时是否生成 SRT
@@ -286,7 +324,7 @@ class AnalysisWorker(BaseWorker):
         # ---- 整体规划 ----------------------------------------------
         self.stage_started.emit("整体规划")
         from app.core.planner import PlanningError, plan_rule_based
-        from app.core.semantic import EventIndex, create_judge, judge_candidates
+        from app.core.semantic import EventIndex, judge_candidates, select_judge
         from app.core.settings import CountPolicy, SplitMode, check_feasibility
         from app.core.solver import solve_from_candidates
 
@@ -294,10 +332,15 @@ class AnalysisWorker(BaseWorker):
         self.stage_log.emit(index.describe())
 
         # ---- 语义判断（§11，可选，带预算与降级）--------------------
-        judge = create_judge()
+        # 后端由用户配置决定（本地 / 云端档案）；select_judge 返回的 notes 是
+        # "为什么这样选"的唯一说明来源，必须原样上日志——否则用户只会看到
+        # 判定没生效，却不知道该去开哪个开关。
+        judge, judge_notes = select_judge(config)
+        for note in judge_notes:
+            self.stage_log.emit(note)
         if judge is None:
             self.stage_log.emit(
-                "语义判断未启用（本地模型或推理栈不可用）——"
+                "语义判断未启用（本地模型与云端后端都不可用）——"
                 "候选保持规则评分，审核状态保持 pending（§ 降级路径）。"
             )
         strategy = self._settings.strategy.value

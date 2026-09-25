@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from fractions import Fraction
 
@@ -38,6 +39,7 @@ from app.core.semantic import (
     build_request,
     judge_candidates,
     parse_verdict,
+    prepare_prompt,
 )
 from app.core.solver import SolverWeights, solve_from_candidates
 from app.core.timebase import TimeBase
@@ -286,6 +288,39 @@ class TestLocalLlmJudgeOffline:
         verdict = judge.judge(bad)
         assert calls["count"] == 0, "请求不合法不应触发推理"
         assert verdict.verdict == VERDICT_UNPARSEABLE
+
+
+class TestPromptRendering:
+    """提示词渲染。
+
+    回归用例：模板里那段 JSON 示例的花括号曾被 ``str.format`` 当成替换字段，
+    于是**任何真的走到推理的判定都会抛 KeyError（'"verdict"'）**——本地两条
+    判定路径因此一直是不可用的，只因为推理栈没装、``available()`` 恒为 False
+    才没暴露。云端接入会让这条路径真正被走到，所以在这里钉住。
+    """
+
+    @staticmethod
+    def valid_request() -> JudgmentRequest:
+        return JudgmentRequest(
+            candidate_time=Fraction(30), candidate_frame=750,
+            text_before="他必须先拿到钱。", text_after="那就这么定了。",
+            gap_after=Fraction(1), ends_with_question=False, near_shot_cut=False,
+            rule_score=0.5, strategy="story",
+        )
+
+    def test_renders_context_and_keeps_json_example(self):
+        prompt, invalid = prepare_prompt(self.valid_request(), "test")
+        assert invalid is None
+        assert "他必须先拿到钱。" in prompt and "那就这么定了。" in prompt
+        assert '"verdict"' in prompt, "输出格式示例必须完整留在提示词里"
+        assert "{context}" not in prompt, "占位符应已被替换"
+
+    def test_invalid_request_yields_verdict_without_prompt(self):
+        request = dataclasses.replace(self.valid_request(), candidate_time=Fraction(-1))
+        prompt, invalid = prepare_prompt(request, "test")
+        assert prompt == "", "请求不合法就不该生成提示词"
+        assert invalid is not None
+        assert invalid.verdict == VERDICT_UNPARSEABLE
 
 
 # ---------------------------------------------------------------------------

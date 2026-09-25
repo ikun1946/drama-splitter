@@ -413,6 +413,135 @@ class TestImportPreview:
         assert preview.view.text() == "" and not preview.view.pixmap().isNull()
 
 
+class TestCloudModelCard:
+    """云端模型（厂商 API）卡片：默认零外发，且"没测通不许启用"。
+
+    连通性探测被替换成假实现——界面测试不允许真联网（也不该要求 Key）。
+    """
+
+    @staticmethod
+    def _form(window, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "app.core.app_config.config_path", lambda: tmp_path / "config.json"
+        )
+        return window.build_model_dialog().form
+
+    def test_defaults_are_closed_and_local(self, window, tmp_path, monkeypatch):
+        from app.core.app_config import LOCAL_BACKEND
+        from app.core.providers import CAP_JUDGE
+
+        form = self._form(window, tmp_path, monkeypatch)
+        assert form.cloud_enable.isChecked() is False
+        assert form.cloud_allow.isChecked() is False
+        assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND, "默认仍走本地"
+        assert "未启用" in form.cloud_hint.text()
+        assert "不含画面" in form.cloud_allow.text(), "外发范围必须在勾选那一刻就能读到"
+
+    def test_probe_failure_refuses_to_enable(self, window, tmp_path, monkeypatch):
+        from app.core.app_config import LOCAL_BACKEND, AppConfig
+        from app.core.providers import CAP_JUDGE
+
+        form = self._form(window, tmp_path, monkeypatch)
+        form.cloud_model.setText("ep-test")
+        form.cloud_key.setText("sk-test")
+        form.cloud_allow.setChecked(True)
+        form.cloud_enable.setChecked(True)
+        monkeypatch.setattr(
+            type(form),
+            "_probe_cloud",
+            lambda self, profile, capability: "鉴权失败（API Key 或资源权限）",
+        )
+
+        form._save_cloud()
+
+        assert form.cloud_enable.isChecked() is False, "测不通就不该保持勾选"
+        assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND
+        assert "未通过" in form.log.toPlainText()
+
+        saved = AppConfig.load(tmp_path / "config.json")
+        assert saved.backend_for(CAP_JUDGE) == LOCAL_BACKEND
+        profile = saved.profiles().get("volc")
+        assert profile.enabled is False, "失败的档案不得被标记为已启用"
+        assert profile.judge_model == "ep-test", "字段本身应已保存，用户不用重填"
+
+    def test_probe_success_enables_and_persists(self, window, tmp_path, monkeypatch):
+        from app.core.app_config import AppConfig
+
+        form = self._form(window, tmp_path, monkeypatch)
+        form.cloud_model.setText("ep-test")
+        form.cloud_key.setText("sk-test")
+        form.cloud_allow.setChecked(True)
+        form.cloud_enable.setChecked(True)
+        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
+
+        form._save_cloud()
+
+        assert form.cloud_enable.isChecked() is True
+        assert "已启用" in form.cloud_hint.text()
+        saved = AppConfig.load(tmp_path / "config.json")
+        assert saved.backend_for("judge") == "volc"
+        profile = saved.profiles().get("volc")
+        assert profile.enabled is True and profile.allow_upload is True
+        assert profile.api_key == "sk-test"
+
+    def test_asr_capability_switches_independently(self, window, tmp_path, monkeypatch):
+        """两条能力各自测通、各自切换：只勾转写时语义判断仍走本地。"""
+        from app.core.app_config import AppConfig
+
+        form = self._form(window, tmp_path, monkeypatch)
+        form.cloud_key.setText("sk-test")
+        form.cloud_allow.setChecked(True)
+        form.cloud_asr_enable.setChecked(True)      # 只勾转写
+        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
+
+        form._save_cloud()
+
+        saved = AppConfig.load(tmp_path / "config.json")
+        assert saved.backend_for("asr") == "volc"
+        assert saved.backend_for("judge") == "local", "没勾的能力不许被切到云端"
+        assert "转写" in form.cloud_hint.text() and "语义判断" not in form.cloud_hint.text()
+
+    def test_asr_probe_failure_keeps_local_and_judge_stays(self, window, tmp_path, monkeypatch):
+        """转写测不通只影响转写：语义判断已测通的不该被连带取消。"""
+        from app.core.app_config import AppConfig
+
+        form = self._form(window, tmp_path, monkeypatch)
+        form.cloud_model.setText("ep-test")
+        form.cloud_key.setText("sk-test")
+        form.cloud_allow.setChecked(True)
+        form.cloud_enable.setChecked(True)
+        form.cloud_asr_enable.setChecked(True)
+
+        def probe(self, profile, capability):
+            return "识别失败（45000151）" if capability == "asr" else None
+
+        monkeypatch.setattr(type(form), "_probe_cloud", probe)
+        form._save_cloud()
+
+        saved = AppConfig.load(tmp_path / "config.json")
+        assert saved.backend_for("asr") == "local"
+        assert saved.backend_for("judge") == "volc"
+        assert form.cloud_asr_enable.isChecked() is False
+        assert form.cloud_enable.isChecked() is True
+
+    def test_project_snapshot_never_carries_the_key(self, window, tmp_path, monkeypatch):
+        """§6：方案快照只记"能否复现这次分集"，不含任何凭据。"""
+        from app.core.app_config import AppConfig
+        from app.gui.state import payload_text
+
+        form = self._form(window, tmp_path, monkeypatch)
+        form.cloud_model.setText("ep-test")
+        form.cloud_key.setText("sk-secret-value")
+        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
+        form.cloud_enable.setChecked(True)
+        form.cloud_allow.setChecked(True)
+        form._save_cloud()
+        assert AppConfig.load(tmp_path / "config.json").providers, "前置：确实写进了配置"
+
+        snapshot = payload_text(window.state.snapshot_payload())
+        assert "sk-secret-value" not in snapshot
+
+
 class TestWorkers:
     """工作线程的构造参数与信号契约。
 

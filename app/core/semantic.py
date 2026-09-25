@@ -9,10 +9,12 @@
 - §10.4 预算耗尽属独立的无解成因（BUDGET_EXHAUSTED），与"无路径"分开报告。
 - §6 判断不得阻塞界面线程（由上层 worker 保证，本模块自身是同步纯计算）。
 
-**「素材不出机器」的落点**
-------------------------
-语义判断只允许本地模型（GGUF + llama.cpp）。没有任何云端调用路径——
-不是"默认关闭"，是这个模块里根本没有网络代码。
+**「素材不出机器」的落点（已改为用户可控开关，默认关闭）**
+------------------------------------------------------
+本模块的默认后端仍是本地模型（llama.cpp → Ollama），云端判定器
+（:class:`CloudLlmJudge`，见设计 §4）只有用户在"模型 → 云端模型"里显式
+启用档案**并**勾选「允许外发素材」后才会被选中；两个开关任一为关，走本地路径并
+在日志说明。判断只外发**候选点前后的台词文本片段**，不发画面。
 
 **降级是常态而非异常**
 --------------------
@@ -32,7 +34,16 @@ from typing import Iterable, Sequence
 
 from .candidates import CandidatePoint
 from .asr import Transcript, TranscriptSentence
+from .cloud import build_judge_transport
 from .probe import LEVEL_INFO, LEVEL_WARN, Issue
+from .providers import (
+    CAP_JUDGE,
+    JudgeTransport,
+    ProviderError,
+    ProviderProfile,
+    block_reason,
+    describe_egress,
+)
 from .shots import SceneBoundary
 
 __all__ = [
@@ -45,12 +56,15 @@ __all__ = [
     "SemanticJudge",
     "NullJudge",
     "LocalLlmJudge",
+    "OllamaJudge",
+    "CloudLlmJudge",
+    "ResilientJudge",
     "JudgeOutcome",
     "judge_candidates",
     "locate_llm_model",
     "create_judge",
+    "select_judge",
     "parse_verdict",
-    "OllamaJudge",
     "DialogueEvent",
     "VERDICT_GOOD",
     "VERDICT_ACCEPTABLE",
@@ -499,15 +513,9 @@ class OllamaJudge(SemanticJudge):
     _max_tokens: int = 160
 
     def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
-        problems = request.validate()
-        if problems:
-            return JudgmentVerdict(
-                verdict=VERDICT_UNPARSEABLE,
-                risks=[f"请求校验未通过：{'；'.join(problems)}"],
-                judge_id=self.judge_id,
-            )
-        context = json.dumps(request.to_prompt_dict(), ensure_ascii=False)
-        prompt = _PROMPT_TEMPLATE.format(context=context)
+        prompt, invalid = prepare_prompt(request, self.judge_id)
+        if invalid is not None:
+            return invalid
         try:
             text = self._generate(prompt)
         except Exception as exc:  # noqa: BLE001 - 服务异常按不可用处理
@@ -516,6 +524,148 @@ class OllamaJudge(SemanticJudge):
 
     def _parse(self, text: str, request: JudgmentRequest) -> JudgmentVerdict:
         return parse_verdict(text, self.judge_id)
+
+
+def prepare_prompt(
+    request: JudgmentRequest, judge_id: str
+) -> tuple[str, JudgmentVerdict | None]:
+    """请求校验 + 提示词渲染（本地与云端判定器共用同一套，避免两处漂移）。
+
+    返回 ``(prompt, None)`` 或 ``("", 校验失败的结论)``——校验失败不调模型，
+    直接给出 unparseable 结论，这与 §11.1"请求字段不全就不该猜"一致。
+    """
+    problems = request.validate()
+    if problems:
+        return "", JudgmentVerdict(
+            verdict=VERDICT_UNPARSEABLE,
+            risks=[f"请求校验未通过：{'；'.join(problems)}"],
+            judge_id=judge_id,
+        )
+    context = json.dumps(request.to_prompt_dict(), ensure_ascii=False)
+    # 用 replace 而不是 str.format：模板里那段 JSON 示例的花括号会被 format 当成
+    # 替换字段（实测 KeyError: '"verdict"'）。原先本地两条判定路径用的正是
+    # format，只要真被调用就会崩——只因为推理栈/模型没装、available() 恒为 False
+    # 才一直没暴露。云端接入会让这条路径真正被走到，因此在这里修正。
+    return _PROMPT_TEMPLATE.replace("{context}", context), None
+
+
+class CloudLlmJudge(SemanticJudge):
+    """云端 LLM 判定器：厂商适配器 + 共用请求体。
+
+    与 :class:`OllamaJudge` 的差别只在"谁来算"——提示词、严格解析、预算与降级
+    语义全部共用（见 :func:`prepare_prompt` / :func:`parse_verdict`）。
+    外发范围只有**候选点前后的台词文本片段**，不含画面。
+
+    探测（``available()``）用一次最小请求，并把失败原因留在 ``probe_error`` 里，
+    供上层日志展示——"不可用"必须带上为什么。
+    """
+
+    def __init__(self, transport: JudgeTransport, *, profile_id: str, model: str) -> None:
+        self._transport = transport
+        self.judge_id = f"cloud:{profile_id}/{model}"
+        self.probe_error = ""
+
+    def available(self) -> bool:
+        try:
+            self._transport.probe()
+        except ProviderError as exc:
+            self.probe_error = exc.describe()
+            return False
+        except Exception as exc:  # noqa: BLE001 - 探测失败一律视为不可用
+            self.probe_error = str(exc)
+            return False
+        self.probe_error = ""
+        return True
+
+    def describe(self) -> str:
+        return f"云端模型 {self._transport.describe()}（提示词 {PROMPT_VERSION}）"
+
+    def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
+        prompt, invalid = prepare_prompt(request, self.judge_id)
+        if invalid is not None:
+            return invalid
+        try:
+            text = self._transport.complete(prompt)
+        except ProviderError as exc:
+            raise ModelUnavailableError(f"云端语义判断失败：{exc.describe()}") from exc
+        return parse_verdict(text, self.judge_id)
+
+
+class ResilientJudge(SemanticJudge):
+    """云端判定器 + 一次性降级切换。
+
+    为什么需要它：``judge_candidates`` 不捕获异常（它假定判定器是可用的），
+    而设计 §7 要求"云端失败**不**把分析判为失败"。云端在半途失败是现实
+    （限流、额度耗尽、断网），因此在判定器这一层把切换做掉，并把原因写进
+    ``notes``——上层只要把 notes 原样打进日志即可。
+
+    首个失败之后的请求全部交给备选判定器（不做"再次尝试云端"），
+    避免每点一次重试都撞一次墙。
+    """
+
+    def __init__(
+        self,
+        primary: SemanticJudge,
+        fallback_factory,
+        notes: list[str],
+        *,
+        switched_note: str = "云端语义判断不可用",
+    ) -> None:
+        self._primary = primary
+        self._fallback_factory = fallback_factory
+        self._fallback: SemanticJudge | None = None
+        self._notes = notes
+        self._switched_note = switched_note
+        self._switched = False
+        self.judge_id = getattr(primary, "judge_id", "cloud")
+
+    # ---- 内部 ----------------------------------------------------------
+
+    def _fallback_judge(self) -> SemanticJudge | None:
+        if self._fallback is None:
+            self._fallback = self._fallback_factory()
+        return self._fallback
+
+    def _switch(self, reason: str) -> None:
+        """切入备选路径并记一条原因（只记一次）。"""
+        if self._switched:
+            return
+        self._switched = True
+        fallback = self._fallback_judge()
+        target = fallback.describe() if fallback is not None else "降级为规则评分"
+        self._notes.append(f"{self._switched_note}：{reason}；已切换 → {target}")
+
+    # ---- 协议实现 ------------------------------------------------------
+
+    def available(self) -> bool:
+        if not self._switched:
+            if self._primary.available():
+                return True
+            reason = getattr(self._primary, "probe_error", "") or "探测失败"
+            self._switch(reason)
+        fallback = self._fallback_judge()
+        return bool(fallback is not None and fallback.available())
+
+    def describe(self) -> str:
+        if self._switched:
+            return f"{self._primary.describe()}（已回退）"
+        return self._primary.describe()
+
+    def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
+        if not self._switched:
+            try:
+                return self._primary.judge(request)
+            except ModelUnavailableError as exc:
+                self._switch(str(exc))
+        fallback = self._fallback_judge()
+        if fallback is None:
+            # 仅云端模式：不回退，本轮如实标记为无法判定（候选保持 pending）
+            return JudgmentVerdict(
+                verdict=VERDICT_UNPARSEABLE,
+                risks=[note for note in self._notes if note.startswith(self._switched_note)],
+                judge_id=self.judge_id,
+            )
+        return fallback.judge(request)
 
 
 def parse_verdict(text: str, judge_id: str) -> JudgmentVerdict:
@@ -583,14 +733,13 @@ class JudgeOutcome:
         )
 
 
-def create_judge(
+def local_judge(
     *,
     ollama_model: str | None = None,
     model_dir: str | Path | None = None,
 ) -> SemanticJudge | None:
-    """按可用性选择判定器；都不可用时返回 None（调用方降级）。
+    """本地判定器链：进程内 llama.cpp（延迟最低）→ Ollama → None。
 
-    优先级：进程内 llama.cpp（延迟最低）→ Ollama（本机装得上的推理栈）→ None。
     返回 None 不是错误——降级是阶段4 的明确路径（§ 预算与降级）。
     """
     if locate_llm_model(model_dir) is not None:
@@ -607,6 +756,71 @@ def create_judge(
         if judge.available():
             return judge
     return None
+
+
+def create_judge(
+    *,
+    ollama_model: str | None = None,
+    model_dir: str | Path | None = None,
+) -> SemanticJudge | None:
+    """按可用性选择**本地**判定器；都不可用时返回 None（调用方降级）。
+
+    保留这个入口是给命令行自检（``run.py --self-check``）等"没有 AppConfig"的
+    场景用的；界面链路请用 :func:`select_judge`，它还会读云端档案。
+    """
+    return local_judge(ollama_model=ollama_model, model_dir=model_dir)
+
+
+def cloud_block_reason(profile: ProviderProfile) -> str | None:
+    """云端**语义判断**为什么不能生效；可用时返回 None。
+
+    判定本身放在 providers.block_reason（转写与语义判断共用一套措辞），
+    这里保留一个领域入口，调用方不必关心能力枚举。
+    """
+    return block_reason(profile, CAP_JUDGE)
+
+
+def select_judge(
+    config: object | None,
+    *,
+    ollama_model: str | None = None,
+    model_dir: str | Path | None = None,
+) -> tuple[SemanticJudge | None, list[str]]:
+    """按用户配置选判定器，并把"为什么这样选"变成可展示的说明。
+
+    返回 ``(judge, notes)``：judge 为 None 表示降级（候选保持规则评分）；
+    notes 必须原样进日志与检查器——"选了云端却没生效"的原因要能被用户看到，
+    只写在代码里等于没说。
+    """
+    notes: list[str] = []
+    profile = (
+        config.active_profile(CAP_JUDGE) if config is not None else None  # type: ignore[attr-defined]
+    )
+    if profile is not None:
+        reason = cloud_block_reason(profile)
+        if reason is not None:
+            notes.append(reason + "，本次仍用本地模型。")
+        else:
+            transport = build_judge_transport(profile)
+            if transport is None:
+                notes.append(f"暂不支持该厂商的云端语义判断：{profile.id}，本次仍用本地模型。")
+            else:
+                primary = CloudLlmJudge(
+                    transport, profile_id=profile.id, model=profile.judge_model
+                )
+                notes.append(
+                    f"语义判断后端：{primary.describe()}（"
+                    + describe_egress(profile, (CAP_JUDGE,))
+                    + "）"
+                )
+                fallback_factory = (
+                    (lambda: local_judge(ollama_model=ollama_model, model_dir=model_dir))
+                    if config.fallback_to_local  # type: ignore[attr-defined]
+                    else (lambda: None)
+                )
+                return ResilientJudge(primary, fallback_factory, notes), notes
+
+    return local_judge(ollama_model=ollama_model, model_dir=model_dir), notes
 
 
 def build_request(

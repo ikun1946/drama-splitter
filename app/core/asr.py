@@ -53,6 +53,7 @@ __all__ = [
     "locate_model",
     "build_sentences",
     "estimate_runtime",
+    "extract_audio",
     "SIMPLIFIED_PROMPT",
 ]
 
@@ -536,7 +537,7 @@ class AsrEngine:
                     if on_progress:
                         on_progress(index / max(1, len(plan)), f"转写第 {index + 1}/{len(plan)} 段")
                     wav = temp_dir / f"chunk{index:03d}.wav"
-                    if not _extract_audio(ffmpeg, media, wav, start, end - start):
+                    if not extract_audio(ffmpeg, media, wav, start, end - start):
                         transcript.issues.append(
                             Issue(
                                 LEVEL_WARN,
@@ -1084,7 +1085,7 @@ def _probe_duration(ffmpeg: str | Path | None, media: Path) -> Fraction:
     return info.timeline_duration
 
 
-def _extract_audio(
+def extract_audio(
     ffmpeg: str | Path | None,
     media: Path,
     target: Path,
@@ -1095,6 +1096,9 @@ def _extract_audio(
 
     §7.3：提取分析音频必须保留与源视频的时间映射，因此这里记录**精确的块起点**，
     转写后按该起点平移。不使用 `-t` 之外的任何时间轴压缩。
+
+    公开给云端转写复用（`app/core/cloud_asr.py`）：两条后端必须用同一套抽音参数，
+    否则同一份素材在本地与云端的块边界会不一致。
     """
     if ffmpeg is None:
         from .ffmpeg import locate_ffmpeg
