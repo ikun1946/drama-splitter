@@ -677,12 +677,63 @@ class TestStep5Refinement:
         assert not _FakeWorker.instances, "硬约束问题必须拦住导出"
 
     def test_shortcut_sequences_registered(self, window):
-        """§54：Ctrl+E / Enter / N / P 必须注册成快捷键。"""
+        """§54：Ctrl+E / Enter / N / P / F11 / Esc 必须注册成快捷键。"""
         from PySide6.QtGui import QShortcut
 
         sequences = {sc.key().toString() for sc in window.findChildren(QShortcut)}
-        for expected in ("Ctrl+E", "N", "P", "Return", "Enter", "Space", "Ctrl+S"):
+        for expected in (
+            "Ctrl+E", "N", "P", "Return", "Enter", "Space", "Ctrl+S", "F11", "Esc"
+        ):
             assert expected in sequences, f"缺少快捷键 {expected}（现有：{sorted(sequences)}）"
+
+    def test_f11_toggles_fullscreen(self, window):
+        """F11：全屏 ↔ 常规真实翻转（窗口状态标志在 show 时同步置位）。"""
+        assert not window.isFullScreen()
+        window._toggle_fullscreen()
+        assert window.isFullScreen(), "第一次 F11 应进入全屏"
+        window._toggle_fullscreen()
+        assert not window.isFullScreen(), "第二次 F11 应退出全屏"
+
+    def test_esc_exits_fullscreen_first(self, window, qapp):
+        """Esc 分层：全屏时 Esc 只退全屏，不关抽屉（优先级最高）。"""
+        window.settings_drawer.show()
+        try:
+            window._toggle_fullscreen()
+            window._escape_pressed()
+            assert not window.isFullScreen(), "全屏 + 抽屉同开时 Esc 应先退全屏"
+        finally:
+            self._hide_drawer(qapp, window.settings_drawer)
+
+    def test_esc_closes_open_drawer(self, window, qapp):
+        """Esc 分层：非全屏时 Esc 关闭打开中的抽屉（与 ✕ 同一条动画路径）。"""
+        import time
+
+        window.settings_drawer.show()
+        try:
+            assert window.settings_drawer.isVisible(), "前置：抽屉已打开"
+            window._escape_pressed()
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                qapp.processEvents()
+                if not window.settings_drawer.isVisible():
+                    break
+                time.sleep(0.02)
+            assert not window.settings_drawer.isVisible(), "Esc 应关闭抽屉"
+        finally:
+            self._hide_drawer(qapp, window.settings_drawer)
+
+    @staticmethod
+    def _hide_drawer(qapp, drawer) -> None:
+        """模块级 window 夹具是共享的：把抽屉彻底关掉，避免动画残留污染后续用例。"""
+        import time
+
+        drawer.hide()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            qapp.processEvents()
+            if not drawer.isVisible():
+                return
+            time.sleep(0.02)
 
     def test_ctrl_e_navigates_and_warns_without_plan(self, window, qapp, monkeypatch):
         """Ctrl+E：无方案时切到导出页并弹「请先完成导入、分析与审核」。"""

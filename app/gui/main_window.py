@@ -92,7 +92,9 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         # 显式设最小尺寸，避免各子控件的 minimumSizeHint 累加成 1325+
         self.setMinimumSize(960, 600)
-        self.setMaximumSize(4096, 2160)
+        # 不设最大尺寸：人为上限会在超过上限的屏幕上把最大化卡死
+        # （实测教训：4096×2160 的旧上限在 5120×1440 超宽屏上会让
+        # 最大化按钮把窗口钳在 4096 宽，表现为"不能全屏"）。
 
         # 主题取自应用配置（记住上次选择）；非法值在 AppConfig.load 已兜底
         self.config = AppConfig.load()
@@ -534,6 +536,32 @@ class MainWindow(QMainWindow):
         # 跳转会切到审核页，因此不限定当前页，保证连续按 N 能逐条走完
         QShortcut(QKeySequence("N"), self, activated=lambda: self._cycle_issue(1))
         QShortcut(QKeySequence("P"), self, activated=lambda: self._cycle_issue(-1))
+        # F11 无边框全屏 ↔ 常规窗口；Esc 退出全屏（Qt 默认不提供这两个键）
+        QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
+        # Esc 同时承担「关抽屉」：QShortcut 会先于抽屉的 keyPressEvent 收到
+        # 按键，必须在这里代为分发，否则抽屉永远收不到 Esc（§54）
+        QShortcut(QKeySequence("Esc"), self, activated=self._escape_pressed)
+
+    def _toggle_fullscreen(self) -> None:
+        """F11：全屏 ↔ 常规。showNormal 会恢复进入全屏前的窗口几何。"""
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def _escape_pressed(self) -> None:
+        """Esc 的语义分层：先退全屏，再关抽屉；两者皆无则不动作。
+
+        抽屉关闭走 Drawer.hide()——与 ✕ 按钮、抽屉内 Esc 完全同一条
+        动画路径（closed 信号 → 导航状态复位）。
+        """
+        if self.isFullScreen():
+            self.showNormal()
+            return
+        for drawer in (self.settings_drawer, self.model_drawer):
+            if drawer.isVisible():
+                drawer.hide()
+                return
 
     def _space_pressed(self) -> None:
         if self.stack.currentWidget() is self.review_page:

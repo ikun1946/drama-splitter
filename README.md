@@ -119,7 +119,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §15 硬件编码器探测 | `app/core/ffmpeg.py` | 完成 |
 | § 任务恢复（项目快照）+ §五十五/五十六 保存 / 打开 / 自动保存 | `app/gui/state.py`、`app/gui/main_window.py` | 完成 |
 | §37 导出前置检查（未审核切点不禁止：继续导出 / 返回审核） | `app/gui/pages/export_page.py::export_precheck` | 完成 |
-| §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航） | `app/gui/main_window.py::_install_shortcuts` | 完成 |
+| §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航、F11 全屏/Esc 关闭） | `app/gui/main_window.py::_install_shortcuts` | 完成 |
 | §15 打包与部署自检 | `tools/build_package.py` + `run.py --self-check` | 完成 |
 
 已知限制（不静默蒙混，都在界面上如实说明）：
@@ -158,7 +158,7 @@ python -m venv .venv
 ## 验证
 
 ```bash
-# 单元与端到端测试（359 项；20 项按环境跳过：缺合成语音素材 / whisper 模型 / LLM 模型时）
+# 单元与端到端测试（362 项；20 项按环境跳过：缺合成语音素材 / whisper 模型 / LLM 模型时）
 .venv/Scripts/python.exe -m pytest tests/ -q
 
 # 界面全链路冒烟（离屏运行，含真实编码与逐帧校验）
@@ -291,7 +291,7 @@ tools/             开发与验证工具
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             359 项自动化测试（13 个文件：339 通过 / 20 按环境跳过）
+tests/             362 项自动化测试（13 个文件：342 通过 / 20 按环境跳过）
 testdata/          合成素材（不入版本库）
 ```
 
