@@ -733,9 +733,20 @@ def format_short(time: Fraction) -> str:
 
 
 def locate_llm_model(root: str | Path | None = None) -> Path | None:
-    """定位已下载的 GGUF 模型。"""
-    directory = Path(root) if root else Path(__file__).resolve().parent.parent.parent / "models" / "llm"
-    if not directory.exists():
-        return None
-    models = sorted(directory.rglob("*.gguf"), key=lambda p: -p.stat().st_size)
-    return models[0] if models else None
+    """定位已下载的 GGUF 模型。
+
+    显式传入 `root` 只查该目录；否则遍历 `model_search_roots()` 的所有候选——
+    打包后 `__file__` 指向包内目录，只有候选搜索才能找到用户放在 exe 旁边的模型。
+    """
+    from .asr import model_search_roots
+
+    directories = [Path(root) / "llm"] if root else [
+        candidate / "llm" for candidate in model_search_roots()
+    ]
+    for directory in directories:
+        if not directory.exists():
+            continue
+        models = sorted(directory.rglob("*.gguf"), key=lambda p: -p.stat().st_size)
+        if models:
+            return models[0]
+    return None

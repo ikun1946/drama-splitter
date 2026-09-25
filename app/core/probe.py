@@ -16,11 +16,14 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
 from .ffmpeg import FfmpegBinaries, FfmpegError, run_ffprobe_json
+
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 from .timebase import (
     TimeBase,
     TimeBaseError,
@@ -798,3 +801,100 @@ def describe_media(info: MediaInfo) -> str:
         f"{len(info.audio_tracks)} 条音轨",
     ]
     return "｜".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 关键帧与完整帧表（阶段5）
+# ---------------------------------------------------------------------------
+
+
+def probe_keyframe_frames(binaries, media: "MediaInfo") -> list[int]:
+    """返回关键帧的帧号列表（升序）。
+
+    用 `-skip_frame nokey` 只解码关键帧，长片也很快。帧号由 pts_time 换算：
+    CFR 素材上 frame = round(pts × fps)；这里统一用 ceiling 语义
+    （frame_index_at_or_after），与边界吸附保持同一口径。
+
+    用途：快速复制（§14.2）要求所有集间边界都是关键帧——流复制只能
+    从关键帧开始切，边界落在非关键帧上必然造成帧错位。
+    """
+    import subprocess as _sp
+
+    command = [
+        str(binaries.ffprobe),
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-skip_frame", "nokey",
+        "-show_entries", "frame=pts_time",
+        "-of", "csv=p=0",
+        str(media.path),
+    ]
+    proc = _sp.run(command, capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", creationflags=_NO_WINDOW)
+    if proc.returncode != 0:
+        raise FfmpegError(f"关键帧探测失败：{(proc.stderr or '').strip()[-200:]}")
+
+    frames: list[int] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # ffprobe 的 CSV 输出对首帧会多带一个尾逗号（如 "0.000000,"），
+        # 因此只取第一个字段——按整行解析会把首帧直接丢掉，
+        # 而首帧恰恰是最常见的切点之一。
+        raw = line.split(",")[0].strip()
+        if not raw:
+            continue
+        try:
+            seconds = Fraction(raw)
+        except (ValueError, ZeroDivisionError):
+            continue
+        frames.append(media.frame_index_at_or_after(seconds))
+    return sorted(set(frames))
+
+
+def build_frame_table(binaries, media: "MediaInfo", *, max_frames: int = 200_000) -> list[dict]:
+    """构建完整帧表：每帧的 帧号 / pts 秒 / 是否关键帧。
+
+    这是 VFR 支持的地基（§9.3）：VFR 素材的帧时长不再恒定，
+    帧号 ↔ 时间的换算必须查表。CFR 素材的表与线性映射一致（有测试验证），
+    因此本表同时是"素材真的是 CFR"的复核手段。
+
+    注意：当前导出链路仍然要求 CFR（VFR 在导入阶段被拦截），
+    本表只作为数据基础与诊断工具，不改变导出行为。
+    """
+    import json as _json
+    import subprocess as _sp
+
+    command = [
+        str(binaries.ffprobe),
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "frame=pts_time,key_frame",
+        "-of", "json",
+        str(media.path),
+    ]
+    proc = _sp.run(command, capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", creationflags=_NO_WINDOW)
+    if proc.returncode != 0:
+        raise FfmpegError(f"帧表探测失败：{(proc.stderr or '').strip()[-200:]}")
+
+    data = _json.loads(proc.stdout or "{}")
+    frames = data.get("frames", [])
+    if len(frames) > max_frames:
+        raise FfmpegError(
+            f"帧表共 {len(frames)} 帧，超过上限 {max_frames}。"
+            "长素材请分段生成或提高上限后重试。"
+        )
+
+    table: list[dict] = []
+    for index, frame in enumerate(frames):
+        pts = frame.get("pts_time")
+        table.append(
+            {
+                "frame": index,
+                "pts_seconds": float(pts) if pts is not None else None,
+                "key_frame": frame.get("key_frame") == 1,
+            }
+        )
+    return table

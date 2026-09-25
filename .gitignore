@@ -20,6 +20,11 @@ testdata/
 *.part.mp4
 *.stale
 
+# 打包产物（可由 python tools/build_package.py 重建，体积 120MB+）
+dist/
+build/
+*.spec
+
 # 编辑器与系统
 .vscode/
 .idea/

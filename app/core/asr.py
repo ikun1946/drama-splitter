@@ -105,8 +105,43 @@ class ModelInfo:
         return f"{self.tier}（{self.size_mb:.0f} MB）"
 
 
+def model_search_roots() -> list[Path]:
+    """模型目录的候选位置，按优先级排列。
+
+    为什么要多个候选：打包（PyInstaller）后 `__file__` 指向包内的
+    `_MEIPASS` 目录，按源码路径根本找不到用户放在外面的 `models/`，
+    自检会错误地报"模型未下载"。模型体积大（whisper small 484MB、
+    LLM 1222MB），**不随包分发**，因此必须支持"放在 exe 旁边"这种部署方式。
+
+    优先级：
+      1. 环境变量 `DRAMA_MODELS_DIR`（部署时最可控）
+      2. 可执行文件所在目录下的 `models/`（打包版推荐做法）
+      3. 可执行文件上级目录下的 `models/`
+      4. 源码树根目录下的 `models/`（开发运行）
+    """
+    import os as _os
+    import sys as _sys
+
+    roots: list[Path] = []
+    override = _os.environ.get("DRAMA_MODELS_DIR")
+    if override:
+        roots.append(Path(override))
+
+    if getattr(_sys, "frozen", False):
+        exe_dir = Path(_sys.executable).resolve().parent
+        roots.append(exe_dir / "models")
+        roots.append(exe_dir.parent / "models")
+    roots.append(Path(__file__).resolve().parent.parent.parent / "models")
+    return roots
+
+
 def model_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent / "models"
+    """返回实际使用的模型目录（第一个存在的候选；都不存在时返回首选位置）。"""
+    for root in model_search_roots():
+        if root.exists():
+            return root
+    roots = model_search_roots()
+    return roots[0] if roots else Path("models")
 
 
 def locate_model(tier: str) -> ModelInfo | None:

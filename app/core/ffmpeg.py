@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import re as _RE
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -294,3 +295,34 @@ def run_ffmpeg(
             proc.returncode,
             stderr_tail,
         )
+
+
+def probe_hw_encoders(binaries: "Binaries") -> dict:
+    """探测硬件 H.264 编码器的**存在性**（§ 硬件兼容）。
+
+    注意：`-encoders` 列表里有，不代表当前驱动可用——NVENC 需要显卡驱动、
+    QSV 需要核显驱动。因此返回值只用于"是否可以尝试"，真正可用性应由
+    一次 1 帧试编码确认（调用方决定是否做）。
+    """
+    import subprocess as _sp
+
+    command = [str(binaries.ffmpeg), "-hide_banner", "-encoders"]
+    proc = _sp.run(command, capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", creationflags=_CREATE_NO_WINDOW)
+    listing = proc.stdout or ""
+    targets = {
+        "h264_nvenc": "NVIDIA NVENC",
+        "h264_qsv": "Intel QSV",
+        "h264_amf": "AMD AMF",
+        "h264_videotoolbox": "VideoToolbox",
+    }
+    found = {}
+    for codec, label in targets.items():
+        # 按词边界匹配，避免 h264_qsv 误匹配到别的编码器名
+        if _re_search(rf"\b{codec}\b", listing):
+            found[codec] = label
+    return found
+
+
+def _re_search(pattern: str, text: str) -> bool:
+    return _RE.compile(pattern).search(text) is not None

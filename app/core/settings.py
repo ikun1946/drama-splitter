@@ -230,6 +230,61 @@ class SplitSettings:
             total_seconds=total_seconds,
         )
 
+    def to_json(self) -> dict:
+        """序列化（§ 任务恢复：快照必须能完整还原参数）。"""
+        return {
+            "split_mode": self.split_mode.value,
+            "count_policy": self.count_policy.value,
+            "target_episode_count": self.target_episode_count,
+            "allowed_count_min": self.allowed_count_min,
+            "allowed_count_max": self.allowed_count_max,
+            "target_duration_seconds": (
+                _frac_to_json(self.target_duration_seconds)
+                if self.target_duration_seconds is not None
+                else None
+            ),
+            "range": self.range.to_json(),
+            "strategy": self.strategy.value,
+            "duration_policy": self.duration_policy,
+            "allow_episode_exceptions": self.allow_episode_exceptions,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> "SplitSettings":
+        """从 to_json 的产物还原（§ 任务恢复）。键名与 to_json 一一对应。"""
+        range_data = data.get("range") or {}
+        mode = RangeMode(range_data.get("mode", RangeMode.PERCENT.value))
+        if mode == RangeMode.MANUAL:
+            range_spec = RangeSpec(
+                mode=mode,
+                manual_min=_parse_frac_json(range_data["min_seconds"]),
+                manual_max=_parse_frac_json(range_data["max_seconds"]),
+                tolerance=Fraction(1, 5),
+            )
+        else:
+            range_spec = RangeSpec(
+                mode=mode,
+                tolerance=_parse_frac_json(range_data["tolerance"])
+                if range_data.get("tolerance") is not None
+                else Fraction(1, 5),
+            )
+        return cls(
+            split_mode=SplitMode(data.get("split_mode", SplitMode.TARGET_DURATION.value)),
+            count_policy=CountPolicy(data.get("count_policy", CountPolicy.EXACT.value)),
+            target_episode_count=data.get("target_episode_count"),
+            allowed_count_min=data.get("allowed_count_min"),
+            allowed_count_max=data.get("allowed_count_max"),
+            target_duration_seconds=(
+                _parse_frac_json(data["target_duration_seconds"])
+                if data.get("target_duration_seconds") is not None
+                else None
+            ),
+            range=range_spec,
+            strategy=Strategy(data.get("strategy", Strategy.STORY.value)),
+            duration_policy=data.get("duration_policy", "hard"),
+            allow_episode_exceptions=bool(data.get("allow_episode_exceptions", False)),
+        )
+
 
 @dataclass
 class DerivedParams:
@@ -517,6 +572,21 @@ def _floor_div(numerator: Fraction, denominator: Fraction) -> int:
         raise ValueError("除数必须为正")
     quotient = Fraction(numerator) / Fraction(denominator)
     return quotient.numerator // quotient.denominator
+
+
+def _parse_frac_json(value) -> Fraction:
+    """_frac_to_json 的逆运算：int / 十进制字符串 / "n/d" → 精确 Fraction。"""
+    if value is None:
+        raise ValueError("分数字段为空")
+    if isinstance(value, bool):
+        raise ValueError("分数字段不能是布尔值")
+    if isinstance(value, int):
+        return Fraction(value)
+    text = str(value).strip()
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        return Fraction(int(numerator), int(denominator))
+    return Fraction(text)
 
 
 def _frac_to_json(value: Fraction | None):

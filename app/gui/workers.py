@@ -303,6 +303,7 @@ class ExportWorker(QThread):
         preset: ExportPreset,
         *,
         only_episodes: list[int] | None = None,
+        transcript=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -311,6 +312,27 @@ class ExportWorker(QThread):
         self._output_root = Path(output_root)
         self._audio_stream_index = audio_stream_index
         self._only = only_episodes
+        # 转写可选：有则导出单集 SRT（§7.2），没有就如实说明而不是静默跳过
+        self._transcript = transcript
+        self.subtitle_results: list = []
+
+    def _export_subtitles(self) -> None:
+        """导出各集 SRT 字幕（§7.2 单集字幕以 SRT 为主）。
+
+        只在导出成功后调用；无转写时记一条说明，不产出空文件。
+        """
+        from app.core.episode_files import export_episode_subtitles
+
+        directory = (
+            self._output_root / "episodes" / self._plan.export_directory_name()
+        )
+        try:
+            self.subtitle_results = export_episode_subtitles(
+                self._plan, self._transcript, directory
+            )
+        except OSError as exc:
+            self.subtitle_results = []
+            self.failed.emit(f"字幕导出失败：{exc}")
 
     @property
     def exporter(self) -> Exporter:

@@ -297,6 +297,26 @@ class CacheStore:
             f"（位于 {self.root}，可安全删除，只会导致重算）"
         )
 
+    def invalidate_source(self, fingerprint: SourceFingerprint) -> int:
+        """删除某个源文件的所有缓存条目，返回删除数（§12.2 换片失效）。
+
+        "重算"不是清空整个缓存目录——那会把其他项目的缓存也一并删掉。
+        按源指纹精确失效，只影响当前素材。
+        """
+        removed = 0
+        for meta_file, meta in self.iter_entries():
+            if meta.get("source_digest") != fingerprint.digest:
+                continue
+            payload = meta_file.with_name(meta_file.name.replace(".meta.json", ".json"))
+            for target in (meta_file, payload):
+                try:
+                    if target.exists():
+                        target.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
+
     def clear(self) -> int:
         """清空缓存。仅删除本工具自己的缓存目录内容。"""
         removed = 0

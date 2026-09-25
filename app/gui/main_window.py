@@ -682,6 +682,12 @@ class AnalysisPage(QWidget):
     def _on_done(self, plan: BoundaryPlan, report, problems, candidates) -> None:
         self.state.add_plan(plan)
         self.state.candidates = candidates
+        # 转写由分析线程挂在自身属性上（避免再加宽 completed 信号），
+        # 单集字幕导出需要它
+        worker = self.sender()
+        if worker is not None and getattr(worker, "transcript", None) is not None:
+            self.state.transcript = worker.transcript
+            self._append("转写已保留，导出时将一并生成单集 SRT 字幕。")
         self.progress.setValue(100)
         self._render_stages(done=5)
 
@@ -1266,6 +1272,7 @@ class ExportPage(QWidget):
             self.state.audio_stream_index,
             self._preset(),
             only_episodes=only,
+            transcript=self.state.transcript,
             parent=self,
         )
         self._worker.episode_done.connect(self._on_episode_done)
@@ -1331,6 +1338,22 @@ class ExportPage(QWidget):
         text = batch.summary() + f"\n输出目录：{batch.plan_directory}"
         if batch.plan_layer_problems:
             text += "\n计划层问题：\n" + "\n".join(batch.plan_layer_problems)
+
+        # 单集字幕（§7.2 以 SRT 为主）：仅在导出成功时生成
+        if batch.success:
+            worker = self.sender()
+            if worker is not None and hasattr(worker, "_export_subtitles"):
+                worker._export_subtitles()
+                results = getattr(worker, "subtitle_results", [])
+                written = [r for r in results if r.success]
+                text += f"\n字幕：已生成 {len(written)} 集 SRT"
+                for result in results:
+                    if not result.success and result.notes:
+                        text += f"\n  第{result.episode:02d}集未生成字幕：{result.notes[0]}"
+                    if result.clipped:
+                        text += f"\n  第{result.episode:02d}集有 {len(result.clipped)} 条字幕被截断"
+            else:
+                text += "\n字幕：未生成（分析阶段未产出转写）"
         QMessageBox.information(self, "导出结束", text)
 
     def _on_failed(self, message: str) -> None:

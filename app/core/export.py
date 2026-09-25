@@ -158,13 +158,10 @@ class Exporter:
         max_parallel: int = 1,
         cut_mode: CutMode = CutMode.PRECISE,
     ) -> None:
-        if cut_mode is CutMode.FAST_COPY:
-            # §14.2 第一阶段不提供快速复制，避免为速度引入时间错位。
-            # 这里明确拒绝而非静默降级，防止用户在不知情的情况下拿到关键帧错位的成片。
-            raise NotImplementedError(
-                "快速复制模式在当前版本未启用。关键帧边界与审核切点可能不一致，"
-                "本版仅提供精确裁切（重新编码）。"
-            )
+        # 快速复制（流复制）不做重新编码，因此**只能从关键帧开始切**。
+        # 这不是"性能选项"，而是正确性前提：边界落在非关键帧上必然造成
+        # 该集与相邻集重叠若干帧（§14.2 要避免的正是时间错位）。
+        # 是否可用在 export_plan 里按实际关键帧位置逐边界校验。
         self.binaries = binaries
         self.media = media
         self.preset = preset or ExportPreset()
@@ -211,6 +208,9 @@ class Exporter:
         """
         if job.frame_count <= 0:
             raise ValueError(f"第{job.episode.index:02d}集帧数为 {job.frame_count}，无法导出")
+
+        if self.cut_mode is CutMode.FAST_COPY:
+            return self._build_copy_command(job, tmp_path)
 
         seek = job.episode.start_seconds + job.seek_offset
         span = self.media.frame_span_seconds(
@@ -269,6 +269,83 @@ class Exporter:
     # ------------------------------------------------------------------
     # 单集导出
     # ------------------------------------------------------------------
+
+    def _build_copy_command(self, job: "ExportJob", tmp_path: Path) -> list[str]:
+        """构造流复制命令（不重新编码）。
+
+        与精确裁切的两处关键差别：
+        - `-c copy`：视频包原样复制，因此**帧内容与源片逐字节一致**，
+          但只能在关键帧处开始（由 export_plan 的关键帧校验保证）；
+        - 音频用 `-t`（按时间）而不是 `atrim` 滤镜——流复制路径上不能挂滤镜。
+          AAC 包边界与样本边界相差约一帧（21ms），这一量级仍在 §14.3
+          的音画同步门槛（一帧）之内。
+
+        依然**不使用** `-avoid_negative_ts make_zero`（见 build_command 的实测说明）。
+        """
+        seek = job.episode.start_seconds + job.seek_offset
+        span = self.media.frame_span_seconds(
+            self.media.frame_index_at_or_after(job.episode.start_seconds),
+            job.frame_count,
+        )
+        args: list[str] = [
+            "-ss",
+            _decimal(seek, 6),
+            "-i",
+            str(self.media.path),
+            "-map",
+            "0:v:0",
+        ]
+        if job.audio_stream_index is not None:
+            args += ["-map", f"0:a:{job.audio_stream_index}"]
+        args += [
+            "-c",
+            "copy",
+            # 视频帧数仍由帧数单点控制，保证"各集帧数之和 = 源帧数"
+            "-frames:v",
+            str(job.frame_count),
+            # 音频按时间截断（视频已被 -frames:v 限住）
+            "-t",
+            _decimal(span, 6),
+        ]
+        if job.audio_stream_index is None:
+            args.append("-an")
+        if self.preset.keep_faststart:
+            args += ["-movflags", "+faststart"]
+        args += ["-y", str(tmp_path)]
+        return args
+
+    def check_fast_copy_boundaries(
+        self, plan: "BoundaryPlan"
+    ) -> list[str]:
+        """校验所有集间边界是否都落在关键帧上（§14.2）。
+
+        返回问题描述列表；非空即拒绝执行快速复制——**绝不静默降级为重新编码**，
+        用户选择了快速复制就该知道为什么不能用。
+        """
+        from .probe import probe_keyframe_frames
+
+        keyframes = set(probe_keyframe_frames(self.binaries, self.media))
+        problems: list[str] = []
+        # 只校验**中间的切点**：第 0 个边界是文件开头（在源片上等价于"从头读"，
+        # 不需要是关键帧），最后一个边界是片尾（只用于界定结束，同样不切）。
+        # 若把这两个也算进去，校验会因为"首帧不在关键帧列表里"而永远拒绝。
+        for index in range(1, len(plan.boundary_ticks) - 1):
+            tick = plan.boundary_ticks[index]
+            seconds = plan.time_base.ticks_to_seconds(tick)
+            frame = self.media.frame_index_at_or_after(seconds)
+            if frame not in keyframes:
+                problems.append(
+                    f"切点 #{index}（{format_timecode(seconds)}，第 {frame} 帧）不是关键帧。"
+                )
+        if problems:
+            head = "；".join(problems[:4])
+            more = f"（共 {len(problems)} 处）" if len(problems) > 4 else ""
+            return [
+                "[FAST_COPY_KEYFRAME] 快速复制要求所有集间边界都是关键帧，"
+                f"当前不满足：{head}{more}。"
+                "请改用精确裁切，或调整边界到关键帧位置。"
+            ]
+        return []
 
     def export_episode(
         self,
@@ -415,6 +492,9 @@ class Exporter:
                     "未落在合法帧起点上，会导致该集与相邻集重叠。"
                     "请先调用 snap_to_frames() 吸附到帧边界。"
                 )
+
+        if self.cut_mode is CutMode.FAST_COPY:
+            batch.plan_layer_problems.extend(self.check_fast_copy_boundaries(plan))
 
         if batch.plan_layer_problems:
             return batch

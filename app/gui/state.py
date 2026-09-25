@@ -40,8 +40,51 @@ class ProjectState:
     # 阶段3 产物：候选点集合（供审核页展示与阶段2 使用）
     candidates: "object | None" = None
 
+    # 阶段3 产物：转写结果（单集字幕导出需要它）
+    transcript: "object | None" = None
+
     # 阶段4 产物：整集复核结论（供审核页展示）
     episode_reviews: "object | None" = None
+
+    # ---------------- 任务恢复（阶段5） ----------------
+
+    def save_snapshot(self, path: "Path") -> "Path":
+        """把可恢复的项目状态写到磁盘（§ 任务恢复）。
+
+        只存"重新打开后能继续工作"所需的最小集合：源片路径、参数、方案版本链、
+        锁定切点与导出进度。转写/镜头等可由缓存重建的数据不入快照。
+        """
+        import json
+
+        payload = {
+            "schema": 1,
+            "media_path": str(self.media.path) if self.media else None,
+            "audio_stream_index": self.audio_stream_index,
+            "settings": self.settings.to_json() if hasattr(self.settings, "to_json") else None,
+            "plans": [plan.to_json() for plan in self.plans],
+            "current_plan_version": self.current_plan.version if self.current_plan else None,
+            "exported": {
+                str(episode): {"path": str(path), "version": version}
+                for episode, (path, version) in self.exported.items()
+            },
+        }
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(target)
+        return target
+
+    @classmethod
+    def load_snapshot(cls, path: "Path") -> dict:
+        """读取快照并返回原始 dict（重建 MediaInfo/settings 由调用方完成，
+        因为那需要 ffprobe 与 settings 的构造逻辑，不属于状态对象本身）。"""
+        import json
+
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema") != 1:
+            raise ValueError("快照文件损坏或版本不兼容")
+        return data
 
     # ---- 方案版本 ------------------------------------------------------
 
