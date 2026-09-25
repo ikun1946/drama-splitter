@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.probe import probe_media  # noqa: E402
+from app.core.model_manager import llm_spec, whisper_spec  # noqa: E402
 from app.gui.stage import Stage  # noqa: E402
 from app.core.settings import (
     CountPolicy,
@@ -906,6 +909,24 @@ class TestSettingsPageBehaviour:
         assert "浮动比例为 0%" in text, "0% 浮动必须给出提示"
         assert "参数可行" in text
 
+    def test_recommend_mode_takes_over_strategy_choice(self, window, binaries, assets):
+        """推荐方案＝分析时自动比较三种策略，此时手选「策略」应置灰并说明原因。
+
+        回归：这个选项原先只是换了个名字，内核与「按目标时长」一字不差，
+        手选的「策略」照样生效——用户以为选了推荐，其实什么都没变。
+        """
+        window.state.media = probe_media(binaries, assets["cfr"])
+        page = window.build_settings_dialog().form
+
+        page.radio_recommend.setChecked(True)
+        assert page.collect_settings().split_mode == SplitMode.RECOMMEND
+        assert not page.strategy_combo.isEnabled(), "推荐模式下不该再手选策略"
+        assert "自动比较三种策略" in page._strategy_field._help.text()
+
+        page.radio_by_duration.setChecked(True)
+        assert page.strategy_combo.isEnabled(), "切回按目标时长后策略要恢复可选"
+        assert page._strategy_field._help.text() == ""
+
     def test_infeasible_parameters_block_progress(self, window, binaries, assets):
         """§5.1 参数无解必须在调用分析之前就拦住（§17.4），且提示要可操作。"""
         media = probe_media(binaries, assets["cfr"])
@@ -1297,3 +1318,224 @@ class TestStep5Refinement:
             page.btn_snap,
         ):
             assert btn.minimumHeight() >= 32, f"「{btn.text()}」缺少显式最小高度"
+
+
+# ---------------------------------------------------------------------------
+# 模型界面：两组卡片 + 「使用中」（用户曾看不出"选了没"与"在用哪个"）
+# ---------------------------------------------------------------------------
+
+
+def _touch_big_file(path: Path, megabytes: int) -> None:
+    """快速造一个大文件（truncate 不实写内容，避免为体积下限白写几百 MB）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(megabytes * 1024 * 1024)
+
+
+def _install_whisper(root: Path, tier: str) -> None:
+    spec = whisper_spec(tier)
+    directory = spec.target_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text("{}", encoding="utf-8")
+    _touch_big_file(directory / "model.bin", 1)
+    (directory / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (directory / "vocabulary.txt").write_text("a", encoding="utf-8")
+
+
+def _install_llm(root: Path, size: str, quant: str) -> None:
+    spec = llm_spec(size, quant)
+    _touch_big_file(spec.target_dir(root) / spec.big_file, 64)
+
+
+class TestModelFormChoices:
+    """模型界面：只测"看得清、控得住"这两件事——分组与「使用中」。"""
+
+    @pytest.fixture
+    def model_form(self, window, qapp, tmp_path, monkeypatch):
+        """指向临时模型目录与临时配置：绝不碰真实的 config.json / models/。"""
+        from app.core.app_config import AppConfig
+
+        models_root = tmp_path / "models"
+        models_root.mkdir()
+        config_file = tmp_path / "config.json"
+        real_load = AppConfig.load.__func__
+
+        def fake_load(cls, path=None):
+            return real_load(cls, config_file)
+
+        monkeypatch.setattr(AppConfig, "load", classmethod(fake_load))
+
+        dialog = window.build_model_dialog()
+        form = dialog.form
+        form._config.models_dir = str(models_root)
+        form._config_path = config_file      # 保存也写到临时文件
+        form.dir_edit.setText(str(models_root))
+        form.refresh()
+        yield form
+        dialog.close()
+        qapp.processEvents()
+
+    def test_two_group_cards_with_explicit_actions(self, model_form):
+        """两组卡片；每行都有行内动作与状态徽章，不再靠"选中态"猜。"""
+        assert model_form.asr_card.title() == "语音转写"
+        assert model_form.llm_card.title() == "语义判断"
+
+        asr = [row for row in model_form.rows() if row["kind"] == "whisper"]
+        assert [row["label"] for row in asr] == [
+            "whisper-tiny", "whisper-base", "whisper-small",
+            "whisper-medium", "whisper-large-v3",
+        ], "五档必须全列出（未安装的也要看得见体积与下载入口）"
+        assert all(row["action"] == "下载" for row in asr)
+        assert all(not row["installed"] for row in asr), "临时目录里什么都没装"
+
+    def test_default_tier_is_marked_in_use(self, model_form):
+        """转写组必须恰有一个「使用中」，且默认落在默认档位。"""
+        from app.core.model_manager import default_whisper_tier
+
+        active = [row for row in model_form.rows() if row["in_use"]]
+        assert len(active) == 1, f"「使用中」应唯一，实际 {len(active)}"
+        assert active[0]["label"] == f"whisper-{default_whisper_tier()}"
+        assert active[0]["kind"] == "whisper"
+        # 没装也要写明后果，而不是让分析悄悄跳过转写
+        assert "使用中：whisper-" in model_form.asr_status.text()
+        assert "未安装" in model_form.asr_status.text()
+
+    def test_uninstalled_rows_cannot_be_picked(self, model_form):
+        """未安装的行不可设为「使用中」：避免"选了却用不了"的假状态。"""
+        from app.core.model_manager import default_whisper_tier
+
+        rows = model_form.rows()
+        assert all(not row["pickable"] for row in rows if not row["installed"])
+        tiny = next(row for row in model_form._rows if row.spec.key == "whisper:tiny")
+        tiny.radio.click()   # 对 disabled 的圆钮无效
+        assert model_form.active_whisper_tier() == default_whisper_tier()
+
+    def test_pick_installed_tier_persists(self, model_form, window, qapp):
+        """点已安装档位 → 立刻生效、写进配置，重开对话框仍是它。"""
+        _install_whisper(model_form._models_root(), "tiny")
+        model_form.refresh()
+
+        tiny = next(row for row in model_form._rows if row.spec.key == "whisper:tiny")
+        assert tiny.radio.isEnabled(), "已安装的档位应当可设为使用中"
+        assert tiny.button.text() == "删除", "已安装的行给删除入口"
+        tiny.radio.click()
+
+        assert model_form.active_whisper_tier() == "tiny"
+        assert "使用中：whisper-tiny" in model_form.asr_status.text()
+        saved = json.loads(model_form._config_path.read_text(encoding="utf-8"))
+        assert saved["asr_model_tier"] == "tiny", "必须落盘，重开才记得住"
+
+        dialog = window.build_model_dialog()
+        try:
+            opened = dialog.form
+            opened._config_path = model_form._config_path
+            opened.dir_edit.setText(str(model_form._models_root()))
+            opened.refresh()
+            assert opened.active_whisper_tier() == "tiny"
+            chosen = [row["label"] for row in opened.rows() if row["in_use"]]
+            assert chosen == ["whisper-tiny"], f"重开后应仍指向 tiny，实际 {chosen}"
+        finally:
+            dialog.close()
+            qapp.processEvents()
+
+    def test_llm_rows_come_from_installed_gguf(self, model_form):
+        """语义组列出本机实际装了哪些档位（清单里只有一个预置项，必须扫目录）。"""
+        _install_llm(model_form._models_root(), "2B", "Q4_K_M")
+        _install_llm(model_form._models_root(), "2B", "Q8_0")
+        model_form.refresh()
+
+        llm = [row for row in model_form.rows() if row["kind"] == "llm"]
+        assert [row["label"] for row in llm] == [
+            "Qwen3.5-2B Q4_K_M", "Qwen3.5-2B Q8_0",
+        ]
+        # 未显式指定时也要指出"正在用哪个"（否则用户又要猜）
+        assert len([row for row in llm if row["in_use"]]) == 1
+        assert "使用中：" in model_form.llm_status.text()
+
+        target = next(row for row in model_form._rows if row.spec.key == "llm:2B:Q8_0")
+        target.radio.click()
+        assert model_form.active_llm_key() == "llm:2B:Q8_0"
+        saved = json.loads(model_form._config_path.read_text(encoding="utf-8"))
+        assert saved["llm_model_key"] == "llm:2B:Q8_0"
+        assert "Q8_0" in model_form.llm_status.text()
+
+    def test_unrecognized_gguf_is_reported(self, model_form):
+        """解析不出档位的 gguf 不能静默消失：文件在、界面里看不见才最坑人。"""
+        _install_llm(model_form._models_root(), "2B", "Q4_K_M")
+        stray = model_form._models_root() / "llm" / "other-GGUF"
+        _touch_big_file(stray / "my-custom.gguf", 64)
+        model_form.refresh()
+
+        # 未 show 的窗口上 isVisible() 恒为 False，所以看的是"有没有被显式藏起来"
+        assert not model_form.unknown_label.isHidden()
+        assert "my-custom.gguf" in model_form.unknown_label.text()
+        assert [row["label"] for row in model_form.rows() if row["kind"] == "llm"] == [
+            "Qwen3.5-2B Q4_K_M"
+        ]
+
+
+class TestActiveModelWiring:
+    """「使用中」必须真的被分析线程采用——只写进配置好看是不算数的。"""
+
+    @pytest.fixture
+    def patched_config(self, tmp_path, monkeypatch):
+        """把 AppConfig.load 指到临时配置，返回 (配置文件, 保存函数)。"""
+        from app.core.app_config import AppConfig
+
+        config_file = tmp_path / "config.json"
+        real_load = AppConfig.load.__func__
+        monkeypatch.setattr(
+            AppConfig, "load",
+            classmethod(lambda cls, path=None: real_load(cls, config_file)),
+        )
+        return config_file
+
+    def test_active_whisper_tier_follows_config(self, patched_config):
+        from app.core.app_config import AppConfig
+        from app.core.model_manager import default_whisper_tier
+        from app.gui.workers import active_whisper_tier
+
+        assert active_whisper_tier() == default_whisper_tier(), "未配置时用默认档位"
+        AppConfig(asr_model_tier="tiny").save(patched_config)
+        assert active_whisper_tier() == "tiny", "配置里的档位必须被分析线程采用"
+
+    def test_configured_judge_uses_pinned_model(self, tmp_path, patched_config, monkeypatch):
+        """语义模型的「使用中」要落到 Ollama 模型名上（命名规则与自动路径一致）。"""
+        from app.core import semantic
+        from app.core.app_config import AppConfig
+        from app.gui import workers
+
+        _install_llm(tmp_path, "2B", "Q4_K_M")
+        AppConfig(
+            models_dir=str(tmp_path), llm_model_key="llm:2B:Q4_K_M"
+        ).save(patched_config)
+
+        seen = {}
+
+        def fake_create_judge(*, ollama_model=None, model_dir=None):
+            seen["model"] = ollama_model
+            return None
+
+        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
+        workers.create_configured_judge()
+        assert seen["model"] == "qwen3.5-2b-judge"
+
+    def test_missing_pinned_model_falls_back_to_auto(self, tmp_path, patched_config, monkeypatch):
+        """指定的档位被删掉后不能卡死：退回自动规则（日志会如实报出实际用的是谁）。"""
+        from app.core import semantic
+        from app.core.app_config import AppConfig
+        from app.gui import workers
+
+        AppConfig(
+            models_dir=str(tmp_path), llm_model_key="llm:2B:Q8_0"
+        ).save(patched_config)
+
+        seen = {}
+
+        def fake_create_judge(*, ollama_model=None, model_dir=None):
+            seen["model"] = ollama_model
+            return None
+
+        monkeypatch.setattr(semantic, "create_judge", fake_create_judge)
+        workers.create_configured_judge()
+        assert seen["model"] is None, "未安装时应退回自动选择"

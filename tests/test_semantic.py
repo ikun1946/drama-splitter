@@ -235,6 +235,27 @@ class TestNullJudge:
             )
 
 
+class TestOllamaModelName:
+    """GGUF 路径 → Ollama 模型名（界面里"使用中"的档位靠它落到具体模型上）。"""
+
+    def test_2b_quant_keeps_size(self):
+        from app.core.semantic import ollama_model_name_for
+
+        assert (
+            ollama_model_name_for("models/llm/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_K_M.gguf")
+            == "qwen3.5-2b-judge"
+        )
+
+    def test_other_sizes_drop_the_missing_size(self):
+        """非 2B 的名字里没有 "2b" 片段：结果只能是 `qwen3.5-judge`，不能留下双横线。"""
+        from app.core.semantic import ollama_model_name_for
+
+        assert ollama_model_name_for("models/llm/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf") == (
+            "qwen3.5-judge"
+        )
+        assert "--" not in ollama_model_name_for("models/llm/x/Qwen3.5-JUDGE.gguf")
+
+
 class TestLocalLlmJudgeOffline:
     """不加载模型的判定器行为（模型文件缺失时也应行为正确）。"""
 

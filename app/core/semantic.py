@@ -422,11 +422,14 @@ def ollama_model_name_for(path: str | Path) -> str:
     目录约定与 `tools/fetch_llm.py` 一致：
     `models/llm/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_K_M.gguf` → `qwen3.5-2b-judge`。
     单独提成公开函数，是为了让界面里"手动指定使用中的档位"复用同一套命名规则。
+
+    注：`.replace("--", "-")` 兜住"文件名里没有 2b"的分支（size 为空串），
+    使 `qwen3.5--judge` 收敛为 `qwen3.5-judge`。
     """
     stem = Path(path).stem
     base = stem.split("-")[0].lower()  # "qwen3.5"
     size = "2b" if "2b" in stem.lower() else ""
-    return f"{base}{size}-judge".replace("--", "-")
+    return f"{base}-{size}-judge".replace("--", "-")
 
 
 class OllamaJudge(SemanticJudge):

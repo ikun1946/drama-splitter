@@ -148,7 +148,7 @@ def recommend_plan(
     usable = [c for c in recommendation.comparisons if c.ok]
     if usable:
         recommendation.chosen = min(usable, key=lambda c: c.total_cost)
-        others = [c.name for c in usable if c is not recommendation.chosen]
+        others = [c.label for c in usable if c is not recommendation.chosen]
         if others:
             recommendation.notes.append(
                 f"落选：{'、'.join(others)}（比较口径：同一代价函数下的总代价）"

@@ -151,15 +151,23 @@ def _ui_smoke() -> int:
     app.processEvents()
 
     # 核心工作流是单页三栏；设置与模型是对话框，不占工作区。
-    whisper_rows = [row for row in page.rows() if row["kind"] == "whisper"]
-    active_rows = [row for row in page.rows() if row["in_use"]]
-    if not whisper_rows:
-        print("界面自检失败：转写档位一行都没有")
+    rows = page.rows()
+    asr_rows = [row for row in rows if row["kind"] == "whisper"]
+    llm_rows = [row for row in rows if row["kind"] == "llm"]
+    if page.asr_card.title() != "语音转写" or page.llm_card.title() != "语义判断":
+        print("界面自检失败：模型清单应分为「语音转写 / 语义判断」两组卡片")
         return 1
-    if len(active_rows) != 2 and not (len(active_rows) == 1 and not any(
-        row["kind"] == "llm" for row in page.rows()
-    )):
-        print(f"界面自检失败：两组的「使用中」应各恰有一个，实际 {len(active_rows)}")
+    if len(asr_rows) != 5:
+        print(f"界面自检失败：转写档位应列出 5 档，实际 {len(asr_rows)}")
+        return 1
+    if sum(1 for row in asr_rows if row["in_use"]) != 1:
+        print("界面自检失败：转写组「使用中」应恰有一个")
+        return 1
+    if sum(1 for row in llm_rows if row["in_use"]) > 1:
+        print("界面自检失败：语义组「使用中」最多一个")
+        return 1
+    if not page.asr_status.text().startswith("使用中："):
+        print(f"界面自检失败：转写组应写明使用中的档位，实际「{page.asr_status.text()}」")
         return 1
     if len(window.menuBar().actions()) != 4:
         print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")

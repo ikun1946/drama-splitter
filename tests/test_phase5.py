@@ -455,5 +455,129 @@ class TestRecommendation:
             allowed_max=4,
         )
         text = result.describe()
-        for strategy in ("story", "suspense", "duration"):
-            assert strategy in text
+        # 输出是给人看的：用设置面板里的中文策略名，不暴露 story/suspense/duration
+        for label in ("剧情优先", "悬念优先", "时长优先"):
+            assert label in text
+        for internal in ("story", "suspense", "duration"):
+            assert internal not in text
+
+    def test_chosen_plan_is_the_cheapest_strategy(self):
+        """推荐＝同一代价函数下总代价最低者，且它的方案就是要交付的那一份。"""
+        result = recommend_plan(
+            self.build_candidates(),
+            FakeMedia(),
+            self.derived(),
+            settings_count_exact=True,
+            target_episode_count=4,
+            allowed_min=4,
+            allowed_max=4,
+        )
+        chosen = result.chosen
+        assert chosen is not None
+        assert chosen.plan is not None and chosen.solution is not None
+        assert chosen.ok and not chosen.problems
+        usable = [c for c in result.comparisons if c.ok]
+        assert all(chosen.total_cost <= c.total_cost for c in usable)
+        assert chosen.label in result.describe()
+
+
+class TestRecommendationWiring:
+    """「推荐方案」接进分析流程：三策略各解一遍，取代价最低者当方案。
+
+    直接调 ``AnalysisWorker._solve_recommended``——它只依赖媒体对象、设置与
+    可行性报告，不需要 ffmpeg/ASR，所以这条分支可以在离屏环境里真跑起来
+    （整条 ``_analyze`` 需要语音素材与转写模型，本地常年是 skip）。
+    """
+
+    @staticmethod
+    def _report():
+        from types import SimpleNamespace
+
+        from app.core.settings import DerivedParams
+
+        # FakeMedia(100s) + 目标 25s → 4 集，每集 20–30s
+        return SimpleNamespace(
+            derived=DerivedParams(
+                target_duration=Fraction(25),
+                min_duration=Fraction(20),
+                max_duration=Fraction(30),
+                total_seconds=Fraction(100),
+            ),
+            allowed_min=4,
+            allowed_max=4,
+        )
+
+    @staticmethod
+    def _candidates(times=(25, 50, 75)):
+        from app.core.candidates import CandidatePoint, CandidateSet, SOURCE_SENTENCE_END
+
+        return CandidateSet(
+            points=[
+                CandidatePoint(
+                    time=Fraction(t), frame_index=t * 25,
+                    sources=[SOURCE_SENTENCE_END], score=0.8,
+                )
+                for t in times
+            ]
+        )
+
+    @staticmethod
+    def _worker():
+        from app.gui.workers import AnalysisWorker
+
+        settings = SplitSettings(
+            split_mode=SplitMode.RECOMMEND,
+            target_duration_seconds=Fraction(25),
+        )
+        return AnalysisWorker(None, FakeMedia(), None, settings)
+
+    def test_cheapest_strategy_becomes_the_plan(self):
+        worker = self._worker()
+        logs: list[str] = []
+        failures: list[str] = []
+        worker.stage_log.connect(logs.append)
+        worker.failed.connect(failures.append)
+
+        plan, solution, problems, notes = worker._solve_recommended(
+            self._candidates(), self._report(), True, {}
+        )
+
+        assert not failures, f"不应报错：{failures}"
+        assert plan is not None and solution is not None, "推荐模式必须交出方案"
+        assert [p for p in problems if p.is_blocking] == []
+
+        text = "\n".join(logs)
+        for label in ("剧情优先", "悬念优先", "时长优先"):
+            assert label in text, f"三种策略都要写进日志：{text}"
+        assert "推荐：" in text, "日志要说明采用了哪个"
+        assert "落选：" in text, "落选者不能隐藏"
+        assert any("采用推荐策略" in note for note in notes)
+
+    def test_flexible_count_mode_also_works(self):
+        """应用里推荐模式走的是弹性集数（集数是反算出来的），这条也要覆盖。"""
+        worker = self._worker()
+        report = self._report()
+        report.allowed_min, report.allowed_max = 3, 5
+
+        plan, solution, problems, notes = worker._solve_recommended(
+            self._candidates(), report, False, {}
+        )
+
+        assert plan is not None and solution is not None
+        assert 3 <= plan.episode_count <= 5, f"集数应落在弹性区间内：{plan.episode_count}"
+
+    def test_all_strategies_failing_reports_concise_cause(self):
+        """三策略全无解时：报错要能照着改设置，且不重复整段话。"""
+        worker = self._worker()
+        failures: list[str] = []
+        worker.failed.connect(failures.append)
+
+        plan, *_ = worker._solve_recommended(
+            self._candidates(times=(10,)), self._report(), True, {}
+        )
+
+        assert plan is None, "无解时不得交出方案"
+        assert failures, "无解必须报错"
+        assert "都没有可行解" in failures[0]
+        assert "建议：" in failures[0], f"要带上可操作的建议：{failures[0]}"
+        assert failures[0].count("建议：") == 1, f"成因不应重复：{failures[0]}"

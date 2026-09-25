@@ -231,17 +231,12 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("05-设置.png", _settings_dialog)
 
-    # 06 模型对话框：选中一个"未安装"的模型，让截图里能看到选择与状态的区别
+    # 06 模型对话框：两组卡片（语音转写 / 语义判断），每行都有「使用中」与行内动作
     def _model_dialog():
         dialog = window.build_model_dialog()
         form = dialog.form
-        uninstalled = [
-            row for row in range(form.table.rowCount())
-            if "未安装" in form.table.item(row, 2).text()
-        ]
-        if uninstalled:
-            form.table.selectRow(uninstalled[0])
-        form._append("模型：可直接选择并下载，无需命令行。")
+        form.refresh()
+        form._append("模型：在行内直接下载；标着「使用中」的那一行才是分析时用的。")
         pump(app, 0.2)
         return dialog
 

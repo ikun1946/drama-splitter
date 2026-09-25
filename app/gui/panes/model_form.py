@@ -358,6 +358,7 @@ class ModelForm(QWidget):
                     "state": state.describe(),
                     "installed": state.ready,
                     "in_use": row.radio.isChecked(),
+                    "pickable": row.radio.isEnabled(),
                     "action": row.button.text(),
                 }
             )
@@ -368,8 +369,32 @@ class ModelForm(QWidget):
         return self._config.asr_model_tier or default_whisper_tier()
 
     def active_llm_key(self) -> str | None:
-        """本次分析会用的语义模型 key；``None`` 表示未指定（按体积自动挑）。"""
-        return self._config.llm_model_key
+        """本次分析会用的语义模型 key；``None`` 表示没有可用模型（降级）。
+
+        未显式指定时返回**自动挑选**的那个（按体积最大，与 ``create_judge``
+        走 Ollama 时的规则一致）——界面上必须能指出"正在用哪个"，
+        而不是含糊地说一句"自动"。
+        """
+        if self._config.llm_model_key:
+            return self._config.llm_model_key
+        spec = self._auto_llm_spec()
+        return spec.key if spec is not None else None
+
+    def _auto_llm_spec(self):
+        """自动挑选的语义模型：权重文件最大的那一个（与 locate_llm_model 同规则）。"""
+        root = self._models_root()
+        best, best_bytes = None, -1
+        for spec in installed_llm_specs(root):
+            path = installed_llm_file(spec, root)
+            if path is None:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > best_bytes:
+                best, best_bytes = spec, size
+        return best
 
     def _refresh(self) -> None:
         """旧名（工具里在用的）。"""
@@ -466,19 +491,19 @@ class ModelForm(QWidget):
             self.asr_status.setStyleSheet(danger)
 
         key = self.active_llm_key()
-        specs = installed_llm_specs(root)
+        pinned = self._config.llm_model_key
         if key:
             spec = spec_by_key(key)
             name = _short_label(spec) if spec is not None else key
             if spec is not None and installed_llm_file(spec, root) is not None:
-                self.llm_status.setText(f"使用中：{name}")
+                tail = "" if pinned else "（自动选择，点圆钮可固定）"
+                self.llm_status.setText(f"使用中：{name}{tail}")
                 self.llm_status.setStyleSheet("")
             else:
-                self.llm_status.setText(f"使用中：{name}（未安装，会用其他已装档位）")
+                fallback = self._auto_llm_spec()
+                tail = f" → 用 {_short_label(fallback)} 兜底" if fallback else " → 语义判断降级"
+                self.llm_status.setText(f"使用中：{name}（未安装{tail}）")
                 self.llm_status.setStyleSheet(danger)
-        elif specs:
-            self.llm_status.setText("使用中：未指定（按体积自动选择）")
-            self.llm_status.setStyleSheet("")
         else:
             self.llm_status.setText("未启用（候选退回规则评分）")
             self.llm_status.setStyleSheet("")

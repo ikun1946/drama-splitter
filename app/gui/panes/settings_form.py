@@ -63,7 +63,7 @@ class SettingsForm(QWidget):
         # ---- 模式 ----
         self.radio_by_duration = QRadioButton("按目标时长（系统求集数）")
         self.radio_by_count = QRadioButton("按目标集数")
-        self.radio_recommend = QRadioButton("推荐方案（先按时长估算，分析后再给剧情建议）")
+        self.radio_recommend = QRadioButton("推荐方案（自动比较剧情/悬念/时长三种策略）")
         self.radio_by_duration.setChecked(True)
         for w in (self.radio_by_duration, self.radio_by_count, self.radio_recommend):
             w.toggled.connect(self._refresh)
@@ -189,6 +189,7 @@ class SettingsForm(QWidget):
         strategy_card.body_layout.addWidget(sfield)
         strategy_card.body_layout.addWidget(self.allow_exception)
         self._strategy_card = strategy_card
+        self._strategy_field = sfield
 
         # ---- 可行性 ----
         self._feas_pill = StatusPill("可行", tone="success")

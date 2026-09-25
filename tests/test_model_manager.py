@@ -24,10 +24,14 @@ from app.core.model_manager import (
     MODEL_CATALOG,
     ModelFile,
     ModelSpec,
+    default_whisper_tier,
     delete_model,
     download_model,
     free_space_bytes,
+    installed_llm_file,
+    installed_llm_specs,
     installed_state,
+    installed_whisper_tiers,
     llm_spec,
     spec_by_key,
     validate_models_root,
@@ -351,12 +355,64 @@ class TestDelete:
 class TestAppConfig:
     def test_roundtrip(self, tmp_path):
         path = tmp_path / "config.json"
-        config = AppConfig(models_dir="D:/models", last_download_key="whisper:small")
+        config = AppConfig(
+            models_dir="D:/models",
+            asr_model_tier="tiny",
+            llm_model_key="llm:2B:Q4_K_M",
+        )
         config.save(path)
         loaded = AppConfig.load(path)
         assert loaded.models_dir == "D:/models"
-        assert loaded.last_download_key == "whisper:small"
+        assert loaded.asr_model_tier == "tiny"
+        assert loaded.llm_model_key == "llm:2B:Q4_K_M"
         assert loaded.endpoint == "https://hf-mirror.com"
+
+    def test_unknown_model_choices_fall_back_to_none(self, tmp_path):
+        """手改配置写了坏值：回落 None（用默认），不能带病启动。
+
+        注意取舍：**格式正确但本机没装的**键（如 "llm:9B:Q6_K"）会保留下来——
+        它可能来自"下载后手动放进目录"，界面会按实际探测把它标成未安装。
+        这里拦的是**解析不出**的坏值（少一段、类型不对）。
+        """
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "asr_model_tier": "huge",
+                    "llm_model_key": "llm:2B",
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = AppConfig.load(path)
+        assert loaded.asr_model_tier is None
+        assert loaded.llm_model_key is None
+
+    def test_wellformed_key_survives_roundtrip(self, tmp_path):
+        """能解析的键原样保留：是不是"装在本机"由界面按目录探测，不在这里判。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"llm_model_key": "llm:9B:Q6_K"}), encoding="utf-8"
+        )
+        assert AppConfig.load(path).llm_model_key == "llm:9B:Q6_K"
+
+    def test_non_llm_key_is_rejected(self, tmp_path):
+        """语义模型的"使用中"必须是 llm 类；whisper 的键不算。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"llm_model_key": "whisper:small"}), encoding="utf-8"
+        )
+        assert AppConfig.load(path).llm_model_key is None
+
+    def test_legacy_last_download_key_is_ignored(self, tmp_path):
+        """旧配置里的 last_download_key 已被"使用中"取代：忽略而不是报错。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"last_download_key": "whisper:small"}), encoding="utf-8"
+        )
+        loaded = AppConfig.load(path)
+        assert loaded.asr_model_tier is None
+        assert not hasattr(loaded, "last_download_key")
 
     def test_missing_file_yields_defaults(self, tmp_path):
         loaded = AppConfig.load(tmp_path / "nope.json")
@@ -372,6 +428,78 @@ class TestAppConfig:
     def test_resolved_dir_prefers_configured(self, tmp_path):
         config = AppConfig(models_dir=str(tmp_path / "custom"))
         assert config.resolved_models_dir() == tmp_path / "custom"
+
+
+# ---------------------------------------------------------------------------
+# 「使用中」的探测：哪些档位装了、默认档位是哪个
+# ---------------------------------------------------------------------------
+
+
+def _install_whisper(root: Path, tier: str) -> None:
+    """造一个"完整安装"的 whisper 目录（内容长度满足下限）。"""
+    directory = root / f"faster-whisper-{tier}"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text("{}", encoding="utf-8")
+    (directory / "model.bin").write_bytes(b"\0" * (1024 * 1024))
+    (directory / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (directory / "vocabulary.txt").write_text("a", encoding="utf-8")
+
+
+def _install_llm(root: Path, size: str, quant: str, *, megabytes: int = 1) -> Path:
+    """造一个 gguf 文件。
+
+    本组用例验证的是"扫描目录 / 按文件名反解档位"，与体积下限无关，
+    所以用小文件即可（真实下载的 1.2GB 权重在这里没有意义）。
+    """
+    spec = llm_spec(size, quant)
+    directory = spec.target_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / spec.big_file
+    path.write_bytes(b"\0" * (megabytes * 1024 * 1024))
+    return path
+
+
+class TestInstalledChoices:
+    def test_default_tier_matches_asr_settings(self):
+        """默认转写档位必须与 AsrSettings 的默认值一致，否则两处会悄悄漂移。"""
+        from app.core.asr import AsrSettings
+
+        assert AsrSettings().model_tier == default_whisper_tier()
+
+    def test_installed_tiers_only_lists_complete(self, tmp_path):
+        _install_whisper(tmp_path, "tiny")
+        # small 缺 model.bin → 不算已安装
+        (tmp_path / "faster-whisper-small").mkdir()
+        (tmp_path / "faster-whisper-small" / "config.json").write_text("{}", encoding="utf-8")
+        assert installed_whisper_tiers(tmp_path) == ["tiny"]
+
+    def test_installed_tiers_follow_catalog_order(self, tmp_path):
+        for tier in ("medium", "tiny", "small"):
+            _install_whisper(tmp_path, tier)
+        assert installed_whisper_tiers(tmp_path) == ["tiny", "small", "medium"]
+
+    def test_installed_llm_specs_parses_filenames(self, tmp_path):
+        _install_llm(tmp_path, "2B", "Q4_K_M")
+        _install_llm(tmp_path, "2B", "Q8_0")
+        _install_llm(tmp_path, "9B", "Q4_K_M")
+        keys = [spec.key for spec in installed_llm_specs(tmp_path)]
+        assert keys == ["llm:2B:Q4_K_M", "llm:2B:Q8_0", "llm:9B:Q4_K_M"]
+
+    def test_installed_llm_specs_skips_unknown_names(self, tmp_path):
+        """解析不出档位的 GGUF 直接跳过：宁可少列，也不猜一个不存在的档位。"""
+        _install_llm(tmp_path, "2B", "Q4_K_M")
+        other = tmp_path / "llm" / "mystery-GGUF"
+        other.mkdir(parents=True)
+        (other / "custom-model.gguf").write_bytes(b"\0" * (1024 * 1024))
+        assert [spec.key for spec in installed_llm_specs(tmp_path)] == ["llm:2B:Q4_K_M"]
+
+    def test_installed_llm_specs_empty_when_no_directory(self, tmp_path):
+        assert installed_llm_specs(tmp_path) == []
+
+    def test_installed_llm_file_points_at_weight(self, tmp_path):
+        path = _install_llm(tmp_path, "2B", "Q4_K_M")
+        assert installed_llm_file(llm_spec("2B", "Q4_K_M"), tmp_path) == path
+        assert installed_llm_file(llm_spec("2B", "Q8_0"), tmp_path) is None
 
 
 # ---------------------------------------------------------------------------
