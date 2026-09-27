@@ -39,11 +39,15 @@
 | 模型（对话框） | [06-模型](docs/screenshots/06-模型.png) |
 | 导出（对话框） | [07-导出](docs/screenshots/07-导出.png) |
 | 厂商管理（对话框） | [08-厂商管理](docs/screenshots/08-厂商管理.png) |
+| 选择云端模型（对话框） | [09-选择云端模型](docs/screenshots/09-选择云端模型.png) |
 
 ![审核](docs/screenshots/04-工作台-审核.png)
 
 审核要求「连看切点前后」，因此提供三种检视方式：播放整集、播放切点前后 ±3 秒、
 以及**用已导出的成片连看相邻两集**（后者能发现编码层面的衔接问题，前者只能验证规划）。
+播放时能听到原声：画面是 FFmpeg 解帧直出（逐帧准确），声音由并行的 `ffplay`
+只放音频，与画面一起启停；放的是左栏选中的那条主对白轨。这套 FFmpeg 若没带
+`ffplay`（精简构建），预览会自动退回无声，不影响画面与导出。
 
 ## 模型下载（界面内完成）
 
@@ -79,7 +83,8 @@
 除了本地模型，**语音转写与语义判断**也都可以走厂商 API：**厂商可自定义**，预置十几家
 （国内 DeepSeek / Kimi / 智谱 / 百炼 / 混元 / 硅基流动 / 星火 / 阶跃，海外 OpenAI / Groq /
 Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方舟）。设置在
-**工具 → 模型管理 → 云端模型（厂商 API）**，或直接 **工具 → 厂商管理…**。
+**工具 → 模型管理 → 云端模型（厂商 API）**，或直接 **工具 → 厂商管理…**；
+只想挑一个模型时用 **工具 → 选择云端模型…**（见下）。
 协议与厂商解耦，设计见 [docs/云端模型接入_设计.md](docs/云端模型接入_设计.md) §11。
 
 **厂商是数据，协议是信封**：加一家厂商 = 加一份预置数据（`DEFAULT_PROFILES`），
@@ -103,8 +108,15 @@ Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方�
   拉一次该厂商的 `GET {base_url}/models` 填进去（同一厂商第二次进直接读内存缓存，
   也可点「刷新模型列表」强制重取）；接口不返回清单（如火山转写专有协议）或请求
   失败时，会在提示行如实写明原因并让你手动输入——下拉里没有的模型名照样能填。
+- **专门挑模型的入口**：「工具 → 选择云端模型…」——顶部切「语义判断 / 语音转写」，
+  下拉里只有**已配 Key 且能连通**的厂商（打开时实时拉一次各家 `/models`，拉不到的
+  不出现、原因写在状态行），悬停厂商项即列出它有哪些模型，选中保存就把模型名写回
+  那家厂商。这一页**只管模型名**：是否允许外发素材、是否切到云端，仍在
+  「模型管理 → 云端模型」里决定，页面底部会如实写明"还差什么才生效"。
 - **默认零外发**：档案默认未启用、未勾选「允许外发素材」；两个开关任一为关，
-  请求一个都不发，并在日志里说明"选了云端但没生效"的具体原因。
+  分析时不会向厂商发任何素材请求，并在日志里说明"选了云端但没生效"的具体原因。
+  （「选择云端模型」打开时会拿 Key 去查各家的 `/models` 清单——只查清单，
+  不带任何素材内容；不填 Key 的厂商连这个请求都不会发。）
 - **两条能力各自独立**：转写与语义判断分别勾选、分别测连通、分别切换；
   转写测不通不影响已测通的语义判断。
 - **外发范围写在界面上**：转写＝**整条音轨**（按 600 秒分块上传，优先压成 mp3，
@@ -193,7 +205,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §6.1 规则草案兜底路径 | `app/core/planner.py` | 完成 |
 | §10.1–10.2 候选图 + 动态规划 | `app/core/solver.py` | 完成 |
 | §11 语义判断、请求校验、预算与降级 | `app/core/semantic.py` | 完成（模型接口就绪，推理栈待接入） |
-| § 云端模型（厂商 API，默认关闭；协议化多厂商 + 厂商管理，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_http.py`、`cloud_openai.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge`、`app/gui/panes/provider_form.py` | 完成（真机冒烟待跑，需 Key） |
+| § 云端模型（厂商 API，默认关闭；协议化多厂商 + 厂商管理 + 选择云端模型，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_http.py`、`cloud_openai.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge`、`app/gui/panes/provider_form.py`、`model_pick_form.py` | 完成（真机冒烟待跑，需 Key） |
 | §11 事件索引与整集复核 | `app/core/semantic.py` / `review.py` | 完成 |
 | § 三种策略（剧情/悬念/时长） | `solver.py` + `recommend.py` | 完成 |
 | §7.2 单集字幕导出（SRT） | `app/core/episode_files.py` | 完成 |
@@ -373,8 +385,9 @@ app/gui/           界面（PySide6-Essentials）
     settings_form.py   分集设置表单（由对话框承载，取消即回滚）
     model_form.py      模型表单（两组卡片 / 「使用中」/ 下载删除 / 云端卡片只留"选厂商+Key+测通"）
     provider_form.py   厂商表单（列表 + 字段编辑 / 协议显隐 / 只读外发预览）
+    model_pick_form.py 选择云端模型（能力切换 / 厂商下拉悬停出清单 / 只写模型名）
     export_form.py     导出表单（§37 前置检查在这里做，决策点在对话框）
-  dialogs/           对话框：DialogShell + 设置 / 模型 / 厂商 / 导出
+  dialogs/           对话框：DialogShell + 设置 / 模型 / 选模型 / 厂商 / 导出
     base.py            外壳与「自动化里不许 exec()」的约定
   widgets/           通用控件
     timeline.py        轻量时间轴（静态层缓存 + 播放头局部重绘）

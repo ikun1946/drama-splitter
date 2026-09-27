@@ -32,7 +32,13 @@ from PySide6.QtWidgets import (
 from ..core.app_config import AppConfig
 from ..core.plan import BoundaryPlan
 from ..core.settings import SplitSettings
-from .dialogs import ExportDialog, ModelDialog, ProviderDialog, SettingsDialog
+from .dialogs import (
+    ExportDialog,
+    ModelDialog,
+    ModelPickDialog,
+    ProviderDialog,
+    SettingsDialog,
+)
 from .stage import Stage, primary_action, stage_caption
 from .state import ProjectState, payload_text
 from .theme import apply_theme, current_mode
@@ -77,11 +83,12 @@ class MainWindow(QMainWindow):
         central.setLayout(body)
         self.setCentralWidget(central)
 
-        # 三个对话框按需构造（见 build_*_dialog）
+        # 五个对话框按需构造（见 build_*_dialog）
         self.settings_dialog: SettingsDialog | None = None
         self.model_dialog: ModelDialog | None = None
         self.export_dialog: ExportDialog | None = None
         self.provider_dialog: ProviderDialog | None = None
+        self.model_pick_dialog: ModelPickDialog | None = None
 
         self._connect()
         self._build_menu()
@@ -166,6 +173,7 @@ class MainWindow(QMainWindow):
         tools_menu = bar.addMenu("工具")
         self._add_action(tools_menu, "分集设置…", self.open_settings_dialog)
         self._add_action(tools_menu, "模型管理…", self.open_model_dialog)
+        self._add_action(tools_menu, "选择云端模型…", self.open_model_pick_dialog)
         self._add_action(tools_menu, "厂商管理…", self.open_provider_dialog)
         self._add_action(tools_menu, "导出…", self._start_export, "Ctrl+E")
 
@@ -206,6 +214,17 @@ class MainWindow(QMainWindow):
         """构建厂商管理对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
         self.provider_dialog = ProviderDialog(self.state, self, config_path=config_path)
         return self.provider_dialog
+
+    def build_model_pick_dialog(self, *, config_path=None) -> ModelPickDialog:
+        """构建「选择云端模型」对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
+        self.model_pick_dialog = ModelPickDialog(self.state, self, config_path=config_path)
+        return self.model_pick_dialog
+
+    def open_model_pick_dialog(self, *, config_path=None) -> None:
+        """菜单「工具 → 选择云端模型…」：改完模型名回来要让模型页重新读盘。"""
+        self.build_model_pick_dialog(config_path=config_path).exec()
+        if self.model_dialog is not None:
+            self.model_dialog.form.reload_after_provider_edit()
 
     def _on_manage_providers_requested(self, config_path=None) -> None:
         """模型页的「管理厂商…」：打开对话框，回来后刷新模型页的云端卡片。"""
@@ -432,7 +451,9 @@ class MainWindow(QMainWindow):
 
     # ---- 活跃任务登记 --------------------------------------------------
 
-    WORKER_NAMES = ("probe", "analysis", "export", "download", "judge_probe", "model_list")
+    WORKER_NAMES = (
+        "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
+    )
 
     def register_worker(self, name: str, worker) -> None:
         """登记一个刚开始运行的后台任务，并在结束时自动注销。

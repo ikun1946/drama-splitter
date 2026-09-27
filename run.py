@@ -116,7 +116,7 @@ def _ui_smoke() -> int:
     """离屏构建整个界面并自检。
 
     打包版的界面问题（漏打模块、缺 Qt 插件）无法靠 `--self-check` 发现——
-    那个入口根本不碰界面。这里把界面构建一遍，并把三个对话框各构造一次、
+    那个入口根本不碰界面。这里把界面构建一遍，并把五个对话框各构造一次、
     走一遍模型清单，因此可以作为"打包产物是否完整"的验收手段。
 
     对话框只 ``show()`` 不 ``exec()``：实例级模态在离屏环境会永久阻塞。
@@ -153,6 +153,21 @@ def _ui_smoke() -> int:
         app.processEvents()
         print(f"  {label}对话框：可构造、可显示（{dialog.width()}×{dialog.height()}）")
         dialog.close()
+
+    # 「选择云端模型」用一份空配置构造：本自检是打包验收，绝不能发网络请求
+    # （真实配置里若存了 Key，打开这个对话框就会去拉各家的 /models）
+    import tempfile
+    from pathlib import Path
+
+    pick_dialog = window.build_model_pick_dialog(
+        config_path=Path(tempfile.mkdtemp()) / "config.json"
+    )
+    pick_dialog.show()
+    app.processEvents()
+    print(f"  选择云端模型对话框：可构造、可显示（{pick_dialog.width()}×{pick_dialog.height()}）")
+    print(f"    厂商下拉：{pick_dialog.form.provider_combo.count()} 家（空配置下为 0）")
+    print(f"    状态行：{pick_dialog.form.status_label.text()}")
+    pick_dialog.close()
 
     provider_dialog = window.build_provider_dialog()
     provider_dialog.show()

@@ -181,6 +181,8 @@ class TestPlayback:
         player = StreamPlayer()
         player.set_source(assets["cfr"], size=(320, 180))
         player.set_fps(Fraction(25))
+        # 测试不该发出声音：这条只验证画面通道（音频通道的启停在下面单测）
+        player.set_audio_enabled(False)
         frames: list = []
         errors: list[str] = []
         positions: list[float] = []
@@ -200,6 +202,142 @@ class TestPlayback:
         assert positions, "播放头位置应有回调（时间轴/底栏靠它刷新）"
         assert playing_position > 0.4, f"播放位置应推进，实际 {playing_position:.3f}s"
         assert max(positions) > playing_position - 0.2, "位置回调应覆盖播放过程"
+
+
+class TestPreviewAudio:
+    """回归：预览播放以前完全没有声音。
+
+    画面是"FFmpeg 解帧 → QImage"，天然没有音频通道（命令里带 ``-an``）。现在
+    播放时并行起一个只放声音的 ffplay（同一文件、同一 ``-ss`` 起点），暂停立刻
+    收声。这里不真的出声——把 Popen 换成替身，只断言"命令对不对、启停时机对不对"。
+    """
+
+    class _FakeProc:
+        """Popen 替身：视频通道要 stdout/poll/terminate，音频通道要 poll/terminate。"""
+
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.stdout = None      # 让读帧线程立刻结束，测试里不真解码
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.terminated = True
+
+    def _player(self, monkeypatch):
+        """播放器 + 替身 Popen；返回 (player, 所有命令行, 所有替身进程)。
+
+        先构造播放器再打桩：``StreamPlayer.__init__`` 内部会跑一次
+        ``ffmpeg -version`` 定位工具链（走 ``subprocess.run`` → ``Popen``），
+        提前打桩会把它一起换掉。
+        """
+        from pathlib import Path
+
+        from app.gui import frame_source
+
+        player = frame_source.StreamPlayer()
+        spawned: list[list[str]] = []
+        procs: list = []
+
+        def fake_popen(cmd, **kwargs):
+            spawned.append(list(cmd))
+            proc = self._FakeProc(list(cmd))
+            procs.append(proc)
+            return proc
+
+        monkeypatch.setattr(frame_source.subprocess, "Popen", fake_popen)
+        player._ffmpeg = "ffmpeg.exe"
+        player._ffplay = Path("ffplay.exe")     # 不依赖本机是否带 ffplay
+        return player, spawned, procs
+
+    @staticmethod
+    def _audio_procs(spawned, procs):
+        """挑出音频通道（视频通道的命令里没有 -nodisp）。"""
+        return [proc for cmd, proc in zip(spawned, procs) if "-nodisp" in cmd]
+
+    def test_audio_command_spans_the_range_and_picks_the_track(self, qapp):
+        from pathlib import Path
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("drama.mp4", size=(320, 180))
+        player._ffplay = Path("ffplay.exe")
+        player.set_audio_track(2)
+        player.set_range(10.0, 20.0)
+
+        cmd = player._audio_command(10.0)
+        assert cmd is not None
+        assert cmd[0] == "ffplay.exe"
+        assert "-nodisp" in cmd, "不能弹出 ffplay 窗口"
+        assert "-vn" in cmd, "只解音频，别重复解一遍画面"
+        assert "-autoexit" in cmd, "播完自己退出，别留孤儿进程"
+        assert cmd[cmd.index("-ast") + 1] == "2", "要放左栏选中的那条音轨"
+        assert cmd[cmd.index("-ss") + 1] == "10.000000", "从播放头起播"
+        assert cmd[cmd.index("-t") + 1] == "10.000000", "只放到本段结束"
+        assert cmd[cmd.index("-i") + 1] == "drama.mp4"
+
+    def test_audio_command_degrades_quietly(self, qapp):
+        """没有 ffplay、没有源、或已静音 → 返回 None（画面照常播，不报错）。"""
+        from pathlib import Path
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("drama.mp4", size=(320, 180))
+        player._ffplay = None
+        assert player._audio_command(0.0) is None, "这套 FFmpeg 没带 ffplay 时应无声降级"
+
+        player._ffplay = Path("ffplay.exe")
+        player.set_audio_enabled(False)
+        assert player._audio_command(0.0) is None, "静音后不该再起音频进程"
+
+        player.set_audio_enabled(True)
+        player.set_range(0.0, None)
+        cmd = player._audio_command(5.0)
+        assert cmd is not None and "-t" not in cmd, "播到片尾时不该有 -t 上限"
+
+    def test_play_starts_audio_and_pause_stops_it(self, qapp, monkeypatch):
+        player, spawned, procs = self._player(monkeypatch)
+        player.set_source("drama.mp4", size=(320, 180))
+        player.set_audio_track(1)
+        player.set_range(0.0, 30.0)
+
+        player.play()
+        audio = self._audio_procs(spawned, procs)
+        assert len(audio) == 1, f"播放时应起一条音频通道（此前完全没有声音）：{spawned}"
+        assert not audio[0].terminated
+
+        player.pause()
+        assert audio[0].terminated, "暂停必须收声，不能留一个还在响的 ffplay"
+        assert player._audio is None
+
+    def test_natural_finish_also_stops_audio(self, qapp, monkeypatch):
+        """自然播完（``_on_tick`` 的收尾）也要收声——这条路最容易漏。"""
+        from PySide6.QtCore import QTimer
+
+        player, spawned, procs = self._player(monkeypatch)
+        player.set_source("drama.mp4", size=(320, 180))
+        player.set_range(0.0, 1.0)
+        player.play()
+        audio = self._audio_procs(spawned, procs)
+        assert len(audio) == 1
+
+        # 替身的读帧线程立刻结束 → 头一拍定时器就会判定"本段播完"
+        QTimer.singleShot(300, qapp.quit)
+        qapp.exec()
+
+        assert not player.is_playing
+        assert audio[0].terminated, "播完必须收声"
+        assert player._audio is None
 
 
 def _import_and_wait(window, qapp, path, timeout: float = 30.0) -> None:
@@ -2046,3 +2184,260 @@ class TestProviderDialog:
         profile = saved.profiles().get("volc")
         assert profile.judge_model == DEFAULT_PROFILES[0].judge_model, "回到内置默认"
         assert profile.api_key == "", "恢复默认要清掉已保存的 Key"
+
+
+class TestModelPickDialog:
+    """「选择云端模型」：只列能连通的厂商、悬停出清单、只写模型名。
+
+    界面测试绝不联网：扫描 worker 换成脚本化的假实现（真网络在
+    ``tools/gui_smoke.py`` 与真机上验证）。
+    """
+
+    @staticmethod
+    def _write_config(config_file, providers):
+        from app.core.app_config import AppConfig
+
+        config = AppConfig.load(config_file)
+        config.providers = providers
+        config.save(config_file)
+
+    def _open(self, window, qapp, tmp_path, monkeypatch, providers, results):
+        """构造对话框；``results`` 是 {厂商 id: 模型清单 或 失败原因}。"""
+        from PySide6.QtCore import QObject, Signal as QtSignal
+
+        from app.gui.panes import model_pick_form as module
+
+        started: list[list[str]] = []
+
+        class FakeScan(QObject):
+            probed = QtSignal(str, object)
+            unresolved = QtSignal(str, str)
+            finished_ok = QtSignal()
+
+            def __init__(self, profiles, parent=None):
+                super().__init__(parent)
+                self.profiles = list(profiles)
+
+            def isRunning(self):  # noqa: N802 - 与 QThread 同名
+                return False
+
+            def cancel(self):  # noqa: N802
+                self.cancelled = True
+
+            def start(self):  # noqa: N802
+                started.append([p.id for p in self.profiles])
+                for profile in self.profiles:
+                    outcome = results.get(profile.id)
+                    if isinstance(outcome, str):
+                        self.unresolved.emit(profile.id, outcome)
+                    else:
+                        self.probed.emit(profile.id, list(outcome or []))
+                self.finished_ok.emit()
+
+        monkeypatch.setattr(module, "ModelScanWorker", FakeScan)
+        config_file = tmp_path / "config.json"
+        self._write_config(config_file, providers)
+        dialog = window.build_model_pick_dialog(config_path=config_file)
+        dialog.show()
+        qapp.processEvents()
+        return dialog, dialog.form, config_file, started
+
+    @staticmethod
+    def _two_providers():
+        """甲：两条能力都走 OpenAI 兼容；乙：转写走火山专有协议。"""
+        return [
+            {
+                "id": "my-a",
+                "label": "甲厂",
+                "base_url": "https://a.example.com/v1",
+                "api_key": "sk-a",
+                "judge_protocol": "openai",
+                "asr_protocol": "openai",
+            },
+            {
+                "id": "my-b",
+                "label": "乙厂",
+                "base_url": "https://b.example.com/v1",
+                "api_key": "sk-b",
+                "judge_protocol": "openai",
+                "asr_protocol": "volc_ark",
+                "asr_endpoint": "ep-b",
+                "asr_resource_id": "rid-b",
+            },
+        ]
+
+    def test_lists_only_connected_providers(self, window, qapp, tmp_path, monkeypatch):
+        """探测成功才进下拉；失败的进状态行（不静默消失）。"""
+        dialog, form, _cfg, started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(),
+            {"my-a": ["my-chat", "my-reasoner"], "my-b": "鉴权失败：HTTP 401"},
+        )
+        try:
+            assert started == [["my-a", "my-b"]], "两家都该探一次"
+            assert form.available_ids() == ["my-a"], "只有连通的进列表"
+            status = form.status_label.text()
+            assert "可用 1 家：甲厂" in status
+            assert "未通过——乙厂：鉴权失败：HTTP 401" in status
+        finally:
+            dialog.close()
+
+    def test_hover_exposes_the_model_list(self, window, qapp, tmp_path, monkeypatch):
+        """悬停厂商项（以及收起状态悬停输入框）都能看到该厂商的模型清单。"""
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(),
+            {"my-a": ["my-chat", "my-reasoner"], "my-b": []},
+        )
+        try:
+            hover = form.provider_combo.itemData(0, Qt.ItemDataRole.ToolTipRole)
+            assert "可用模型（2 个）" in hover
+            assert "my-chat" in hover and "my-reasoner" in hover
+            assert "my-chat" in form.provider_combo.toolTip(), "收起状态悬停也要能看"
+            items = [form.model_combo.itemText(i) for i in range(form.model_combo.count())]
+            assert items == ["my-chat", "my-reasoner"]
+            assert form.model_combo.isEditable(), "清单外的模型名要能直接输入"
+        finally:
+            dialog.close()
+
+    def test_hover_truncates_long_lists(self, window, qapp, tmp_path, monkeypatch):
+        many = [f"model-{index:02d}" for index in range(40)]
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers()[:1], {"my-a": many},
+        )
+        try:
+            hover = form.provider_combo.itemData(0, Qt.ItemDataRole.ToolTipRole)
+            assert "…（共 40 个）" in hover, "上百个模型不能整串铺进 tooltip"
+            assert "model-39" not in hover
+        finally:
+            dialog.close()
+
+    def test_capability_switch_changes_candidates_and_refills(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """切能力换候选集，并按新能力回填模型名；已探过的厂商不重复打网络。"""
+        dialog, form, config_file, started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(),
+            {"my-a": ["my-asr", "my-chat"], "my-b": ["ep-b-model"]},
+        )
+        try:
+            from app.core.app_config import AppConfig
+            from app.core.providers import CAP_ASR
+
+            config = AppConfig.load(config_file)
+            config.providers = [
+                dict(self._two_providers()[0], asr_model_name="my-asr"),
+                self._two_providers()[1],
+            ]
+            config.save(config_file)
+            form.refresh()
+            assert form.available_ids() == ["my-a", "my-b"]
+
+            form.set_capability(CAP_ASR)
+            assert form.capability() == CAP_ASR
+            assert form.available_ids() == ["my-a"], "乙厂转写走火山专有协议，没有 /models"
+            assert form.model_combo.currentText() == "my-asr", "按新能力回填模型名"
+            assert len(started) == 1, "已探过的厂商不该重复请求"
+        finally:
+            dialog.close()
+
+    def test_save_writes_model_name_only(self, window, qapp, tmp_path, monkeypatch):
+        """保存只改模型名：外发授权与"切到云端"仍由「模型管理」把关。"""
+        from app.core.app_config import AppConfig
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(),
+            {"my-a": ["my-chat", "my-reasoner"], "my-b": []},
+        )
+        try:
+            assert form.selected_profile_id() == "my-a"
+            form.model_combo.setEditText("my-reasoner")
+            form._on_save()
+
+            saved = AppConfig.load(config_file)
+            profile = saved.profiles().get("my-a")
+            assert profile.judge_model == "my-reasoner"
+            assert profile.enabled is False, "本页不碰启用开关"
+            assert profile.allow_upload is False, "外发授权只能由用户自己勾"
+            assert saved.backend_for("judge") == "local", "本页不切后端"
+            assert "已保存" in form.effect_label.text()
+            assert "尚未生效" in form.effect_label.text()
+        finally:
+            dialog.close()
+
+    def test_save_without_model_is_refused(self, window, qapp, tmp_path, monkeypatch):
+        import json
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(),
+            {"my-a": ["my-chat"], "my-b": []},
+        )
+        try:
+            before = config_file.read_text(encoding="utf-8")
+            form.model_combo.setEditText("")
+            form._on_save()
+            assert "不能为空" in form.hint_label.text()
+            assert config_file.read_text(encoding="utf-8") == before, "拦下就不该落盘"
+            assert json.loads(before), "前置：配置本身是合法 JSON"
+        finally:
+            dialog.close()
+
+    def test_effect_line_reports_in_use_model(self, window, qapp, tmp_path, monkeypatch):
+        from app.core.app_config import AppConfig
+
+        providers = self._two_providers()
+        providers[0].update(
+            {"judge_model": "my-chat", "enabled": True, "allow_upload": True}
+        )
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch, providers,
+            {"my-a": ["my-chat"], "my-b": []},
+        )
+        try:
+            config = AppConfig.load(config_file)
+            config.backend_prefs = {"judge": "my-a", "asr": "local"}
+            config.save(config_file)
+            form.refresh()
+            assert "已生效" in form.effect_label.text()
+            assert "云端语义判断" in form.effect_label.text()
+        finally:
+            dialog.close()
+
+    def test_no_key_means_zero_requests(self, window, qapp, tmp_path, monkeypatch):
+        """没有一家配 Key 时零请求，并说清下一步怎么做。"""
+        dialog, form, _cfg, started = self._open(
+            window, qapp, tmp_path, monkeypatch, [], {},
+        )
+        try:
+            assert started == [], "没有 Key 不许发请求"
+            assert form.available_ids() == []
+            assert "还没有配好 API Key" in form.status_label.text()
+            assert "DRAMA_<厂商 id>_API_KEY" in form.status_label.text()
+        finally:
+            dialog.close()
+
+    def test_missing_base_url_is_named(self, window, qapp, tmp_path, monkeypatch):
+        """填了 Key 却没填地址：点名说清，也不发请求（打不到目标）。"""
+        dialog, form, _cfg, started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            [
+                {
+                    "id": "my-a",
+                    "label": "甲厂",
+                    "base_url": "",
+                    "api_key": "sk-a",
+                    "judge_protocol": "openai",
+                    "asr_protocol": "openai",
+                }
+            ],
+            {},
+        )
+        try:
+            assert started == []
+            assert "填了 Key 但缺接口地址：甲厂" in form.status_label.text()
+        finally:
+            dialog.close()

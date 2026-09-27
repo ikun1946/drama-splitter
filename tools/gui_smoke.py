@@ -347,6 +347,31 @@ def main() -> int:
     print("  模型清单刷新正常")
     model_dialog.close()
 
+    # ---- 选择云端模型对话框 ------------------------------------------------
+    # 刻意用一份**空配置**构造：这台机器上若存了 API Key，打开这个对话框就会真去
+    # 拉各家的 /models——冒烟脚本不该依赖网络，更不该把用户的额度花掉。
+    print("[选模型] 对话框：只列能连通的厂商、悬停出清单、只写模型名…")
+    import tempfile
+
+    from app.core.providers import CAP_ASR
+
+    pick_dialog = window.build_model_pick_dialog(
+        config_path=Path(tempfile.mkdtemp()) / "config.json"
+    )
+    pick_dialog.show()
+    app.processEvents()
+    assert pick_dialog.isVisible(), "选择云端模型对话框未显示"
+    pick = pick_dialog.form
+    assert pick.provider_combo.count() == 0, "空配置下不该有可用厂商"
+    assert pick.status_label.text(), "没有可用厂商时必须说清原因与下一步"
+    print(f"  标题：{pick_dialog.windowTitle()}；厂商下拉 {pick.provider_combo.count()} 家")
+    print(f"  状态行：{pick.status_label.text()}")
+    pick.set_capability(CAP_ASR)
+    app.processEvents()
+    assert pick.capability() == CAP_ASR, "能力切换应改变候选集"
+    print("  能力切换正常（语义判断 / 语音转写）")
+    pick_dialog.close()
+
     # ---- 厂商管理对话框 ----------------------------------------------------
     print("[厂商] 对话框：内置不可删、按协议显隐字段…")
     from app.core.providers import DEFAULT_PROFILES, PROTO_OPENAI, PROTO_VOLC_ARK

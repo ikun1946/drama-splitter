@@ -52,6 +52,7 @@ __all__ = [
     "ModelDownloadWorker",
     "JudgeProbeWorker",
     "ModelListWorker",
+    "ModelScanWorker",
 ]
 
 
@@ -677,3 +678,40 @@ class ModelListWorker(BaseWorker):
             self.fail(str(exc))
             return
         self.listed.emit(models)
+
+
+class ModelScanWorker(BaseWorker):
+    """顺序探测**多家**厂商的模型清单（供「选择云端模型」）。
+
+    与 :class:`ModelListWorker` 的区别：那个是"把这一家的清单填进表单"，这个是
+    "先筛出哪几家能用"。因此边探测边汇报——第一家通了界面立刻就能显示，不必等
+    全部扫完；某一家超时也不会拖住其余各家（每家的超时由 `list_models` 自己兜）。
+
+    **只探测能出清单的协议**：调用方先按协议与 Key 过滤好（火山转写的专有协议
+    没有清单接口），被传进来的每一家都应当是可拉 /models 的；万一仍然失败，
+    原因如实经 ``unresolved`` 汇报，界面据此说明这家为什么不在列表里。
+    """
+
+    probed = Signal(str, object)    # profile_id, list[str]
+    unresolved = Signal(str, str)   # profile_id, 不可用原因
+
+    def __init__(self, profiles, parent=None) -> None:
+        super().__init__(parent)
+        self._profiles = list(profiles)
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.cloud import list_models
+
+        for profile in self._profiles:
+            if self.cancelled:
+                self.finish_cancelled()
+                return
+            try:
+                models = list_models(profile)
+            except ProviderError as exc:
+                self.unresolved.emit(profile.id, exc.describe())
+                continue
+            except Exception as exc:  # noqa: BLE001 - 任何异常都算"这家不通"
+                self.unresolved.emit(profile.id, str(exc))
+                continue
+            self.probed.emit(profile.id, models)
