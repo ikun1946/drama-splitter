@@ -58,6 +58,9 @@ class FfmpegBinaries:
 
     ffmpeg: Path
     ffprobe: Path
+    # ffplay 是可选的：只用于预览播放时出声（见 gui/frame_source.py 的音频通道）。
+    # 官方完整构建里与 ffmpeg 同目录，精简构建可能不带——那时候预览仍然只有画面。
+    ffplay: Path | None = None
     version: str = ""
     encoders: frozenset[str] = field(default_factory=frozenset)
 
@@ -142,7 +145,21 @@ def _finalize(ffmpeg: Path, ffprobe: Path) -> FfmpegBinaries:
             version = first_line[len("ffmpeg version ") :].split()[0]
     except (OSError, subprocess.SubprocessError):
         version = "unknown"
-    return FfmpegBinaries(ffmpeg=ffmpeg, ffprobe=ffprobe, version=version)
+    return FfmpegBinaries(
+        ffmpeg=ffmpeg, ffprobe=ffprobe, ffplay=_find_ffplay(ffmpeg), version=version
+    )
+
+
+def _find_ffplay(ffmpeg: Path) -> Path | None:
+    """找 ffplay：先看 ffmpeg 同目录，再退回 PATH。
+
+    找不到不是错误——预览播放会退化成"只有画面"（与旧行为一致）。
+    """
+    exe = "ffplay.exe" if sys.platform == "win32" else "ffplay"
+    beside = ffmpeg.with_name(exe)
+    if beside.exists():
+        return beside
+    return _which("ffplay") or _search_fallback("ffplay")
 
 
 def check_encoders(binaries: FfmpegBinaries, names: Sequence[str] = ("libx264", "aac")) -> frozenset[str]:

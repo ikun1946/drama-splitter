@@ -71,6 +71,28 @@ class TestProfileSerialization:
         again = type(profile).from_json(profile.to_json())
         assert again == profile
 
+    def test_custom_models_roundtrip_and_tolerate_garbage(self):
+        """手填的模型名要落盘；脏数据（空串/重复/非字符串）要清掉。"""
+        profile = DEFAULT_PROFILES[0].with_updates(
+            custom_models=("ep-20260101", "my-alias")
+        )
+        again = type(profile).from_json(profile.to_json())
+        assert again.custom_models == ("ep-20260101", "my-alias")
+
+        cleaned = type(profile).from_json(
+            {"id": "volc", "custom_models": ["  x  ", "", 7, "x", "y"]}
+        )
+        assert cleaned.custom_models == ("x", "y"), "去空、去重、丢非字符串"
+
+        emptied = type(profile).from_json({"id": "volc", "custom_models": []})
+        assert emptied.custom_models == (), "空清单是合法值：删光了不该回落基底"
+
+    def test_model_choices_merge_fetched_and_custom(self):
+        """候选清单 = 接口拉回来的（在前）+ 手填的（补后），去重保序。"""
+        profile = DEFAULT_PROFILES[0].with_updates(custom_models=("ep-x", "dup"))
+        assert profile.model_choices(["dup", "gpt-4o"]) == ("dup", "gpt-4o", "ep-x")
+        assert profile.model_choices() == ("ep-x", "dup"), "没有清单时只剩手填的"
+
     def test_from_json_tolerates_garbage(self):
         """配置坏了必须回落默认值，而不是让启动失败。"""
         profile = type(DEFAULT_PROFILES[0]).from_json(

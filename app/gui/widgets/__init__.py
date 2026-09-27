@@ -2,6 +2,7 @@
 
 包含：
 - Card / LabeledField / StatusPill    —— 区段容器与状态展示
+- ModelTable                           —— 厂商模型清单表格（指派 / 手填 / 删除）
 - LogPanel                             —— 风格化日志面板
 - MediaPreview                         —— 帧级预览（HUD + 时间码）
 - TimelineRuler                        —— 轻量时间轴（切点 / 播放头 / 拖拽）
@@ -22,6 +23,7 @@ from .inspector import Inspector, InspectorIssue
 from .labeled_field import LabeledField
 from .log_panel import LogPanel
 from .media_preview import MediaPreview
+from .model_table import ModelTable
 from .no_wheel import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
 from .scroll_area import h_scrollable, scrollable
 from .stage_view import StageView
@@ -38,6 +40,7 @@ __all__ = [
     "LabeledField",
     "LogPanel",
     "MediaPreview",
+    "ModelTable",
     "NoWheelComboBox",
     "NoWheelDoubleSpinBox",
     "NoWheelSpinBox",

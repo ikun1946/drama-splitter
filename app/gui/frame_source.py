@@ -9,7 +9,9 @@
 - 连续播放：后台流式解码 + 定时器按帧率出图，保证"所见帧 = 该时刻应有的帧"。
 
 另外，不使用 QtMultimedia 还有一个现实原因：它位于 160MB+ 的 PySide6-Addons 中，
-而本项目只需要 Essentials。
+而本项目只需要 Essentials。因此**预览的声音**也不走 Qt：播放时并行起一个只放
+声音的 ``ffplay``（同一文件、同一起点，与画面一起启停），见 ``StreamPlayer``
+的音频通道一节。
 """
 
 from __future__ import annotations
@@ -34,13 +36,14 @@ class DecodeError(RuntimeError):
     """解码失败。"""
 
 
-def _ffmpeg_path() -> str:
+def _binaries():
+    """定位 FFmpeg 工具链（ffmpeg / ffprobe / ffplay 一起返回，只探测一次）。"""
     root = Path(__file__).resolve().parent.parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     from app.core.ffmpeg import locate_ffmpeg
 
-    return str(locate_ffmpeg().ffmpeg)
+    return locate_ffmpeg()
 
 
 class FrameDecoder:
@@ -49,7 +52,7 @@ class FrameDecoder:
     def __init__(self, path: str | Path | None = None, max_width: int | None = 1280) -> None:
         self._path = Path(path) if path else None
         self._max_width = max_width
-        self._ffmpeg = _ffmpeg_path()
+        self._ffmpeg = str(_binaries().ffmpeg)
         self._size: tuple[int, int] = (0, 0)
 
     def set_source(self, path: str | Path | None,
@@ -164,7 +167,9 @@ class StreamPlayer(QObject):
 
     def __init__(self, source: str | Path | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._ffmpeg = _ffmpeg_path()
+        binaries = _binaries()
+        self._ffmpeg = str(binaries.ffmpeg)
+        self._ffplay = binaries.ffplay      # None = 这套 FFmpeg 没带 ffplay，只能无声
         self._source: Path | None = Path(source) if source else None
         self._max_width = 960
         self._fps = Fraction(25)
@@ -183,6 +188,11 @@ class StreamPlayer(QObject):
         # 静默失效——异常在 Qt 槽里被打印后吞掉，界面上只表现为"点了没反应"）。
         self._cached_size = (0, 0)
         self._last_frame: bytes | None = None
+
+        # 音频通道（预览出声）：与画面并行的一个只放声音的 ffplay 进程
+        self._audio: subprocess.Popen | None = None
+        self._audio_track: int | None = None
+        self._audio_enabled = True
 
         self._timer = QTimer(self)
         # 帧率定时必须用精确定时器，否则播放节奏会随系统负载漂移
@@ -246,6 +256,7 @@ class StreamPlayer(QObject):
         self._set_playing(True)
         self._start_reader(self._position)
         self._timer.start(self._interval_ms())
+        self._start_audio()
 
     def pause(self) -> None:
         self._set_playing(False)
@@ -257,10 +268,80 @@ class StreamPlayer(QObject):
 
         「播放」键兼作「暂停」键后，按钮文案完全依赖这个信号的准确性——
         自然播完（``_on_tick``）也必须走这里，否则键会一直停在「暂停」。
+        收声也挂在这里：停下就一定没声音（暂停、自然播完、换源都走同一条路），
+        免得漏掉某条退出路径留下一个还在响的 ffplay。
         """
         if self._playing != value:
             self._playing = value
+            if not value:
+                self._stop_audio()
             self.playing_changed.emit(value)
+
+    # ---- 音频通道（预览出声）--------------------------------------------
+    #
+    # 画面是"FFmpeg 解帧 → QImage"，音频则交给一个只放声音的 ffplay 进程，两者
+    # 用同一份文件、同一个起点并行起播，一起启停。为什么不走 QtMultimedia：
+    # 它在 160MB+ 的 PySide6-Addons 里，本项目只装 Essentials（见模块开头）。
+    # 代价是两条独立时钟，起播时声音会比画面晚半秒左右（ffplay 启动开销），
+    # 逐帧审核够用；要严格同步只能换 QAudioSink 那条路。
+
+    def set_audio_track(self, index: int | None) -> None:
+        """指定预览放哪条音轨（ffprobe 的全局流序号，与导入页选中项一致）。"""
+        self._audio_track = index
+
+    def set_audio_enabled(self, enabled: bool) -> None:
+        """关掉后完全不启音频进程（headless 冒烟、批处理截图这类场景用）。"""
+        self._audio_enabled = enabled
+        if not enabled:
+            self._stop_audio()
+
+    def _audio_command(self, start_seconds: float) -> list[str] | None:
+        """音频通道命令；没 ffplay / 没源 / 已静音时返回 None（画面照常播）。"""
+        if not self._audio_enabled or self._ffplay is None or self._source is None:
+            return None
+        args = [
+            str(self._ffplay),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nodisp",          # 不出窗口
+            "-vn",
+            "-sn",              # 只解码音频，不浪费 CPU 在画面上
+            "-autoexit",        # 播完自己退出，不留孤儿进程
+        ]
+        if self._audio_track is not None:
+            args += ["-ast", str(self._audio_track)]
+        args += ["-ss", f"{max(0.0, start_seconds):.6f}"]
+        if self._end is not None:
+            args += ["-t", f"{max(0.0, self._end - start_seconds):.6f}"]
+        args += ["-i", str(self._source)]
+        return args
+
+    def _start_audio(self) -> None:
+        self._stop_audio()
+        command = self._audio_command(self._position)
+        if command is None:
+            return
+        try:
+            self._audio = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
+            )
+        except OSError:
+            # 放不出声音不该影响画面：静默降级（ffplay 被删、被策略拦住等）
+            self._audio = None
+
+    def _stop_audio(self) -> None:
+        proc, self._audio = self._audio, None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
     def stop(self) -> None:
         self.pause()

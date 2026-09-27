@@ -233,6 +233,11 @@ class ProviderProfile:
     enabled: bool = False
     allow_upload: bool = False
     use_system_proxy: bool = False
+    #: 用户手动添加的模型名（与 `/models` 拉回来的清单合并显示）。
+    #: 存在的理由：有些厂商的可用模型**不在清单里**——方舟用推理接入点 ID
+    #: （`ep-xxx`）、自建网关常只暴露别名。手填的名字要能记住，否则每次都要重敲。
+    #: 用 tuple 而不是 list：档案是 frozen 的，可变默认值会在实例之间共享。
+    custom_models: tuple[str, ...] = ()
 
     # ---- 能力 ----------------------------------------------------------
 
@@ -277,6 +282,7 @@ class ProviderProfile:
             "enabled": self.enabled,
             "allow_upload": self.allow_upload,
             "use_system_proxy": self.use_system_proxy,
+            "custom_models": list(self.custom_models),
         }
 
     @classmethod
@@ -308,6 +314,22 @@ class ProviderProfile:
                 return value.strip()
             return default
 
+        def models(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+            """手填模型清单容错：只留非空字符串、去重、保序。
+
+            "字段缺失"与"空清单"要分清：用户把自定义模型全删了就是空清单，
+            不该被当成缺失而回落基底里的旧值。
+            """
+            value = payload.get(key, default)
+            if not isinstance(value, list):
+                return default
+            kept: list[str] = []
+            for item in value:
+                name = item.strip() if isinstance(item, str) else ""
+                if name and name not in kept:
+                    kept.append(name)
+            return tuple(kept)
+
         return replace(
             base,
             id=text("id", base.id) or base.id,
@@ -323,10 +345,24 @@ class ProviderProfile:
             enabled=flag("enabled", base.enabled),
             allow_upload=flag("allow_upload", base.allow_upload),
             use_system_proxy=flag("use_system_proxy", base.use_system_proxy),
+            custom_models=models("custom_models", base.custom_models),
         )
 
     def with_updates(self, **changes: Any) -> "ProviderProfile":
         return replace(self, **changes)
+
+    def model_choices(self, fetched: Iterable[str] = ()) -> tuple[str, ...]:
+        """候选模型清单 = 接口拉回来的 + 手填的（去重、保序，手填的补在后面）。
+
+        界面（模型表格、「选择云端模型」的下拉）都读这一处，免得两边各写一遍
+        合并规则；没有 Key 或接口不给清单时 `fetched` 为空，只剩手填的那几个。
+        """
+        choices: list[str] = []
+        for name in list(fetched) + list(self.custom_models):
+            text = name.strip() if isinstance(name, str) else ""
+            if text and text not in choices:
+                choices.append(text)
+        return tuple(choices)
 
 
 #: 全空档案：自定义厂商的唯一基底。

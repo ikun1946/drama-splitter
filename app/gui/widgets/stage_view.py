@@ -200,6 +200,18 @@ class StageView(QWidget):
         plan = self.state.current_plan
         return plan.episodes() if plan else []
 
+    def _play(self) -> None:
+        """起播前把音频通道的参数同步给播放器，然后播放。
+
+        左栏换了主对白轨、或换成没音轨的片子，都只改 ``state``（没有别的刷新
+        时机），所以每次播放都从这里读一次，避免"选了新音轨却还放旧轨/没声音"。
+        成片连看走的是另一条路（成片是单音轨导出，见 ``_play_next_stitch``）。
+        """
+        media = self.state.media
+        self.player.set_audio_track(self.state.audio_stream_index)
+        self.player.set_audio_enabled(bool(media.audio_tracks) if media else False)
+        self.player.play()
+
     def toggle_playback(self) -> None:
         """「播放」键兼作「暂停」键（按钮文案随状态变）。
 
@@ -213,7 +225,7 @@ class StageView(QWidget):
         for episode in self._episodes():
             if episode.start_seconds <= self.position < episode.end_seconds:
                 self.player.set_range(float(self.position), float(episode.end_seconds))
-                self.player.play()
+                self._play()
                 return
         # 没有方案（就绪阶段，整片连播）或播放头不在任何一集内（例如停在片尾）：
         # 交给 play_episode 决定范围（整片从播放头起 / 当前集从集首起）
@@ -224,14 +236,14 @@ class StageView(QWidget):
         if not episodes:
             # 还没有方案（就绪阶段）：播放整片，便于先看素材
             self.player.set_range(float(self.position), None)
-            self.player.play()
+            self._play()
             return
         index = index or self.current_episode
         if not 1 <= index <= len(episodes):
             return
         episode = episodes[index - 1]
         self.player.set_range(float(episode.start_seconds), float(episode.end_seconds))
-        self.player.play()
+        self._play()
 
     def play_boundary(self, index: int | None = None) -> None:
         episodes = self._episodes()
@@ -243,7 +255,7 @@ class StageView(QWidget):
             return
         boundary = episodes[index - 1].end_seconds
         self.player.set_range(float(max(Fraction(0), boundary - 3)), float(boundary + 3))
-        self.player.play()
+        self._play()
 
     def play_stitched(self, index: int | None = None) -> None:
         """用**已导出的成片**连看相邻两集（能发现编码层面的衔接问题）。"""
@@ -276,6 +288,10 @@ class StageView(QWidget):
         path, start, end = self._stitch_queue.pop(0)
         self.player.set_source(path)
         self.player.set_range(max(0.0, start), end)
+        # 成片是单音轨导出：不让它按源片的流序号挑轨（序号对不上会直接没声音），
+        # 交给 ffplay 自己取第一条音轨
+        self.player.set_audio_track(None)
+        self.player.set_audio_enabled(True)
         self.player.play()
 
     def _on_playback_finished(self) -> None:
