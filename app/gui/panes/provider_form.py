@@ -125,10 +125,9 @@ class ProviderForm(QWidget):
         self.edit_base_url = QLineEdit(self)
         self.edit_judge_protocol = NoWheelComboBox(self)
         self.edit_asr_protocol = NoWheelComboBox(self)
-        self.edit_judge_model = NoWheelComboBox(self)
-        self.edit_judge_model.setEditable(True)
-        self.edit_asr_model = NoWheelComboBox(self)
-        self.edit_asr_model.setEditable(True)
+        # 模型名不再两个下拉各填一遍：下面那张表格一次列出该厂商的全部模型
+        # （接口拉回来的 + 手填的），行内点「设为语义判断 / 设为转写」即可指派
+        self.model_table = ModelTable(self)
         self.edit_asr_endpoint = QLineEdit(self)
         self.edit_asr_resource = QLineEdit(self)
         self.edit_api_key = QLineEdit(self)
@@ -157,12 +156,8 @@ class ProviderForm(QWidget):
         self.base_field.attach(self.edit_base_url)
         self.judge_protocol_field = LabeledField("语义判断协议")
         self.judge_protocol_field.attach(self.edit_judge_protocol)
-        self.judge_model_field = LabeledField("模型名（judge_model）")
-        self.judge_model_field.attach(self.edit_judge_model)
         self.asr_protocol_field = LabeledField("转写协议")
         self.asr_protocol_field.attach(self.edit_asr_protocol)
-        self.asr_model_field = LabeledField("转写模型名（asr_model_name）")
-        self.asr_model_field.attach(self.edit_asr_model)
         self.asr_endpoint_field = LabeledField("火山转写接口（asr_endpoint）")
         self.asr_endpoint_field.attach(self.edit_asr_endpoint)
         self.asr_resource_field = LabeledField("火山资源 ID（asr_resource_id）")
@@ -170,8 +165,11 @@ class ProviderForm(QWidget):
         self.key_field = LabeledField("API Key")
         self.key_field.attach(self.edit_api_key)
 
-        # 「刷新模型列表」：模型名两处都从这里取（GET {base_url}/models）。
-        # 放在两行模型字段正下方，而不是卡片标题栏——它服务的就是上面那两行。
+        # 「刷新模型列表」：`GET {base_url}/models`；表格里的"自动"行就是它拉回来的。
+        # 指派 / 添加 / 删除都只改内存，跟其它字段一样等「保存」写入配置。
+        self.model_table.assigned.connect(self._on_model_assigned)
+        self.model_table.added.connect(self._on_model_added)
+        self.model_table.removed.connect(self._on_model_removed)
         self.btn_refresh_models = QPushButton("刷新模型列表", self)
         self.btn_refresh_models.clicked.connect(lambda: self._request_models(force=True))
         self.model_note = QLabel("", self)
@@ -247,12 +245,8 @@ class ProviderForm(QWidget):
         editor_card.body_layout.addWidget(label_field)
         editor_card.body_layout.addWidget(self.base_field)
         editor_card.body_layout.addLayout(
-            pair(self.judge_protocol_field, self.judge_model_field)
+            pair(self.judge_protocol_field, self.asr_protocol_field)
         )
-        editor_card.body_layout.addLayout(
-            pair(self.asr_protocol_field, self.asr_model_field)
-        )
-        editor_card.body_layout.addLayout(models_row)
         editor_card.body_layout.addWidget(self.volcano_host)
         editor_card.body_layout.addWidget(self.advanced_host)
         # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关，且并排后
@@ -263,6 +257,12 @@ class ProviderForm(QWidget):
         key_row.addWidget(self.key_field, 2)
         key_row.addWidget(self.allow_upload, 1, Qt.AlignmentFlag.AlignBottom)
         editor_card.body_layout.addLayout(key_row)
+        # 模型清单放最后：它可能很长（自带滚动），放前面会把 Key 与开关推出首屏
+        models_title = QLabel("模型（该厂商 /models 拉回来的 + 你手填的）", editor_card)
+        models_title.setProperty("role", "muted")
+        editor_card.body_layout.addWidget(models_title)
+        editor_card.body_layout.addWidget(self.model_table)
+        editor_card.body_layout.addLayout(models_row)
         editor_card.body_layout.addWidget(self.egress_preview)
         editor_card.body_layout.addWidget(self.hint_label)
 
