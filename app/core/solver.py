@@ -41,7 +41,14 @@ import numpy as np
 from .candidates import CandidatePoint, CandidateSet
 from .plan import BoundaryPlan, PlanProblem
 from .probe import MediaInfo
-from .settings import DerivedParams, UnresolvedState
+from .settings import (
+    ADVICE_EPISODE_COUNT,
+    ADVICE_MAX_DURATION,
+    ADVICE_MIN_DURATION,
+    DerivedParams,
+    SettingAdvice,
+    UnresolvedState,
+)
 
 __all__ = [
     "SolverWeights",
@@ -116,6 +123,9 @@ class GraphDiagnostics:
     largest_gap_seconds: Fraction = Fraction(0)
     blocking_gaps: list[tuple[Fraction, Fraction]] = field(default_factory=list)
     unreachable_layers: list[int] = field(default_factory=list)
+    #: 可一键应用的设置调整（§10.4）：报错框里的「建议：」文案与框上的
+    #: 「应用建议」按钮同源——按钮应用的和用户读到的必须是同一件事
+    advice: list[SettingAdvice] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def describe(self) -> str:
@@ -389,6 +399,9 @@ class CandidateGraphSolver:
         「DP 第 N 层已无可达节点」是现象不是解释，用户照着它改不了任何东西。
         这里只留两类信息：**哪一段切不动**、**把哪个参数改成多少**（原先同一段话
         还会因为拼了 describe() 而整段重复两遍，报错框里全是重复内容）。
+
+        建议同时以 `SettingAdvice` 留在诊断里：界面上的「应用建议」按钮直接应用
+        它，因此**文案与按钮必须来自同一份数据**，不能各算一套。
         """
         low, high = self._low_frames, self._high_frames
         total = self._total_frames
@@ -399,15 +412,7 @@ class CandidateGraphSolver:
         causes: list[str] = []
         # 建议按成因分组：同一组内的几项是"调哪个都行"（如减集数或放宽集长），
         # 组间用"；"并列；同一参数被多组各要求一个界时只留更严的那个。
-        groups: list[list[tuple[str, str, float]]] = []
-
-        def fmt(parameter: str, relation: str, value: float) -> str:
-            shown = f"{int(value)} 集" if parameter == "目标集数" else f"{value:.1f}s"
-            if parameter == "目标集数":
-                verb = "提到" if relation == "≥" else "降到"
-            else:
-                verb = "放宽到"          # 集长上下限都只说"放宽"，"提高上限"对用户没意义
-            return f"{parameter}{verb} {relation} {shown}"
+        groups: list[list[SettingAdvice]] = []
 
         # ① 集数与集长本身矛盾：与候选点无关，改设置就能解
         if requested * low > total:
@@ -415,17 +420,25 @@ class CandidateGraphSolver:
                 f"{requested} 集至少需要 {requested * low_s:.1f}s"
                 f"（每集不低于 {low_s:.1f}s），全片只有 {total_s:.1f}s"
             )
-            groups.append(
-                [("目标集数", "≤", int(total // low)), ("最短集长", "≤", total_s / requested)]
-            )
+            groups.append([
+                SettingAdvice(ADVICE_EPISODE_COUNT, "≤", Fraction(int(total // low))),
+                SettingAdvice(
+                    ADVICE_MIN_DURATION, "≤",
+                    _tenth_seconds(Fraction(total, self._fps * requested), "≤"),
+                ),
+            ])
         elif requested * high < total:
             causes.append(
                 f"{requested} 集最多容纳 {requested * high_s:.1f}s"
                 f"（每集不超过 {high_s:.1f}s），全片有 {total_s:.1f}s"
             )
-            groups.append(
-                [("目标集数", "≥", -(-total // high)), ("最长集长", "≥", total_s / requested)]
-            )
+            groups.append([
+                SettingAdvice(ADVICE_EPISODE_COUNT, "≥", Fraction(-(-total // high))),
+                SettingAdvice(
+                    ADVICE_MAX_DURATION, "≥",
+                    _tenth_seconds(Fraction(total, self._fps * requested), "≥"),
+                ),
+            ])
 
         # ② 片头之后 [L,U] 窗口里没有候选点 → 第一集结束不了。
         # 这是最常见的一类：对白句末的节奏与设定的集长对不上。
@@ -440,10 +453,14 @@ class CandidateGraphSolver:
                 f"第一集无法结束：{low_s:.1f}–{high_s:.1f}s 内没有候选切点，"
                 f"最近的候选在 {float(nearest.time):.1f}s"
             )
-            group = [("最长集长", "≥", float(nearest.time))]
+            group = [
+                SettingAdvice(ADVICE_MAX_DURATION, "≥", _tenth_seconds(nearest.time, "≥"))
+            ]
             if before:
                 last = max(before, key=lambda n: n.frame)
-                group.append(("最短集长", "≤", float(last.time)))
+                group.append(
+                    SettingAdvice(ADVICE_MIN_DURATION, "≤", _tenth_seconds(last.time, "≤"))
+                )
             groups.append(group)
         elif not in_window and before:
             last = max(before, key=lambda n: n.frame)
@@ -451,7 +468,9 @@ class CandidateGraphSolver:
                 f"第一集无法结束：候选点都在 {float(last.time):.1f}s 之前，"
                 f"达不到最短集长 {low_s:.1f}s"
             )
-            groups.append([("最短集长", "≤", float(last.time))])
+            groups.append([
+                SettingAdvice(ADVICE_MIN_DURATION, "≤", _tenth_seconds(last.time, "≤"))
+            ])
 
         # ③ 某段候选点间距超过最长集长：这一段任何方案都跨不过去
         # （②已经点出"候选点跳档"时不再重复同一件事）
@@ -461,28 +480,49 @@ class CandidateGraphSolver:
                 f"{float(start):.1f}s–{float(end):.1f}s 是 {float(end - start):.1f}s 的空白区间，"
                 f"超过最长集长 {high_s:.1f}s"
             )
-            groups.append([("最长集长", "≥", float(end - start))])
+            groups.append([
+                SettingAdvice(ADVICE_MAX_DURATION, "≥", _tenth_seconds(end - start, "≥"))
+            ])
 
         if not causes:
             causes.append("当前候选点与集长范围下没有可行切分")
 
         # 同一参数只留最严的界：更松的那个已被蕴含（"≥50s；≥80s" 只会让人困惑）
-        tightest: dict[str, tuple[str, float]] = {}
+        tightest: dict[str, SettingAdvice] = {}
         for group in groups:
-            for parameter, relation, value in group:
-                old = tightest.get(parameter)
-                if old is None or (value > old[1] if relation == "≥" else value < old[1]):
-                    tightest[parameter] = (relation, value)
+            for item in group:
+                old = tightest.get(item.parameter)
+                if old is None or (
+                    item.value > old.value if item.relation == "≥" else item.value < old.value
+                ):
+                    tightest[item.parameter] = item
 
         advices = []
         for group in groups:
-            kept = [fmt(p, r, v) for p, r, v in group if tightest[p] == (r, v)]
+            kept = [item.describe() for item in group if tightest[item.parameter] == item]
             if kept:
                 advices.append("，或".join(kept))
         if not advices:
             advices.append("放宽集长范围（调大浮动比例或改上下限）后重试")
 
+        # 结构化建议：界面上的「应用建议」按钮照着它改设置（§10.4）
+        self.diagnostics.advice = list(tightest.values())
+
         return "；".join(causes[:2]) + "。\n建议：" + "；".join(advices) + "。"
+
+
+def _tenth_seconds(value: Fraction, relation: str) -> Fraction:
+    """把建议的秒数取整到 0.1s，方向与关系一致（"≥" 向上、"≤" 向下）。
+
+    显示只保留一位小数，取整后的值同时用于显示与应用——若按"最近候选 5.32s"
+    显示成 5.3s、却把 5.3s 写进设置，照建议改完仍然无解。
+    """
+    tenths = Fraction(value) * 10
+    if relation == "≥":
+        units = -((-tenths.numerator) // tenths.denominator)   # ⌈⌉
+    else:
+        units = tenths.numerator // tenths.denominator          # ⌊⌋
+    return Fraction(units, 10)
 
 
 class _NoPathError(RuntimeError):

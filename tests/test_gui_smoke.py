@@ -74,6 +74,17 @@ def message_recorder(monkeypatch):
     monkeypatch.setattr(message_mod, "critical", record("critical"))
     monkeypatch.setattr(message_mod, "confirm", lambda *a, **k: False)
     monkeypatch.setattr(message_mod, "confirm_continue", lambda *a, **k: False)
+
+    def refuse(kind):
+        """带动作按钮的警告框：记录内容，但一律当作"用户没点应用"。"""
+
+        def inner(*args, **kwargs):
+            recorded.append((kind,) + args)
+            return False
+
+        return inner
+
+    monkeypatch.setattr(message_mod, "warning_with_action", refuse("warning_with_action"))
     return recorded
 
 
@@ -995,6 +1006,82 @@ class TestWorkers:
         assert "failed" not in outcome, "模型缺失不应让分析失败"
         assert any("跳过语音转写" in line for line in outcome.get("log", []))
         assert "plan" in outcome
+
+
+class TestApplyAdviceOnFailure:
+    """分析失败时的「应用建议」：建议要能直接落到分集设置上并重跑。
+
+    回归：无解报错原先只有一行文字（"建议：最长集长放宽到 ≥ 5.4s"），用户得
+    自己打开「工具 → 分集设置」照着改。按钮与文案必须同源——这里直接把求解
+    诊断挂在工作线程上，验证界面用的是它。
+    """
+
+    def _prepare(self, window, binaries, assets):
+        """装好媒体与"目标 2 秒 ±20%"的设置，返回分析页与一份失败诊断。"""
+        from types import SimpleNamespace
+
+        from app.core.settings import ADVICE_MAX_DURATION, SettingAdvice
+        from app.core.solver import GraphDiagnostics
+
+        pane = window.workbench.analysis_pane
+        window.state.media = probe_media(binaries, assets["cfr"])   # 120 秒
+        window.state.settings = SplitSettings(
+            split_mode=SplitMode.TARGET_DURATION,
+            target_duration_seconds=Fraction(2),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(1, 5)),
+        )
+        # 真实运行时这份诊断由 AnalysisWorker 在求解失败时留下
+        pane.worker = SimpleNamespace(
+            failure_diagnostics=GraphDiagnostics(
+                advice=[SettingAdvice(ADVICE_MAX_DURATION, "≥", Fraction(27, 5))]
+            )
+        )
+        return pane
+
+    def test_advice_is_applied_and_analysis_restarts(self, window, binaries, assets):
+        pane = self._prepare(window, binaries, assets)
+        asked: list = []
+        restarted: list = []
+        logs: list[str] = []
+        pane.log_appended.connect(lambda text, level: logs.append(text))
+        pane.request_apply_advice = lambda text, advice: asked.append(advice) or True
+        pane.start = lambda: restarted.append(True)
+
+        try:
+            pane._on_failed("成因。\n建议：最长集长放宽到 ≥ 5.4s。")
+
+            assert asked, "有可应用的建议时必须问一次，而不是只报错"
+            assert window.state.settings.range.mode is RangeMode.MANUAL, (
+                "建议给的是绝对秒数，浮动来源表达不了，应切成手动上下限"
+            )
+            assert window.state.settings.range.manual_max == Fraction(27, 5)
+            assert window.state.settings.range.manual_min == Fraction(8, 5), (
+                "建议没要求动最短集长，它必须保持 2s × (1 − 20%) = 1.6s"
+            )
+            assert restarted, "应用建议后应立即按新设置重新分析"
+            assert any("已应用建议" in line for line in logs), (
+                f"日志里要留下改了什么：{logs}"
+            )
+        finally:
+            window.state.reset_media()
+
+    def test_declining_keeps_settings_and_still_warns(
+        self, window, binaries, assets, message_recorder
+    ):
+        pane = self._prepare(window, binaries, assets)
+        pane.request_apply_advice = lambda text, advice: False
+        pane.start = lambda: pytest.fail("用户没点应用，不该重新分析")
+
+        try:
+            pane._on_failed("成因。\n建议：最长集长放宽到 ≥ 5.4s。")
+
+            assert window.state.settings.range.mode is RangeMode.PERCENT
+            assert window.state.settings.range.manual_max is None
+            assert any(kind == "warning" for kind, *_ in message_recorder), (
+                "拒绝应用后仍要把失败原因原样告诉用户"
+            )
+        finally:
+            window.state.reset_media()
 
 
 class TestSettingsPageBehaviour:

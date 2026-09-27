@@ -29,6 +29,9 @@ __all__ = [
     "DerivedParams",
     "FeasibilityIssue",
     "FeasibilityReport",
+    "SettingAdvice",
+    "applicable_setting_advice",
+    "apply_setting_advice",
     "ceiling_div",
 ]
 
@@ -565,6 +568,97 @@ def normalized_duration_distance(
         return Fraction(0)
     tolerance = Fraction(1, 25)
     return min(Fraction(1), abs(duration - target) / tolerance)
+
+
+# ---------------------------------------------------------------------------
+# 无解建议的一键应用（§10.4）
+# ---------------------------------------------------------------------------
+
+#: 建议里的参数名。求解器生成建议、界面应用建议必须用同一套写法——
+#: 否则「建议：最长集长放宽到 ≥ 5.4s」与实际被改的字段会各说各话。
+ADVICE_MIN_DURATION = "最短集长"
+ADVICE_MAX_DURATION = "最长集长"
+ADVICE_EPISODE_COUNT = "目标集数"
+
+
+@dataclass(frozen=True)
+class SettingAdvice:
+    """一条可照做的设置调整：把 <参数> <关系> <值>。
+
+    由无解诊断（``solver._explain_no_path``）产出：报错框里的「建议：」文案与
+    框上的「应用建议」按钮来自同一份数据——按钮应用的和用户读到的必须是
+    同一件事，不能一个是文字一个是另算一套。
+    """
+
+    parameter: str      # ADVICE_* 之一
+    relation: str       # "≥" / "≤"
+    value: Fraction     # 秒（集长）或集数
+
+    def describe(self) -> str:
+        """与「建议：」文案里的一项完全一致。"""
+        if self.parameter == ADVICE_EPISODE_COUNT:
+            verb = "提到" if self.relation == "≥" else "降到"
+            return f"{self.parameter}{verb} {self.relation} {int(self.value)} 集"
+        return f"{self.parameter}放宽到 {self.relation} {float(self.value):.1f}s"
+
+
+def applicable_setting_advice(advice: list[SettingAdvice]) -> list[SettingAdvice]:
+    """其中能一键应用的部分：只认集长上下限。
+
+    诊断里集数与集长是「或」的关系（减少集数 **或** 放宽集长），一键应用只走
+    集长这一侧——它不改变用户指定的集数；集数项仍留在建议文字里由用户自己权衡。
+    """
+    return [
+        item for item in advice
+        if item.parameter in (ADVICE_MIN_DURATION, ADVICE_MAX_DURATION) and item.value > 0
+    ]
+
+
+def apply_setting_advice(
+    settings: SplitSettings, advice: list[SettingAdvice], total_seconds: Fraction
+) -> str | None:
+    """把建议里的集长上下限写进设置，返回一句变更说明；无可应用项时返回 None。
+
+    两个参数都只往**更松**的方向改（上限取更大、下限取更小），改动基于当前
+    生效的 L/U。建议给的是绝对秒数，浮动比例表达不了这种单边要求，因此来源
+    切成手动上下限；原先的比例留在 `RangeSpec` 的暂存里，仍可切回。
+    """
+    items = applicable_setting_advice(advice)
+    if not items:
+        return None
+    derived = settings.derive(total_seconds)
+    low, high = derived.min_duration, derived.max_duration
+    for item in items:
+        if item.parameter == ADVICE_MAX_DURATION:
+            high = max(high, item.value)
+        else:
+            low = min(low, item.value)
+
+    changes: list[str] = []
+    if low != derived.min_duration:
+        changes.append(
+            f"{ADVICE_MIN_DURATION} {_brief_seconds(derived.min_duration)} → {_brief_seconds(low)}"
+        )
+    if high != derived.max_duration:
+        changes.append(
+            f"{ADVICE_MAX_DURATION} {_brief_seconds(derived.max_duration)} → {_brief_seconds(high)}"
+        )
+    if not changes:
+        return None
+
+    source_switched = settings.range.mode != RangeMode.MANUAL
+    if source_switched:
+        settings.range.switch_to(RangeMode.MANUAL)
+    settings.range.manual_min, settings.range.manual_max = low, high
+
+    note = "已应用建议：" + "、".join(changes)
+    if source_switched:
+        note += "（集长来源改为手动，原浮动比例已保留，可在分集设置里切回）"
+    return note
+
+
+def _brief_seconds(seconds: Fraction) -> str:
+    return f"{float(seconds):.1f}s"
 
 
 def _floor_div(numerator: Fraction, denominator: Fraction) -> int:

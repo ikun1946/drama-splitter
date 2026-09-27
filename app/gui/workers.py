@@ -42,6 +42,7 @@ from ..core.planner import PlanningError, plan_rule_based
 from ..core.probe import MediaInfo, check_compatibility, probe_media
 from ..core.providers import ProviderError
 from ..core.settings import SplitSettings
+from ..core.solver import GraphDiagnostics
 
 __all__ = [
     "BaseWorker",
@@ -227,6 +228,8 @@ class AnalysisWorker(BaseWorker):
         # 中间产出：取消或失败时也保留已算出的部分，供调用方按需取用
         self.transcript = None
         self.subtitle_tracks: list = []
+        # 求解失败时的图诊断：界面据此给出「应用建议」（§10.4 的可操作化）
+        self.failure_diagnostics: GraphDiagnostics | None = None
 
     # ---- 各阶段 --------------------------------------------------------
 
@@ -440,6 +443,8 @@ class AnalysisWorker(BaseWorker):
                 # 典型成因：对白句末不落在目标时长允许的窗口内（§10.4）。
                 # 只报 describe()：它的文本里已经含 message，再拼一次整段话会
                 # 在报错框里原样重复两遍。
+                # 诊断一并留下：界面据此给出「应用建议」按钮
+                self.failure_diagnostics = solution.diagnostics
                 self.fail(blocking[0].describe())
                 return
 
@@ -500,6 +505,15 @@ class AnalysisWorker(BaseWorker):
         chosen = result.chosen
         if chosen is None:
             causes = [c.problems[0].message for c in result.comparisons if c.problems]
+            # 三个策略都无解：取第一份带建议的诊断，供界面上的「应用建议」按钮用
+            self.failure_diagnostics = next(
+                (
+                    c.solution.diagnostics
+                    for c in result.comparisons
+                    if c.solution is not None and c.solution.diagnostics.advice
+                ),
+                None,
+            )
             self.fail(
                 "三种策略都没有可行解。\n"
                 + (causes[0] if causes else "请放宽集长范围后重试。")
