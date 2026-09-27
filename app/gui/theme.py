@@ -310,6 +310,13 @@ QPushButton[role="danger"] {{
     border-color: {DANGER};
 }}
 
+/* 必须有这一条：属性选择器 [role="danger"] 排在通用 :disabled 之后，
+   不给它单独的 disabled 规则，置灰的"删除"看起来仍然可以点 */
+QPushButton[role="danger"]:disabled {{
+    color: {TEXT_DISABLED};
+    border-color: {BORDER};
+}}
+
 QPushButton[role="danger"]:hover {{
     background: {DANGER};
     color: {TEXT_INVERSE};

@@ -30,6 +30,9 @@ class LabeledField(QWidget):
         self._help = QLabel(help_text or "", self)
         self._suffix_lbl = QLabel(suffix or "", self)
         self._help.setProperty("role", "muted")
+        # help 必须折行：不折会把它所在的整行撑宽（厂商管理里就出现过"输入框右侧的
+        # 控件被挤出可视区"，因为一行 help 比视口还宽，触发了横向滚动）
+        self._help.setWordWrap(True)
         self._help.setVisible(bool(help_text))
         self._suffix_lbl.setProperty("role", "muted")
         self._suffix_lbl.setVisible(bool(suffix))

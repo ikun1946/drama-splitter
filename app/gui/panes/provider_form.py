@@ -21,6 +21,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +34,8 @@ from PySide6.QtWidgets import (
 
 from ...core.app_config import LOCAL_BACKEND, AppConfig
 from ...core.providers import (
+    CAP_ASR,
+    CAP_JUDGE,
     CAP_LABELS,
     DEFAULT_PROFILES,
     ENV_KEY_TEMPLATE,
@@ -97,8 +100,16 @@ class ProviderForm(QWidget):
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
         left.addWidget(self.profile_list, 1)
-        for button in (self.btn_new, self.btn_duplicate, self.btn_delete, self.btn_restore):
-            left.addWidget(button)
+        # 四个动作排成 2×2：占的宽度与列表一致，比一列四行更紧凑
+        pairs = QGridLayout()
+        pairs.setContentsMargins(0, 0, 0, 0)
+        pairs.setHorizontalSpacing(8)
+        pairs.setVerticalSpacing(6)
+        for index, button in enumerate(
+            (self.btn_new, self.btn_duplicate, self.btn_delete, self.btn_restore)
+        ):
+            pairs.addWidget(button, index // 2, index % 2)
+        left.addLayout(pairs)
         left_host = QWidget(self)
         left_host.setLayout(left)
         left_host.setFixedWidth(240)
@@ -115,7 +126,11 @@ class ProviderForm(QWidget):
         self.edit_asr_resource = QLineEdit(self)
         self.edit_api_key = QLineEdit(self)
         self.edit_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.allow_upload = QCheckBox("允许外发素材（不勾则为零外发）", self)
+        self.allow_upload = QCheckBox("允许外发素材", self)
+        self.allow_upload.setToolTip(
+            "转写＝整条音轨；语义判断＝候选点前后台词文本（不含画面）。"
+            "不勾选则该项能力零外发。"
+        )
         self.use_system_proxy = QCheckBox("走系统代理（默认绕过，本地端点必须绕过）", self)
         for combo, capability in (
             (self.edit_judge_protocol, "judge"),
@@ -126,8 +141,6 @@ class ProviderForm(QWidget):
             combo.currentIndexChanged.connect(self._refresh_field_visibility)
         self.edit_id.textChanged.connect(self._refresh_field_visibility)
 
-        id_field = LabeledField("id（小写字母/数字/-/_，不可改内置）")
-        id_field.attach(self.edit_id)
         label_field = LabeledField("名称（界面上显示）")
         label_field.attach(self.edit_label)
         self.base_field = LabeledField("接口地址（base_url，OpenAI 兼容要带 /v1）")
@@ -144,10 +157,36 @@ class ProviderForm(QWidget):
         self.asr_endpoint_field.attach(self.edit_asr_endpoint)
         self.asr_resource_field = LabeledField("火山资源 ID（asr_resource_id）")
         self.asr_resource_field.attach(self.edit_asr_resource)
-        self.key_field = LabeledField(
-            "API Key", help_text="明文存 config.json；可用它上方提示的环境变量覆盖"
-        )
+        self.key_field = LabeledField("API Key")
         self.key_field.attach(self.edit_api_key)
+
+        def pair(left, right) -> QHBoxLayout:
+            """两个字段并成一排：常用字段首屏就能看完，不必滚动。"""
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(12)
+            row.addWidget(left, 1)
+            row.addWidget(right, 1)
+            return row
+
+        # ---- 高级字段：默认收起 ------------------------------------------
+        #
+        # 这些字段绝大多数时候不用动（id 只在新增时填、火山专用字段只在火山协议下
+        # 才有意义、代理只在被本机代理拦截时才要打开）。放在常用区会把首屏撑成一长列。
+        # 但**绝不藏必填项**：新增档案时、或选了火山转写协议时，自动展开（见
+        # `_refresh_field_visibility`），否则用户会"看不到却必须填"。
+        self.advanced_toggle = QCheckBox("显示高级字段（id / 火山专用 / 代理）", self)
+        self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
+        id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
+        id_field.attach(self.edit_id)
+        self.advanced_host = QWidget(self)
+        advanced = QVBoxLayout(self.advanced_host)
+        advanced.setContentsMargins(0, 0, 0, 0)
+        advanced.setSpacing(4)
+        advanced.addWidget(id_field)
+        advanced.addLayout(pair(self.asr_endpoint_field, self.asr_resource_field))
+        advanced.addWidget(self.use_system_proxy)
+        self.advanced_host.setVisible(False)
 
         self.egress_preview = QLabel(self)
         self.egress_preview.setWordWrap(True)
@@ -162,38 +201,37 @@ class ProviderForm(QWidget):
         self.btn_revert = QPushButton("放弃改动", self)
         self.btn_revert.clicked.connect(lambda: self._load_profile(self._profile_id))
 
-        protocol_note = QLabel(
-            "协议决定信封与路径，不开放自定义：OpenAI 兼容 = /chat/completions 与 "
-            "/audio/transcriptions（固定 verbose_json + 词级时间戳）；火山方舟 = 极速版"
-            "录音文件识别协议。两条能力相互独立，可只配其一。",
-            self,
-        )
-        protocol_note.setWordWrap(True)
-        protocol_note.setProperty("role", "muted")
-
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(12)
+        actions.setSpacing(8)
         actions.addWidget(self.btn_save)
         actions.addWidget(self.btn_revert)
-        actions.addStretch(1)
+        actions.addWidget(self.advanced_toggle)
+        # 动作排在卡片标题栏（右上角）而不是表单末尾：正文比一屏长时需要滚动，
+        # 把「保存」放在文末等于每次改完都要先滚到底
+        self.actions_host = QWidget(self)
+        self.actions_host.setLayout(actions)
 
         editor_card = Card("档案字段", parent=self)
-        editor_card.body_layout.addWidget(id_field)
+        editor_card.add_header_widget(self.actions_host)
         editor_card.body_layout.addWidget(label_field)
         editor_card.body_layout.addWidget(self.base_field)
-        editor_card.body_layout.addWidget(self.judge_protocol_field)
-        editor_card.body_layout.addWidget(self.judge_model_field)
-        editor_card.body_layout.addWidget(self.asr_protocol_field)
-        editor_card.body_layout.addWidget(self.asr_model_field)
-        editor_card.body_layout.addWidget(self.asr_endpoint_field)
-        editor_card.body_layout.addWidget(self.asr_resource_field)
-        editor_card.body_layout.addWidget(self.key_field)
-        editor_card.body_layout.addWidget(self.allow_upload)
-        editor_card.body_layout.addWidget(self.use_system_proxy)
-        editor_card.body_layout.addWidget(protocol_note)
+        editor_card.body_layout.addLayout(
+            pair(self.judge_protocol_field, self.judge_model_field)
+        )
+        editor_card.body_layout.addLayout(
+            pair(self.asr_protocol_field, self.asr_model_field)
+        )
+        editor_card.body_layout.addWidget(self.advanced_host)
+        # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关，且并排后
+        # 首屏刚好放下全部常用字段（不必为了看 Key 输入框去滚动）
+        key_row = QHBoxLayout()
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(12)
+        key_row.addWidget(self.key_field, 2)
+        key_row.addWidget(self.allow_upload, 1, Qt.AlignmentFlag.AlignBottom)
+        editor_card.body_layout.addLayout(key_row)
         editor_card.body_layout.addWidget(self.egress_preview)
-        editor_card.body_layout.addLayout(actions)
         editor_card.body_layout.addWidget(self.hint_label)
 
         right_host = scrollable(editor_card)
@@ -312,6 +350,12 @@ class ProviderForm(QWidget):
         self.allow_upload.setChecked(profile.allow_upload)
         self.use_system_proxy.setChecked(profile.use_system_proxy)
         self._loading = False
+        # 换一家厂商就回到默认视图：折叠状态不跨档案粘住（否则看了火山的必填字段后
+        # 切到一家只做语义判断的厂商，高级区还摊着）。需要时会由
+        # `_refresh_field_visibility()` 自动展开。
+        self.advanced_toggle.blockSignals(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.blockSignals(False)
         builtin = self._is_builtin(profile.id)
         # 按钮状态跟着选中项走：给内置档案亮着一个红色「删除」像是能删，
         # 点下去才发现被拦——不如一开始就置灰。
@@ -345,6 +389,7 @@ class ProviderForm(QWidget):
         self.profile_list.setCurrentItem(None)
         self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
         self.btn_restore.setEnabled(False)
+        self.advanced_toggle.setChecked(True)  # 新增必须先填 id，直接把高级区摊开
         self._refresh_field_visibility()
         self.hint_label.setText("填好 id 与名称后选协议；保存即写入配置。")
 
@@ -449,7 +494,12 @@ class ProviderForm(QWidget):
         ]
         problems = validate_profile(draft, existing_ids=taken)
         if problems:
-            self.hint_label.setText("保存失败：" + "；".join(problems))
+            joined = "；".join(problems)
+            # 常见缺项（id / 火山字段）就在折叠起来的高级区里：先摊开再报错，
+            # 否则用户看到"缺 asr_endpoint"却在界面上找不到这个字段。
+            if any(token in joined for token in ("id", "asr_endpoint", "asr_resource_id")):
+                self.advanced_toggle.setChecked(True)
+            self.hint_label.setText("保存失败：" + joined)
             return
 
         items = [dict(item) for item in self._config.providers]
@@ -475,29 +525,58 @@ class ProviderForm(QWidget):
     # ---- 字段显隐与预览 -------------------------------------------------
 
     def _refresh_field_visibility(self) -> None:
-        """按协议决定哪些字段有意义——把无关字段藏起来，减少填错的机会。
+        """按协议决定哪些字段有意义，并维护"高级字段"的折叠。
+
+        三条规则，都是"不能藏必填项"的推论：
+        - 两条能力都停用时，接口地址没有意义；
+        - 火山转写需要 asr_endpoint / asr_resource_id——选了它就**自动展开高级区**；
+        - 新增档案必须先填 id——`_on_new()` 里同样自动展开。
 
         藏的是整个 `LabeledField`（标题 + 输入框一起），不是只藏输入框：
         留着一个"孤儿标题"比不藏更让人迷惑。
         """
         judge_protocol = self.edit_judge_protocol.currentData() or PROTO_DISABLED
         asr_protocol = self.edit_asr_protocol.currentData() or PROTO_DISABLED
+        needs_advanced = asr_protocol == PROTO_VOLC_ARK
+
+        if needs_advanced and not self.advanced_toggle.isChecked():
+            self.advanced_toggle.setChecked(True)   # 会再进本方法一次，这次才落地
+            return
+        advanced = self.advanced_toggle.isChecked()
+        self.advanced_host.setVisible(advanced)
+
         self.base_field.setVisible(
             judge_protocol != PROTO_DISABLED or asr_protocol == PROTO_OPENAI
         )
         self.judge_model_field.setVisible(judge_protocol != PROTO_DISABLED)
         self.asr_model_field.setVisible(asr_protocol != PROTO_DISABLED)
-        self.asr_endpoint_field.setVisible(asr_protocol == PROTO_VOLC_ARK)
-        self.asr_resource_field.setVisible(asr_protocol == PROTO_VOLC_ARK)
+        self.asr_endpoint_field.setVisible(advanced and needs_advanced)
+        self.asr_resource_field.setVisible(advanced and needs_advanced)
         env_name = ENV_KEY_TEMPLATE.format(
             id=(self.edit_id.text().strip() or "<id>").upper()
         )
-        self.key_field.set_help(f"明文存 config.json；也可设环境变量 {env_name} 覆盖")
+        # 环境变量名写进占位符而不是字段下方的 help：help 多占两行，会把首屏挤到
+        # 需要滚动（Key 是必看字段，不能让它的输入框掉到折叠线下）
+        self.edit_api_key.setPlaceholderText(
+            f"可直接填在这里（明文存 config.json），也可设环境变量 {env_name}"
+        )
         self._refresh_egress_preview()
 
     def _refresh_egress_preview(self) -> None:
+        """一行只读预览：两条能力各用什么协议、会发往哪台主机。
+
+        只留这两件事——接口与模型名就在上方的字段里，重复一遍会把首屏再撑高一行。
+        """
         draft = self.current_draft()
-        if not (draft.supports("judge") or draft.supports("asr")):
-            self.egress_preview.setText("尚未配置可用的云端能力（两条协议都还停用或字段没填全）。")
+        judge_protocol = PROTO_LABELS.get(draft.judge_protocol, draft.judge_protocol)
+        asr_protocol = PROTO_LABELS.get(draft.asr_protocol, draft.asr_protocol)
+        if not (draft.supports(CAP_JUDGE) or draft.supports(CAP_ASR)):
+            self.egress_preview.setText(
+                f"协议：语义判断 = {judge_protocol}，转写 = {asr_protocol}。"
+                "尚未配置可用的云端能力（协议停用或字段没填全）。"
+            )
             return
-        self.egress_preview.setText(describe_egress(draft))
+        self.egress_preview.setText(
+            f"协议：语义判断 = {judge_protocol}，转写 = {asr_protocol}。"
+            f"{describe_egress(draft)}"
+        )

@@ -1772,6 +1772,41 @@ class TestProviderDialog:
         assert form.btn_restore.isEnabled() is True, "内置厂商才能恢复默认"
         assert form.edit_base_url.text().startswith("https://ark."), "字段要回填出内置默认"
 
+    def test_advanced_fields_are_collapsed_by_default(self, provider_form):
+        """常用字段足够开箱即用：高级区（id / 火山专用 / 代理）默认收起。
+
+        openai 系厂商（如 DeepSeek）最典型——它连转写都没有，字段越少越好。
+        """
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        assert form.advanced_toggle.isChecked() is False
+        assert form.advanced_host.isHidden(), "高级区默认应收起"
+        assert form.edit_id.isVisible() is False, "id 属于高级字段"
+        assert not form.base_field.isHidden(), "常用字段必须首屏可见"
+
+    def test_volc_protocol_auto_expands_advanced(self, provider_form):
+        """必填项绝不能被折叠藏起来：选了火山转写就自动展开高级区。"""
+        from app.core.providers import PROTO_VOLC_ARK
+
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        assert form.advanced_host.isHidden()
+        form.edit_asr_protocol.setCurrentIndex(
+            form.edit_asr_protocol.findData(PROTO_VOLC_ARK)
+        )
+        assert form.advanced_toggle.isChecked() is True, "火山转写要填 endpoint/资源 ID"
+        assert not form.asr_endpoint_field.isHidden()
+        assert form.edit_id.isVisible() is True
+
+    def test_new_profile_expands_advanced_for_id(self, provider_form):
+        """新增必须先填 id（在高级区里），所以点「新增」就摊开。"""
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        form.advanced_toggle.setChecked(False)
+        form._on_new()
+        assert form.advanced_toggle.isChecked() is True
+        assert not form.advanced_host.isHidden()
+
     def test_protocol_switching_shows_relevant_fields(self, provider_form):
         from app.core.providers import PROTO_DISABLED, PROTO_OPENAI, PROTO_VOLC_ARK
 

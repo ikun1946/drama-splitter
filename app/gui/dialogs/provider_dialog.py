@@ -26,14 +26,13 @@ class ProviderDialog(DialogShell):
         *,
         config_path: Path | None = None,
     ) -> None:
-        super().__init__("厂商管理", parent, width=1040, height=720)
+        super().__init__("厂商管理", parent, width=960, height=680)
         self.form = ProviderForm(state, self, config_path=config_path)
         # 表单自己就是左右分栏（左列表 / 右编辑区带滚动），因此不再套一层滚动容器
         self.add_body(self.form)
         self.footer_hint.setText(
-            "内置厂商不可删除、id 不可改，但可以改字段或用「恢复默认」还原；"
-            "删除/恢复会把它承担的能力回落本地。API Key 明文存 config.json，"
-            "生产凭据建议改用环境变量。"
+            "内置厂商可改可恢复默认、不可删；删除或恢复会把它承担的能力回落本地。"
+            "API Key 明文存 config.json，建议用环境变量。"
         )
         self.add_close_button()
         self.install_footer()

@@ -57,6 +57,9 @@ class DialogShell(QDialog):
 
         self.footer_hint = QLabel("")
         self.footer_hint.setProperty("role", "subtitle")
+        # 过长时折行而不是被裁掉：底部提示是"这条对话框的规矩"的唯一出处，
+        # 裁一半等于没说（厂商管理里就吃过这个亏）
+        self.footer_hint.setWordWrap(True)
 
         self._footer = QHBoxLayout()
         self._footer.setContentsMargins(16, 10, 16, 12)
