@@ -56,6 +56,8 @@ from ..widgets import (
     scrollable,
 )
 from ..widgets import message
+from ..workers import ModelListWorker
+from ._common import register_worker
 
 __all__ = ["ProviderForm"]
 
@@ -78,6 +80,9 @@ class ProviderForm(QWidget):
         self._config_path = config_path
         self._profile_id: str | None = None
         self._loading = False
+        self._models_worker = None
+        #: (base_url, key) → 模型清单。同一家不重复拉：切换厂商来回点时不该反复打网络
+        self._model_cache: dict[tuple[str, str], list[str]] = {}
 
         # ---- 左栏：列表与动作 ------------------------------------------
         self.profile_list = QListWidget(self)
@@ -120,8 +125,10 @@ class ProviderForm(QWidget):
         self.edit_base_url = QLineEdit(self)
         self.edit_judge_protocol = NoWheelComboBox(self)
         self.edit_asr_protocol = NoWheelComboBox(self)
-        self.edit_judge_model = QLineEdit(self)
-        self.edit_asr_model = QLineEdit(self)
+        self.edit_judge_model = NoWheelComboBox(self)
+        self.edit_judge_model.setEditable(True)
+        self.edit_asr_model = NoWheelComboBox(self)
+        self.edit_asr_model.setEditable(True)
         self.edit_asr_endpoint = QLineEdit(self)
         self.edit_asr_resource = QLineEdit(self)
         self.edit_api_key = QLineEdit(self)
@@ -140,6 +147,9 @@ class ProviderForm(QWidget):
                 combo.addItem(PROTO_LABELS[protocol], protocol)
             combo.currentIndexChanged.connect(self._refresh_field_visibility)
         self.edit_id.textChanged.connect(self._refresh_field_visibility)
+        # 填完地址或 Key 失焦时自动拉模型列表：这是"我配好了"最自然的时刻
+        self.edit_base_url.editingFinished.connect(self._request_models)
+        self.edit_api_key.editingFinished.connect(self._request_models)
 
         label_field = LabeledField("名称（界面上显示）")
         label_field.attach(self.edit_label)
@@ -160,6 +170,19 @@ class ProviderForm(QWidget):
         self.key_field = LabeledField("API Key")
         self.key_field.attach(self.edit_api_key)
 
+        # 「刷新模型列表」：模型名两处都从这里取（GET {base_url}/models）。
+        # 放在两行模型字段正下方，而不是卡片标题栏——它服务的就是上面那两行。
+        self.btn_refresh_models = QPushButton("刷新模型列表", self)
+        self.btn_refresh_models.clicked.connect(lambda: self._request_models(force=True))
+        self.model_note = QLabel("", self)
+        self.model_note.setWordWrap(True)
+        self.model_note.setProperty("role", "muted")
+        models_row = QHBoxLayout()
+        models_row.setContentsMargins(0, 0, 0, 0)
+        models_row.setSpacing(8)
+        models_row.addWidget(self.btn_refresh_models)
+        models_row.addWidget(self.model_note, 1)
+
         def pair(left, right) -> QHBoxLayout:
             """两个字段并成一排：常用字段首屏就能看完，不必滚动。"""
             row = QHBoxLayout()
@@ -171,11 +194,11 @@ class ProviderForm(QWidget):
 
         # ---- 高级字段：默认收起 ------------------------------------------
         #
-        # 这些字段绝大多数时候不用动（id 只在新增时填、火山专用字段只在火山协议下
-        # 才有意义、代理只在被本机代理拦截时才要打开）。放在常用区会把首屏撑成一长列。
-        # 但**绝不藏必填项**：新增档案时、或选了火山转写协议时，自动展开（见
-        # `_refresh_field_visibility`），否则用户会"看不到却必须填"。
-        self.advanced_toggle = QCheckBox("显示高级字段（id / 火山专用 / 代理）", self)
+        # 这些字段绝大多数时候不用动：id 只在新增时填、代理只在被本机代理拦截时才要
+        # 打开。**协议相关的必填字段不进这里**（火山转写的 asr_endpoint 与
+        # asr_resource_id 在常用区按协议显隐）——必填项一旦被折叠藏起来，用户会
+        # "看不到却必须填"。新增档案要先填 id，所以 `_on_new()` 会展开这一区。
+        self.advanced_toggle = QCheckBox("显示高级字段（id / 代理）", self)
         self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
         id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
         id_field.attach(self.edit_id)
@@ -184,9 +207,16 @@ class ProviderForm(QWidget):
         advanced.setContentsMargins(0, 0, 0, 0)
         advanced.setSpacing(4)
         advanced.addWidget(id_field)
-        advanced.addLayout(pair(self.asr_endpoint_field, self.asr_resource_field))
         advanced.addWidget(self.use_system_proxy)
         self.advanced_host.setVisible(False)
+
+        # 火山转写的两个字段：只在火山协议下出现，且属于常用区（必填）
+        self.volcano_host = QWidget(self)
+        volcano = QVBoxLayout(self.volcano_host)
+        volcano.setContentsMargins(0, 0, 0, 0)
+        volcano.setSpacing(4)
+        volcano.addLayout(pair(self.asr_endpoint_field, self.asr_resource_field))
+        self.volcano_host.setVisible(False)
 
         self.egress_preview = QLabel(self)
         self.egress_preview.setWordWrap(True)
@@ -222,6 +252,8 @@ class ProviderForm(QWidget):
         editor_card.body_layout.addLayout(
             pair(self.asr_protocol_field, self.asr_model_field)
         )
+        editor_card.body_layout.addLayout(models_row)
+        editor_card.body_layout.addWidget(self.volcano_host)
         editor_card.body_layout.addWidget(self.advanced_host)
         # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关，且并排后
         # 首屏刚好放下全部常用字段（不必为了看 Key 输入框去滚动）
@@ -293,8 +325,8 @@ class ProviderForm(QWidget):
             base_url=self.edit_base_url.text().strip(),
             asr_endpoint=self.edit_asr_endpoint.text().strip(),
             asr_resource_id=self.edit_asr_resource.text().strip(),
-            asr_model_name=self.edit_asr_model.text().strip(),
-            judge_model=self.edit_judge_model.text().strip(),
+            asr_model_name=self.edit_asr_model.currentText().strip(),
+            judge_model=self.edit_judge_model.currentText().strip(),
             judge_protocol=self.edit_judge_protocol.currentData() or PROTO_DISABLED,
             asr_protocol=self.edit_asr_protocol.currentData() or PROTO_DISABLED,
             api_key=self.edit_api_key.text().strip(),
@@ -342,8 +374,8 @@ class ProviderForm(QWidget):
         self.edit_asr_protocol.setCurrentIndex(
             max(0, self.edit_asr_protocol.findData(profile.asr_protocol))
         )
-        self.edit_judge_model.setText(profile.judge_model)
-        self.edit_asr_model.setText(profile.asr_model_name)
+        self.edit_judge_model.setEditText(profile.judge_model)
+        self.edit_asr_model.setEditText(profile.asr_model_name)
         self.edit_asr_endpoint.setText(profile.asr_endpoint)
         self.edit_asr_resource.setText(profile.asr_resource_id)
         self.edit_api_key.setText(profile.api_key)
@@ -363,6 +395,9 @@ class ProviderForm(QWidget):
         self.btn_restore.setEnabled(builtin)
         self._refresh_field_visibility()
         self.hint_label.setText("")
+        # 切到一家厂商就顺手拉一次它的模型列表（地址与 Key 齐了才会真发请求；
+        # 同一对 (地址, Key) 命中缓存则不重复拉）
+        self._request_models()
 
     def _on_new(self) -> None:
         """新增：把所有字段清空、两个协议都置停用，等用户自己填。"""
@@ -378,8 +413,8 @@ class ProviderForm(QWidget):
         self.edit_asr_protocol.setCurrentIndex(
             self.edit_asr_protocol.findData(PROTO_DISABLED)
         )
-        self.edit_judge_model.setText("")
-        self.edit_asr_model.setText("")
+        self.edit_judge_model.clear()
+        self.edit_asr_model.clear()
         self.edit_asr_endpoint.setText("")
         self.edit_asr_resource.setText("")
         self.edit_api_key.setText("")
@@ -483,6 +518,75 @@ class ProviderForm(QWidget):
             self._save_config()
         return reverted
 
+    # ---- 模型列表（按厂商自动刷新）--------------------------------------
+
+    def _request_models(self, *, force: bool = False) -> None:
+        """拉取当前厂商的模型清单：``GET {base_url}/models``。
+
+        触发时机：切换厂商时自动（`_load_profile`）、填完 Key/地址失焦时、点
+        「刷新模型列表」、以及保存成功后。三种情况不拉：地址没填、Key 没填、
+        同一对 (地址, Key) 已在缓存里（除非 ``force``）——都会在提示行说清原因，
+        而不是静默什么都不做。
+        """
+        if self._models_worker is not None and self._models_worker.isRunning():
+            return
+        draft = self.current_draft()
+        base_url = (draft.base_url or "").strip()
+        api_key = draft.resolved_api_key()
+        if not base_url:
+            self.model_note.setText(
+                "填好接口地址后可自动获取该厂商的模型列表；也可以直接手输模型名。"
+            )
+            return
+        if not api_key:
+            env_name = ENV_KEY_TEMPLATE.format(
+                id=(draft.id or "<id>").upper()
+            )
+            self.model_note.setText(
+                f"填好 API Key（或设环境变量 {env_name}）后自动获取模型列表；"
+                "也可以直接手输模型名。"
+            )
+            return
+        cached = self._model_cache.get((base_url, api_key))
+        if cached is not None and not force:
+            self._populate_models(cached, cached=True)
+            return
+
+        self.model_note.setText("正在获取模型列表…")
+        self.btn_refresh_models.setEnabled(False)
+        worker = ModelListWorker(draft, parent=self)
+        worker.listed.connect(self._on_models_listed)
+        worker.failed.connect(self._on_models_failed)
+        worker.finished_ok.connect(lambda: self.btn_refresh_models.setEnabled(True))
+        register_worker(self, "model_list", worker)
+        self._models_worker = worker
+        worker.start()
+
+    def _on_models_listed(self, models) -> None:
+        listed = [str(item) for item in (models or []) if str(item).strip()]
+        draft = self.current_draft()
+        self._model_cache[(draft.base_url.strip(), draft.resolved_api_key())] = listed
+        self._populate_models(listed)
+
+    def _on_models_failed(self, message: str) -> None:
+        """拉不到不是错误：不少厂商没有 /models（方舟只认推理接入点 ID）。"""
+        self.model_note.setText(f"{message}；请手动填写模型名。")
+
+    def _populate_models(self, models: list[str], *, cached: bool = False) -> None:
+        """把清单填进两个可编辑下拉；用户已填的值不能因为刷新而丢。"""
+        for combo in (self.edit_judge_model, self.edit_asr_model):
+            current = combo.currentText().strip()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(models)
+            combo.setEditText(current)
+            combo.blockSignals(False)
+        suffix = "（来自缓存）" if cached else ""
+        self.model_note.setText(
+            f"模型列表{suffix}：共 {len(models)} 个，来自该厂商的 /models 接口；"
+            "不在列表里的模型名可直接输入。"
+        )
+
     # ---- 保存 -----------------------------------------------------------
 
     def _on_save(self) -> None:
@@ -527,39 +631,34 @@ class ProviderForm(QWidget):
     def _refresh_field_visibility(self) -> None:
         """按协议决定哪些字段有意义，并维护"高级字段"的折叠。
 
-        三条规则，都是"不能藏必填项"的推论：
+        规则：
         - 两条能力都停用时，接口地址没有意义；
-        - 火山转写需要 asr_endpoint / asr_resource_id——选了它就**自动展开高级区**；
-        - 新增档案必须先填 id——`_on_new()` 里同样自动展开。
+        - 火山转写需要 asr_endpoint / asr_resource_id——它们在**常用区**按协议显隐，
+          不进折叠区（必填项一旦被藏起来，用户会"看不到却必须填"）；
+        - 高级区只放 id 与「走系统代理」，默认收起；点「新增」时自动展开（要先填 id）。
 
         藏的是整个 `LabeledField`（标题 + 输入框一起），不是只藏输入框：
         留着一个"孤儿标题"比不藏更让人迷惑。
         """
         judge_protocol = self.edit_judge_protocol.currentData() or PROTO_DISABLED
         asr_protocol = self.edit_asr_protocol.currentData() or PROTO_DISABLED
-        needs_advanced = asr_protocol == PROTO_VOLC_ARK
+        volcano = asr_protocol == PROTO_VOLC_ARK
 
-        if needs_advanced and not self.advanced_toggle.isChecked():
-            self.advanced_toggle.setChecked(True)   # 会再进本方法一次，这次才落地
-            return
-        advanced = self.advanced_toggle.isChecked()
-        self.advanced_host.setVisible(advanced)
-
+        self.advanced_host.setVisible(self.advanced_toggle.isChecked())
+        self.volcano_host.setVisible(volcano)
         self.base_field.setVisible(
             judge_protocol != PROTO_DISABLED or asr_protocol == PROTO_OPENAI
         )
         self.judge_model_field.setVisible(judge_protocol != PROTO_DISABLED)
         self.asr_model_field.setVisible(asr_protocol != PROTO_DISABLED)
-        self.asr_endpoint_field.setVisible(advanced and needs_advanced)
-        self.asr_resource_field.setVisible(advanced and needs_advanced)
         env_name = ENV_KEY_TEMPLATE.format(
             id=(self.edit_id.text().strip() or "<id>").upper()
         )
         # 环境变量名写进占位符而不是字段下方的 help：help 多占两行，会把首屏挤到
-        # 需要滚动（Key 是必看字段，不能让它的输入框掉到折叠线下）
-        self.edit_api_key.setPlaceholderText(
-            f"可直接填在这里（明文存 config.json），也可设环境变量 {env_name}"
-        )
+        # 需要滚动（Key 是必看字段，不能让它的输入框掉到折叠线下）。文案只留环境
+        # 变量名这一件事——"明文存 config.json" 写在对话框底栏，两处都写会被输入框
+        # 截断成半句（实测）
+        self.edit_api_key.setPlaceholderText(f"留空则用环境变量 {env_name}")
         self._refresh_egress_preview()
 
     def _refresh_egress_preview(self) -> None:

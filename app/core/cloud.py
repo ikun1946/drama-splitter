@@ -16,17 +16,19 @@
 
 from __future__ import annotations
 
-from .cloud_openai import OpenAiAsrTransport, OpenAiChatTransport
+from .cloud_openai import OpenAiAsrTransport, OpenAiChatTransport, list_models as _list_openai_models
 from .cloud_volc import VolcFlashAsrTransport
 from .providers import (
+    PROTO_LABELS,
     PROTO_OPENAI,
     PROTO_VOLC_ARK,
     AsrTransport,
     JudgeTransport,
+    ProviderError,
     ProviderProfile,
 )
 
-__all__ = ["build_asr_transport", "build_judge_transport"]
+__all__ = ["build_asr_transport", "build_judge_transport", "list_models"]
 
 #: 语义判断协议 → 适配器工厂。方舟的 chat 也是 OpenAI 形态，所以没有"火山"这一项。
 JUDGE_BUILDERS = {
@@ -72,3 +74,22 @@ def build_asr_transport(profile: ProviderProfile) -> AsrTransport | None:
     """
     builder = ASR_BUILDERS.get(profile.asr_protocol)
     return builder(profile) if builder is not None else None
+
+
+def list_models(profile: ProviderProfile) -> list[str]:
+    """按协议拉取该厂商的模型清单（界面里"按厂商刷新模型列表"走这里）。
+
+    目前只有 OpenAI 兼容协议有清单端点；火山方舟的语义判断虽然也是 OpenAI 形态，
+    但它认的是**推理接入点 ID**（ep-xxx，不在 /models 里），因此会在那儿报错——
+    文案里说清"手动填写"，而不是假装这家没有模型。
+    """
+    if profile.judge_protocol == PROTO_OPENAI or profile.asr_protocol == PROTO_OPENAI:
+        return _list_openai_models(
+            profile.base_url,
+            profile.resolved_api_key(),
+            use_system_proxy=profile.use_system_proxy,
+        )
+    protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
+    raise ProviderError(
+        f"「{protocol}」协议没有模型清单接口，请手动填写模型名"
+    )

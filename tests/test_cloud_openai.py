@@ -73,6 +73,7 @@ class FakeGateway:
         self.asr_body: object = ASR_WITH_WORDS
         self.asr_body_text: str | None = None      # 给"返回体不是 JSON"用
         self.models_status = 200
+        self.models_body: object = {"data": [{"id": "whisper-1"}]}
         self.error_body: object = {"error": {"message": "invalid api key"}}
         self.api_status_message = ""
         self.logid = "logid-1234"
@@ -137,8 +138,11 @@ class FakeGateway:
 
             def do_GET(self):  # noqa: N802 - http.server 命名
                 logid = self._record()
-                if self.path.endswith("/models") and outer.models_status == 200:
-                    self._respond(200, {"data": [{"id": "whisper-1"}]}, logid)
+                if self.path.endswith("/models"):
+                    if outer.models_status == 200:
+                        self._respond(200, outer.models_body, logid)
+                    else:
+                        self._respond(outer.models_status, outer.error_body, logid)
                     return
                 self._respond(404, {"error": {"message": "no such endpoint"}}, logid)
 
@@ -242,6 +246,58 @@ class TestOpenAiChat:
 # ---------------------------------------------------------------------------
 # 音频转写
 # ---------------------------------------------------------------------------
+
+
+class TestListModels:
+    """按厂商拉模型清单：界面里「刷新模型列表」走的就是这条路径。"""
+
+    def test_parses_openai_shape(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        gateway.models_body = {
+            "data": [{"id": "whisper-1"}, {"id": "gpt-4o-mini"}, {"id": "GLM-4"}]
+        }
+        assert list_models(gateway.base_url, API_KEY) == ["GLM-4", "gpt-4o-mini", "whisper-1"]
+        assert gateway.requests[0].path.endswith("/models")
+        assert gateway.requests[0].authorization == f"Bearer {API_KEY}"
+
+    def test_tolerates_other_shapes_and_dedupes(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        gateway.models_body = {"models": [{"name": "b"}, {"model": "a"}, "b", {"nope": 1}]}
+        assert list_models(gateway.base_url, API_KEY) == ["a", "b"]
+
+    def test_reports_auth_failure(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        gateway.models_status = 401
+        with pytest.raises(ProviderError) as info:
+            list_models(gateway.base_url, API_KEY)
+        assert "鉴权失败" in str(info.value)
+
+    def test_reports_missing_endpoint(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        gateway.models_status = 404
+        with pytest.raises(ProviderError):
+            list_models(gateway.base_url, API_KEY)
+
+    def test_empty_payload_is_reported(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        gateway.models_body = {"object": "list"}
+        with pytest.raises(ProviderError) as info:
+            list_models(gateway.base_url, API_KEY)
+        assert "/models" in str(info.value)
+
+    def test_missing_config_sends_nothing(self, gateway):
+        from app.core.cloud_openai import list_models
+
+        with pytest.raises(ProviderError):
+            list_models(gateway.base_url, "")
+        with pytest.raises(ProviderError):
+            list_models("", API_KEY)
+        assert gateway.requests == [], "本地就能判定的缺失，不该发出请求"
 
 
 class TestOpenAiAsrRequest:

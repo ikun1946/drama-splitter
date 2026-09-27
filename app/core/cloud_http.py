@@ -27,6 +27,7 @@ from .providers import ProviderError
 
 __all__ = [
     "extract_chat_text",
+    "get_json",
     "get_ok",
     "http_error",
     "post_json",
@@ -174,6 +175,15 @@ def get_ok(url: str, headers: dict, *, timeout: float, use_system_proxy: bool) -
     except ProviderError:
         return False
     return True
+
+
+def get_json(
+    url: str, headers: dict, *, timeout: float, use_system_proxy: bool
+) -> dict:
+    """GET 一个 JSON，返回响应体；失败抛 :class:`ProviderError`。"""
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    body, _ = send(request, timeout=timeout, use_system_proxy=use_system_proxy)
+    return _decode_json(body)
 
 
 def http_error(exc: urllib.error.HTTPError) -> ProviderError:

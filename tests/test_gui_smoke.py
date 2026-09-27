@@ -1153,7 +1153,7 @@ class TestWheelDoesNotChangeValues:
 
     @staticmethod
     def _wheel_event(widget, angle_y: int = -120):
-        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtCore import QPoint, QPointF
 
         center = QPointF(widget.rect().center())
         return QWheelEvent(
@@ -1784,19 +1784,23 @@ class TestProviderDialog:
         assert form.edit_id.isVisible() is False, "id 属于高级字段"
         assert not form.base_field.isHidden(), "常用字段必须首屏可见"
 
-    def test_volc_protocol_auto_expands_advanced(self, provider_form):
-        """必填项绝不能被折叠藏起来：选了火山转写就自动展开高级区。"""
+    def test_volcano_fields_live_in_common_area(self, provider_form):
+        """必填项绝不能被折叠藏起来：火山专用字段在常用区按协议显隐，不进高级区。
+
+        高级区只留 id 与代理——这样默认视图（火山档案）也不会因为"自动展开"而变长。
+        """
         from app.core.providers import PROTO_VOLC_ARK
 
         form, _ = provider_form
         self._pick(form, "deepseek")
-        assert form.advanced_host.isHidden()
+        assert form.volcano_host.isHidden()
+        assert form.advanced_toggle.isChecked() is False, "高级区保持收起"
+
         form.edit_asr_protocol.setCurrentIndex(
             form.edit_asr_protocol.findData(PROTO_VOLC_ARK)
         )
-        assert form.advanced_toggle.isChecked() is True, "火山转写要填 endpoint/资源 ID"
-        assert not form.asr_endpoint_field.isHidden()
-        assert form.edit_id.isVisible() is True
+        assert not form.volcano_host.isHidden(), "选了火山转写就要能填 endpoint/资源 ID"
+        assert form.advanced_toggle.isChecked() is False, "不需要为必填项展开高级区"
 
     def test_new_profile_expands_advanced_for_id(self, provider_form):
         """新增必须先填 id（在高级区里），所以点「新增」就摊开。"""
@@ -1808,18 +1812,17 @@ class TestProviderDialog:
         assert not form.advanced_host.isHidden()
 
     def test_protocol_switching_shows_relevant_fields(self, provider_form):
-        from app.core.providers import PROTO_DISABLED, PROTO_OPENAI, PROTO_VOLC_ARK
+        from app.core.providers import PROTO_DISABLED, PROTO_OPENAI
 
         form, _ = provider_form
         self._pick(form, "volc")
-        assert not form.asr_endpoint_field.isHidden(), "火山转写要看 asr_endpoint"
+        assert not form.volcano_host.isHidden(), "火山转写要看 asr_endpoint"
         assert not form.asr_resource_field.isHidden()
 
         form.edit_asr_protocol.setCurrentIndex(
             form.edit_asr_protocol.findData(PROTO_OPENAI)
         )
-        assert form.asr_endpoint_field.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
-        assert form.asr_resource_field.isHidden()
+        assert form.volcano_host.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
         assert not form.base_field.isHidden()
 
         form.edit_asr_protocol.setCurrentIndex(
@@ -1868,7 +1871,7 @@ class TestProviderDialog:
         form.edit_judge_protocol.setCurrentIndex(
             form.edit_judge_protocol.findData(PROTO_OPENAI)
         )
-        form.edit_judge_model.setText("my-model")
+        form.edit_judge_model.setEditText("my-model")
         form._on_save()
         assert "已保存" in form.hint_label.text(), form.hint_label.text()
 
@@ -1913,6 +1916,117 @@ class TestProviderDialog:
             "引用它的能力必须回落本地，否则用户只会看到云端静默失效"
         )
 
+    def test_model_list_is_empty_without_key(self, provider_form):
+        """没有 Key 就不发请求：提示行说清"填好 Key 后自动获取"，而不是静默无反应。"""
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        assert form._models_worker is None, "缺 Key 不该起后台任务"
+        assert "API Key" in form.model_note.text()
+        assert form.btn_refresh_models.isEnabled()
+
+    def test_model_list_fills_editable_combos(self, provider_form, monkeypatch):
+        """配好地址与 Key 后自动拉清单：填进两个可编辑下拉，且不覆盖已填的值。"""
+        from PySide6.QtCore import QObject, Signal as QtSignal
+
+        from app.gui.panes import provider_form as module
+
+        started = []
+
+        class FakeWorker(QObject):
+            listed = QtSignal(object)
+            failed = QtSignal(str)
+            finished_ok = QtSignal()
+
+            def __init__(self, profile, parent=None):
+                super().__init__(parent)
+                self.profile = profile
+
+            def isRunning(self):  # noqa: N802 - 与 QThread 同名
+                return False
+
+            def start(self):  # noqa: N802 - 与 QThread 同名
+                started.append(self.profile.base_url)
+                self.listed.emit(["whisper-1", "gpt-4o-mini"])
+                self.finished_ok.emit()
+
+        monkeypatch.setattr(module, "ModelListWorker", FakeWorker)
+        form, _ = provider_form
+        self._pick(form, "deepseek")           # 切到一家有 base_url 的厂商
+        form.edit_judge_model.setEditText("我手填的模型")
+        form.edit_api_key.setText("sk-test")
+        form._request_models(force=True)
+
+        assert started == ["https://api.deepseek.com/v1"], "应按该厂商的 base_url 拉取"
+        items = [
+            form.edit_judge_model.itemText(i)
+            for i in range(form.edit_judge_model.count())
+        ]
+        assert items == ["whisper-1", "gpt-4o-mini"]
+        assert form.edit_judge_model.currentText() == "我手填的模型", "刷新不该覆盖已填的值"
+        assert form.edit_asr_model.count() == 2, "两个模型字段共用同一份清单"
+        assert "共 2 个" in form.model_note.text()
+
+    def test_model_list_failure_asks_for_manual_input(self, provider_form, monkeypatch):
+        """拉不到（如方舟没有 /models）不是错误：如实说明并请用户手填。"""
+        from PySide6.QtCore import QObject, Signal as QtSignal
+
+        from app.gui.panes import provider_form as module
+
+        class FailingWorker(QObject):
+            listed = QtSignal(object)
+            failed = QtSignal(str)
+            finished_ok = QtSignal()
+
+            def __init__(self, profile, parent=None):
+                super().__init__(parent)
+
+            def isRunning(self):  # noqa: N802
+                return False
+
+            def start(self):  # noqa: N802
+                self.failed.emit("该接口没有返回模型清单（/models 可能不被支持）")
+                self.finished_ok.emit()
+
+        monkeypatch.setattr(module, "ModelListWorker", FailingWorker)
+        form, _ = provider_form
+        form.edit_id.setText("volc")
+        form.edit_api_key.setText("sk-test")
+        form._request_models(force=True)
+        assert "手动填写" in form.model_note.text()
+        assert form.btn_refresh_models.isEnabled(), "失败后刷新按钮要恢复可用"
+
+    def test_model_list_is_cached_per_provider(self, provider_form, monkeypatch):
+        """同一对 (地址, Key) 命中缓存不再打网络；否则来回切厂商会反复请求。"""
+        from PySide6.QtCore import QObject, Signal as QtSignal
+
+        from app.gui.panes import provider_form as module
+
+        calls = []
+
+        class CountingWorker(QObject):
+            listed = QtSignal(object)
+            failed = QtSignal(str)
+            finished_ok = QtSignal()
+
+            def __init__(self, profile, parent=None):
+                super().__init__(parent)
+
+            def isRunning(self):  # noqa: N802
+                return False
+
+            def start(self):  # noqa: N802
+                calls.append(1)
+                self.listed.emit(["m1"])
+                self.finished_ok.emit()
+
+        monkeypatch.setattr(module, "ModelListWorker", CountingWorker)
+        form, _ = provider_form
+        form.edit_api_key.setText("sk-test")
+        form._request_models()
+        form._request_models()
+        assert len(calls) == 1, "第二次应命中缓存"
+        assert "缓存" in form.model_note.text()
+
     def test_restore_builtin_defaults(self, provider_form, monkeypatch):
         from app.core.app_config import AppConfig
         from app.core.providers import DEFAULT_PROFILES
@@ -1923,7 +2037,7 @@ class TestProviderDialog:
         config.providers = [{"id": "volc", "judge_model": "ep-mine", "api_key": "sk-mine"}]
         config.save(config_file)
         form.reload(select="volc")
-        assert form.edit_judge_model.text() == "ep-mine"
+        assert form.edit_judge_model.currentText() == "ep-mine"
 
         monkeypatch.setattr(message, "confirm", lambda *a, **k: True)
         form._on_restore()

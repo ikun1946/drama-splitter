@@ -364,12 +364,17 @@ def main() -> int:
     assert providers.selected_id() == "volc"
     assert providers.edit_id.isEnabled() is False, "内置厂商的 id 必须锁住"
     assert providers.edit_asr_protocol.currentData() == PROTO_VOLC_ARK
-    assert not providers.asr_endpoint_field.isHidden(), "火山转写要看 asr_endpoint"
+    assert not providers.volcano_host.isHidden(), "火山转写要看 asr_endpoint / 资源 ID"
     providers.edit_asr_protocol.setCurrentIndex(
         providers.edit_asr_protocol.findData(PROTO_OPENAI)
     )
-    assert providers.asr_endpoint_field.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
+    assert providers.volcano_host.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
     print("  内置厂商 id 已锁；协议切换后字段显隐正确")
+    # 模型名现在是可编辑下拉 + 按厂商自动刷新：没有 Key 时要在提示行说清原因，
+    # 而不是静默什么都不做（这里绝不发网络请求）
+    assert providers.btn_refresh_models.isEnabled(), "刷新按钮默认可用"
+    assert providers.model_note.text(), "应提示如何获取该厂商的模型列表"
+    print(f"  模型列表提示：{providers.model_note.text()}")
     print(f"  外发预览：{providers.egress_preview.text().splitlines()[0]}")
     providers.reload()
     app.processEvents()

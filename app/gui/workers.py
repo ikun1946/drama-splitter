@@ -40,6 +40,7 @@ from ..core.model_manager import default_whisper_tier, installed_llm_file, spec_
 from ..core.plan import BoundaryPlan
 from ..core.planner import PlanningError, plan_rule_based
 from ..core.probe import MediaInfo, check_compatibility, probe_media
+from ..core.providers import ProviderError
 from ..core.settings import SplitSettings
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "ExportWorker",
     "ModelDownloadWorker",
     "JudgeProbeWorker",
+    "ModelListWorker",
 ]
 
 
@@ -647,3 +649,31 @@ class JudgeProbeWorker(BaseWorker):
         # notes 里是"为什么这样选"（例如"选了云端但没开外发开关，本次仍用本地"），
         # 只显示判定器名字会让用户以为配置没生效。
         self.probed.emit(f"{judge.describe()}（{notes[0]}）" if notes else judge.describe())
+
+
+class ModelListWorker(BaseWorker):
+    """后台拉取某厂商的模型清单（供「厂商管理」自动填充模型名）。
+
+    必须后台：`GET /models` 是网络请求，超时 10 秒——放主线程会把对话框卡住。
+    失败**不算异常**：不少厂商（火山方舟只认推理接入点 ID、部分自建网关）根本没有
+    该端点，`failed` 带的是"请手动填写"的可读原因，界面照原样提示即可。
+    """
+
+    listed = Signal(object)  # list[str]
+
+    def __init__(self, profile, parent=None) -> None:
+        super().__init__(parent)
+        self._profile = profile
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.cloud import list_models
+
+        try:
+            models = list_models(self._profile)
+        except ProviderError as exc:
+            self.fail(exc.describe())
+            return
+        except Exception as exc:  # noqa: BLE001 - 任何异常都变成可读原因
+            self.fail(str(exc))
+            return
+        self.listed.emit(models)

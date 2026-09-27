@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from app.core import cloud
 from app.core.cloud_openai import OpenAiAsrTransport, OpenAiChatTransport
 from app.core.cloud_volc import VolcFlashAsrTransport
@@ -68,6 +70,33 @@ class TestAsrDispatch:
 
     def test_unknown_protocol_returns_none(self):
         assert cloud.build_asr_transport(_profile(asr_protocol="magic")) is None
+
+
+class TestModelListDispatch:
+    def test_volc_ark_only_profile_says_manual(self):
+        """方舟只认推理接入点 ID（不在 /models 里）：要说清"手动填写"，别假装没模型。"""
+        from app.core.providers import ProviderError
+
+        profile = _profile(
+            id="volc", judge_protocol=PROTO_DISABLED, asr_protocol=PROTO_VOLC_ARK
+        )
+        with pytest.raises(ProviderError) as info:
+            cloud.list_models(profile)
+        assert "手动填写" in str(info.value)
+
+    def test_openai_protocol_dispatches_to_listing(self, monkeypatch):
+        """OpenAI 兼容协议要真的去拉清单（这里把底层的网络调用换掉）。"""
+        seen = {}
+
+        def fake_list(base_url, api_key, *, use_system_proxy=False):
+            seen.update(base_url=base_url, api_key=api_key)
+            return ["m1"]
+
+        monkeypatch.setattr(cloud, "_list_openai_models", fake_list)
+        profile = _profile(judge_protocol=PROTO_OPENAI, asr_protocol=PROTO_DISABLED)
+        assert cloud.list_models(profile) == ["m1"]
+        assert seen["base_url"] == "https://api.example.com/v1"
+        assert seen["api_key"] == "sk-x"
 
 
 class TestDispatchKnowsNoVendor:

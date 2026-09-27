@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .cloud_http import (
     extract_chat_text,
+    get_json,
     get_ok,
     post_json,
     post_multipart,
@@ -48,7 +49,7 @@ from .providers import (
     egress_host,
 )
 
-__all__ = ["OpenAiAsrTransport", "OpenAiChatTransport"]
+__all__ = ["OpenAiAsrTransport", "OpenAiChatTransport", "list_models"]
 
 #: 音频后缀 → content-type（只收这些；`CloudAsrEngine` 实际只会给 wav / mp3）
 _ASR_FORMATS = {
@@ -74,6 +75,55 @@ def _seconds_to_ms(value) -> int:
         return max(0, int(round(float(value) * 1000)))
     except (TypeError, ValueError):
         return 0
+
+
+def list_models(
+    base_url: str,
+    api_key: str,
+    *,
+    use_system_proxy: bool = False,
+    timeout: float = 10.0,
+) -> list[str]:
+    """GET ``{base_url}/models`` → 模型 id 列表（OpenAI 兼容形状）。
+
+    用于界面里的"按厂商刷新模型清单"：用户不必再去翻厂商文档抄模型名。
+    形状容错三种：``data[].id``（OpenAI 规范）、``models[].name``（部分网关）、
+    裸字符串列表。**保留原始大小写**（模型名区分大小写），只按字母序排。
+
+    各网关对 `/models` 的支持并不一致（火山方舟只认推理接入点 ID、部分自建网关
+    没有该端点），失败时抛 :class:`ProviderError`：调用方据此提示"手动填写"，
+    而不是假装这家厂商没有模型。
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise ProviderError("未配置接口地址（base_url），无法获取模型清单")
+    if not (api_key or "").strip():
+        raise ProviderError("未配置 API Key，无法获取模型清单")
+    data = get_json(
+        f"{base}/models",
+        {"Authorization": f"Bearer {api_key.strip()}"},
+        timeout=timeout,
+        use_system_proxy=use_system_proxy,
+    )
+    items = data.get("data")
+    if not isinstance(items, list):
+        items = data.get("models") if isinstance(data.get("models"), list) else []
+    if not items:
+        raise ProviderError(
+            "该接口没有返回模型清单（/models 可能不被支持）", status=None
+        )
+    ids: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            value: object = item
+        elif isinstance(item, dict):
+            value = item.get("id") or item.get("name") or item.get("model")
+        else:
+            value = None
+        text = str(value or "").strip()
+        if text and text not in ids:
+            ids.append(text)
+    return sorted(ids, key=str.lower)
 
 
 class OpenAiChatTransport:

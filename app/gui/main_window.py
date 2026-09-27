@@ -432,7 +432,7 @@ class MainWindow(QMainWindow):
 
     # ---- 活跃任务登记 --------------------------------------------------
 
-    WORKER_NAMES = ("probe", "analysis", "export", "download", "judge_probe")
+    WORKER_NAMES = ("probe", "analysis", "export", "download", "judge_probe", "model_list")
 
     def register_worker(self, name: str, worker) -> None:
         """登记一个刚开始运行的后台任务，并在结束时自动注销。
