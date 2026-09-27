@@ -1754,12 +1754,7 @@ class TestProviderDialog:
 
     @staticmethod
     def _pick(form, profile_id: str) -> None:
-        for index in range(form.profile_list.count()):
-            item = form.profile_list.item(index)
-            if item.data(Qt.ItemDataRole.UserRole) == profile_id:
-                form.profile_list.setCurrentRow(index)
-                return
-        raise AssertionError(f"列表里没有 {profile_id}")
+        assert form.select_profile(profile_id), f"列表里没有 {profile_id}"
 
     def test_lists_every_preset_and_marks_builtins(self, provider_form):
         from app.core.providers import DEFAULT_PROFILES
@@ -1773,7 +1768,8 @@ class TestProviderDialog:
         form, _ = provider_form
         self._pick(form, "volc")
         assert form.edit_id.isEnabled() is False, "内置厂商的 id 不可改"
-        assert form.btn_delete.isEnabled(), "按钮本身常亮，处理函数里再拦"
+        assert form.btn_delete.isEnabled() is False, "内置厂商的删除按钮必须置灰"
+        assert form.btn_restore.isEnabled() is True, "内置厂商才能恢复默认"
         assert form.edit_base_url.text().startswith("https://ark."), "字段要回填出内置默认"
 
     def test_protocol_switching_shows_relevant_fields(self, provider_form):

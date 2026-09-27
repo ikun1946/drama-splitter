@@ -346,6 +346,35 @@ def main() -> int:
     app.processEvents()
     print("  模型清单刷新正常")
     model_dialog.close()
+
+    # ---- 厂商管理对话框 ----------------------------------------------------
+    print("[厂商] 对话框：内置不可删、按协议显隐字段…")
+    from app.core.providers import DEFAULT_PROFILES, PROTO_OPENAI, PROTO_VOLC_ARK
+
+    provider_dialog = window.build_provider_dialog()
+    provider_dialog.show()
+    app.processEvents()
+    assert provider_dialog.isVisible(), "厂商管理对话框未显示"
+    providers = provider_dialog.form
+    count = providers.profile_list.count()
+    print(f"  厂商数：{count}（预置 {len(DEFAULT_PROFILES)} 家 + 自定义）")
+    assert count >= len(DEFAULT_PROFILES), "预置目录里的每一家都必须出现在列表里"
+
+    providers.select_profile("volc")
+    assert providers.selected_id() == "volc"
+    assert providers.edit_id.isEnabled() is False, "内置厂商的 id 必须锁住"
+    assert providers.edit_asr_protocol.currentData() == PROTO_VOLC_ARK
+    assert not providers.asr_endpoint_field.isHidden(), "火山转写要看 asr_endpoint"
+    providers.edit_asr_protocol.setCurrentIndex(
+        providers.edit_asr_protocol.findData(PROTO_OPENAI)
+    )
+    assert providers.asr_endpoint_field.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
+    print("  内置厂商 id 已锁；协议切换后字段显隐正确")
+    print(f"  外发预览：{providers.egress_preview.text().splitlines()[0]}")
+    providers.reload()
+    app.processEvents()
+    print("  厂商列表刷新正常")
+    provider_dialog.close()
     export_dialog.close()
     app.processEvents()
 

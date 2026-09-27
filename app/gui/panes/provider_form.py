@@ -18,8 +18,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -240,6 +238,15 @@ class ProviderForm(QWidget):
         item = self.profile_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
 
+    def select_profile(self, profile_id: str) -> bool:
+        """按 id 选中某一行；找不到返回 False（工具与测试都按 id 定位）。"""
+        for index in range(self.profile_list.count()):
+            item = self.profile_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == profile_id:
+                self.profile_list.setCurrentRow(index)
+                return True
+        return False
+
     def current_draft(self) -> ProviderProfile:
         """把界面上的字段收成一份档案（未校验）。"""
         return ProviderProfile(
@@ -305,6 +312,11 @@ class ProviderForm(QWidget):
         self.allow_upload.setChecked(profile.allow_upload)
         self.use_system_proxy.setChecked(profile.use_system_proxy)
         self._loading = False
+        builtin = self._is_builtin(profile.id)
+        # 按钮状态跟着选中项走：给内置档案亮着一个红色「删除」像是能删，
+        # 点下去才发现被拦——不如一开始就置灰。
+        self.btn_delete.setEnabled(not builtin)
+        self.btn_restore.setEnabled(builtin)
         self._refresh_field_visibility()
         self.hint_label.setText("")
 
@@ -331,6 +343,8 @@ class ProviderForm(QWidget):
         self.use_system_proxy.setChecked(False)
         self._loading = False
         self.profile_list.setCurrentItem(None)
+        self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
+        self.btn_restore.setEnabled(False)
         self._refresh_field_visibility()
         self.hint_label.setText("填好 id 与名称后选协议；保存即写入配置。")
 

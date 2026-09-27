@@ -255,6 +255,17 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("07-导出.png", _export_dialog)
 
+    # 08 厂商管理：左列表 + 右字段编辑。选中"火山方舟"（字段最全的一家），
+    # 让截图里能看到"按协议显隐"与只读外发预览。
+    def _provider_dialog():
+        dialog = window.build_provider_dialog()
+        form = dialog.form
+        form.select_profile("volc")
+        pump(app, 0.2)
+        return dialog
+
+    shot_dialog("08-厂商管理.png", _provider_dialog)
+
     workbench.stage_view.player.stop()
     for note in hidden:
         print(f"  提示：{note}")

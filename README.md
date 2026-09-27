@@ -38,6 +38,7 @@
 | 设置（对话框） | [05-设置](docs/screenshots/05-设置.png) |
 | 模型（对话框） | [06-模型](docs/screenshots/06-模型.png) |
 | 导出（对话框） | [07-导出](docs/screenshots/07-导出.png) |
+| 厂商管理（对话框） | [08-厂商管理](docs/screenshots/08-厂商管理.png) |
 
 ![审核](docs/screenshots/04-工作台-审核.png)
 
@@ -75,10 +76,25 @@
 
 ### 云端模型（厂商 API，默认关闭）
 
-除了本地模型，**语音转写与语义判断**也都可以走厂商 API（首版：火山方舟 / 豆包 +
-录音文件识别极速版；设置在 **工具 → 模型管理 → 云端模型（厂商 API）**）。设计见
-[docs/云端模型接入_设计.md](docs/云端模型接入_设计.md)。
+除了本地模型，**语音转写与语义判断**也都可以走厂商 API：**厂商可自定义**，预置十几家
+（国内 DeepSeek / Kimi / 智谱 / 百炼 / 混元 / 硅基流动 / 星火 / 阶跃，海外 OpenAI / Groq /
+Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方舟）。设置在
+**工具 → 模型管理 → 云端模型（厂商 API）**，或直接 **工具 → 厂商管理…**。
+协议与厂商解耦，设计见 [docs/云端模型接入_设计.md](docs/云端模型接入_设计.md) §11。
 
+**厂商是数据，协议是信封**：加一家厂商 = 加一份预置数据（`DEFAULT_PROFILES`），
+只有新增一种*协议*才需要写适配器。协议是封闭集合：
+
+| 协议 | 覆盖什么 | 说明 |
+|---|---|---|
+| **OpenAI 兼容** | 对话补全 `/chat/completions`；音频转写 `/audio/transcriptions` | 绝大多数厂商都提供；转写固定带 `response_format=verbose_json` + `timestamp_granularities[]=word` |
+| **火山方舟** | 豆包「大模型录音文件识别极速版」 | 转写专有协议；方舟的语义判断本身是 OpenAI 形态，走上一行 |
+| 停用 | — | 该能力不配云端 |
+
+- **厂商可增删改**：厂商管理对话框里「新增 / 复制为自定义 / 删除 / 恢复默认」；
+  内置厂商 id 不可改、不可删（可改字段或恢复默认），删除/恢复会把引用它的能力回落本地。
+  「模型管理」的云端卡片只负责"选谁 + 填 Key + 开关 + 测通"，地址/协议/模型名统一在
+  厂商管理里改，卡片上有一行只读的协议与外发预览。
 - **默认零外发**：档案默认未启用、未勾选「允许外发素材」；两个开关任一为关，
   请求一个都不发，并在日志里说明"选了云端但没生效"的具体原因。
 - **两条能力各自独立**：转写与语义判断分别勾选、分别测连通、分别切换；
@@ -89,18 +105,23 @@
 - **必须测通才允许启用**：点「保存并测试连通性」通过后才切到云端，
   避免"以为通了、真正分析时才回退本地"。转写的连通性用 1 秒静音样片探测
   （不读用户素材、不依赖 ffmpeg），厂商对静音的返回码 `20000003` 同样证明
-  Key 与资源权限是通的。
+  Key 与资源权限是通的；OpenAI 兼容转写若拒绝静音样片，会退化为 `GET /models`
+  验鉴权，并在日志里如实写明"只验证了鉴权、没验证模型"。
 - **失败不致命**：云端不可用（鉴权、限流、断网、额度）自动回退本地并说明原因
   （转写会说清是第几段失败，然后整体回退本地重跑，不做"半云端半本地"拼接），
   不会把整轮分析判为失败；"仅云端"模式下则如实降级为规则评分 / 跳过转写。
 - **本地管线一条都不重写**：分块（静音吸附）、抽音、块起点偏移回填、跨块去重、
   句子重建、缓存全部沿用本地同一套代码，云端只换"每块怎么转写"这一处；
   缓存按后端隔离，换后端不会复用旧转写。
+- **时间戳的降级是明说的**：厂商给了 `words[]` 就用词级时间戳；只给分句的
+  （如 SenseVoice）合成为分句级并记 `ASR_NO_WORD_TIMESTAMPS` 风险；
+  **给了文本却一个时间戳都没有则直接报错**——绝不静默当成"这段没有语音"。
 - **Key 不落日志、不进方案快照**：可存本地 `config.json`（明文，界面有标注），
-  也可用环境变量 `DRAMA_VOLC_API_KEY` 覆盖（部署场景更可控）。
-- 换第二家厂商 = 新增适配器 + 一份档案（`app/core/cloud.py` 里登记一行），
-  调用方与核心算法不动；接入前须自证**词级时间戳**，否则只能按质量降级处理
-  （厂商只给分句时，程序会记为 `ASR_NO_WORD_TIMESTAMPS` 风险并降级到分句级）。
+  也可用环境变量 `DRAMA_<厂商 id>_API_KEY`（如 `DRAMA_VOLC_API_KEY`）覆盖，
+  部署场景更可控；厂商管理里每个 Key 输入框下方都写明对应的环境变量名。
+- 接入一个**新协议**（例如某家的原生转写）= 写一对 `JudgeTransport` / `AsrTransport`
+  + 在 `app/core/cloud.py` 的协议表里登记一行，调用方与核心算法不动；
+  接入前须自证**词级时间戳**，否则只能按质量降级处理。
 
 ### 下载链路上的三个硬约束（都是实测踩出来的）
 
@@ -164,7 +185,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §6.1 规则草案兜底路径 | `app/core/planner.py` | 完成 |
 | §10.1–10.2 候选图 + 动态规划 | `app/core/solver.py` | 完成 |
 | §11 语义判断、请求校验、预算与降级 | `app/core/semantic.py` | 完成（模型接口就绪，推理栈待接入） |
-| § 云端模型（厂商 API，默认关闭；首版火山/豆包，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge` | 完成（真机冒烟待跑，需 Key） |
+| § 云端模型（厂商 API，默认关闭；协议化多厂商 + 厂商管理，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_http.py`、`cloud_openai.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge`、`app/gui/panes/provider_form.py` | 完成（真机冒烟待跑，需 Key） |
 | §11 事件索引与整集复核 | `app/core/semantic.py` / `review.py` | 完成 |
 | § 三种策略（剧情/悬念/时长） | `solver.py` + `recommend.py` | 完成 |
 | §7.2 单集字幕导出（SRT） | `app/core/episode_files.py` | 完成 |
@@ -220,7 +241,7 @@ python -m venv .venv
 ## 验证
 
 ```bash
-# 单元与端到端测试（505 项：485 通过 / 20 项按环境跳过——缺合成语音素材 / whisper 模型 / LLM 模型时）
+# 单元与端到端测试（576 项：556 通过 / 20 项按环境跳过——缺合成语音素材 / whisper 模型 / LLM 模型时）
 .venv/Scripts/python.exe -m pytest tests/ -q
 
 # 界面全链路冒烟（离屏运行，含真实编码与逐帧校验）
@@ -321,9 +342,11 @@ app/core/          引擎（不依赖界面，可独立测试）
   candidates.py      候选数据库：收集、合并、评分、限流（§8.2、§8.4）
   solver.py          候选图 + 动态规划（§10.1–10.2）
   semantic.py        语义判断、请求校验、预算与降级；本地/云端判定器共用提示词与解析（§11）
-  providers.py       厂商档案（地址/Key/两个开关）、后端偏好、适配器协议（Judge/Asr）
-  cloud.py           档案 → 适配器映射（加一家厂商就改这一行）
-  cloud_volc.py      火山方舟适配器（chat + 录音文件识别极速版，只放厂商差异）
+  providers.py       厂商档案（地址/协议/两个开关）、扩展预置目录、后端偏好、适配器协议与纯逻辑校验
+  cloud.py           协议 → 适配器映射（按协议分派；加一家厂商只加一份数据，不改这里）
+  cloud_http.py      适配器公用 HTTP（代理策略 / 超时 / 错误映射 / multipart / 静音样片）
+  cloud_openai.py    OpenAI 兼容适配器（/chat/completions + /audio/transcriptions，词级时间戳）
+  cloud_volc.py      火山方舟转写适配器（录音文件识别极速版，只放厂商差异）
   cloud_asr.py       云端转写引擎（复用本地分块/抽音/偏移/去重，只换每块怎么转写）
   review.py          事件索引与整集复核
   recommend.py       剧情/悬念/时长三种策略
@@ -340,9 +363,10 @@ app/gui/           界面（PySide6-Essentials）
     review_pane.py     左栏·分集审核（集列表 / 当前集 / 切点操作）
     analysis_pane.py   中栏·分析进度（阶段 / 进度 / 最近输出）
     settings_form.py   分集设置表单（由对话框承载，取消即回滚）
-    model_form.py      模型表单（清单 / 体积 / 磁盘预检 / 下载删除）
+    model_form.py      模型表单（两组卡片 / 「使用中」/ 下载删除 / 云端卡片只留"选厂商+Key+测通"）
+    provider_form.py   厂商表单（列表 + 字段编辑 / 协议显隐 / 只读外发预览）
     export_form.py     导出表单（§37 前置检查在这里做，决策点在对话框）
-  dialogs/           对话框：DialogShell + 设置 / 模型 / 导出
+  dialogs/           对话框：DialogShell + 设置 / 模型 / 厂商 / 导出
     base.py            外壳与「自动化里不许 exec()」的约定
   widgets/           通用控件
     timeline.py        轻量时间轴（静态层缓存 + 播放头局部重绘）
@@ -369,7 +393,7 @@ tools/             开发与验证工具
   gui_smoke.py       界面全链路冒烟
   build_package.py   打包与自检
   diagnose_*.py      切帧行为诊断（下述三个坑的取证过程）
-tests/             505 项自动化测试（18 个文件：485 通过 / 20 按环境跳过，不静默假通过）
+tests/             576 项自动化测试（20 个文件：556 通过 / 20 按环境跳过，不静默假通过）
 testdata/          合成素材（不入版本库）
 ```
 
