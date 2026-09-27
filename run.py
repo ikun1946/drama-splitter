@@ -127,6 +127,7 @@ def _ui_smoke() -> int:
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
+    from app.core.providers import DEFAULT_PROFILES
     from app.gui.main_window import MainWindow
 
     window = MainWindow()
@@ -140,10 +141,11 @@ def _ui_smoke() -> int:
     assert workbench.inspector is not None, "右栏检查器应常驻"
     print(f"  底栏主动作：{window.bottom.action_text()}")
 
-    # 三个对话框都必须能构造并显示
+    # 四个对话框都必须能构造并显示
     for label, factory in (
         ("分集设置", window.build_settings_dialog),
         ("模型管理", window.build_model_dialog),
+        ("厂商管理", window.build_provider_dialog),
         ("导出", window.build_export_dialog),
     ):
         dialog = factory()
@@ -151,6 +153,21 @@ def _ui_smoke() -> int:
         app.processEvents()
         print(f"  {label}对话框：可构造、可显示（{dialog.width()}×{dialog.height()}）")
         dialog.close()
+
+    provider_dialog = window.build_provider_dialog()
+    provider_dialog.show()
+    app.processEvents()
+    provider_form = provider_dialog.form
+    count = provider_form.profile_list.count()
+    print(f"厂商列表：{count} 家（预置目录 {len(DEFAULT_PROFILES)} 家 + 自定义）")
+    selected = provider_form.selected_id()
+    print(f"  默认选中：{selected}")
+    provider_form.reload()
+    app.processEvents()
+    provider_dialog.close()
+    if count < len(DEFAULT_PROFILES):
+        print("界面自检失败：厂商列表少于预置目录")
+        return 1
 
     model_dialog = window.build_model_dialog()
     model_dialog.show()

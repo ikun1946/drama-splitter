@@ -18,6 +18,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界�
 
 from fractions import Fraction  # noqa: E402
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -790,6 +791,18 @@ class TestCloudModelCard:
         )
         return window.build_model_dialog().form
 
+    @staticmethod
+    def _set_judge_model(form, model: str = "ep-test") -> None:
+        """judge_model 已搬到「厂商管理」：测试里写进配置再回填本页控件。
+
+        卡片上不再有"模型名"输入框（地址/协议/模型名统一在厂商管理里改），
+        因此这里模拟"用户刚在厂商管理里填好并保存"的状态。
+        """
+        form._config.providers = [
+            item for item in form._config.providers if str(item.get("id")) != "volc"
+        ] + [{"id": "volc", "judge_model": model}]
+        form._load_cloud_fields()
+
     def test_defaults_are_closed_and_local(self, window, tmp_path, monkeypatch):
         from app.core.app_config import LOCAL_BACKEND
         from app.core.providers import CAP_JUDGE
@@ -806,7 +819,7 @@ class TestCloudModelCard:
         from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        form.cloud_model.setText("ep-test")
+        self._set_judge_model(form)
         form.cloud_key.setText("sk-test")
         form.cloud_allow.setChecked(True)
         form.cloud_enable.setChecked(True)
@@ -832,7 +845,7 @@ class TestCloudModelCard:
         from app.core.app_config import AppConfig
 
         form = self._form(window, tmp_path, monkeypatch)
-        form.cloud_model.setText("ep-test")
+        self._set_judge_model(form)
         form.cloud_key.setText("sk-test")
         form.cloud_allow.setChecked(True)
         form.cloud_enable.setChecked(True)
@@ -870,7 +883,7 @@ class TestCloudModelCard:
         from app.core.app_config import AppConfig
 
         form = self._form(window, tmp_path, monkeypatch)
-        form.cloud_model.setText("ep-test")
+        self._set_judge_model(form)
         form.cloud_key.setText("sk-test")
         form.cloud_allow.setChecked(True)
         form.cloud_enable.setChecked(True)
@@ -894,7 +907,7 @@ class TestCloudModelCard:
         from app.gui.state import payload_text
 
         form = self._form(window, tmp_path, monkeypatch)
-        form.cloud_model.setText("ep-test")
+        self._set_judge_model(form)
         form.cloud_key.setText("sk-secret-value")
         monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
         form.cloud_enable.setChecked(True)
@@ -1714,3 +1727,177 @@ class TestActiveModelWiring:
             models_dir=str(tmp_path), llm_model_key="llm:2B:Q8_0"
         ).save(patched_config)
         assert workers.configured_ollama_model() is None, "未安装时应退回自动选择"
+
+
+# ---------------------------------------------------------------------------
+# 厂商管理：用户能自己增删改厂商，且连带处理不留"静默失效"
+# ---------------------------------------------------------------------------
+
+
+class TestProviderDialog:
+    """厂商管理对话框：内置不可删、id 不可改，自定义可增删，删了要回落本地。"""
+
+    @pytest.fixture
+    def provider_form(self, window, qapp, tmp_path):
+        from app.core.app_config import AppConfig
+        from app.core.providers import DEFAULT_PROFILES
+
+        config_file = tmp_path / "config.json"
+        AppConfig().save(config_file)
+        dialog = window.build_provider_dialog(config_path=config_file)
+        dialog.show()
+        qapp.processEvents()
+        form = dialog.form
+        yield form, config_file
+        dialog.close()
+        assert DEFAULT_PROFILES, "预置目录不该为空"
+
+    @staticmethod
+    def _pick(form, profile_id: str) -> None:
+        for index in range(form.profile_list.count()):
+            item = form.profile_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == profile_id:
+                form.profile_list.setCurrentRow(index)
+                return
+        raise AssertionError(f"列表里没有 {profile_id}")
+
+    def test_lists_every_preset_and_marks_builtins(self, provider_form):
+        from app.core.providers import DEFAULT_PROFILES
+
+        form, _ = provider_form
+        assert form.profile_list.count() == len(DEFAULT_PROFILES)
+        labels = [form.profile_list.item(i).text() for i in range(form.profile_list.count())]
+        assert all("（内置）" in text for text in labels)
+
+    def test_builtin_id_is_locked_and_undeletable(self, provider_form):
+        form, _ = provider_form
+        self._pick(form, "volc")
+        assert form.edit_id.isEnabled() is False, "内置厂商的 id 不可改"
+        assert form.btn_delete.isEnabled(), "按钮本身常亮，处理函数里再拦"
+        assert form.edit_base_url.text().startswith("https://ark."), "字段要回填出内置默认"
+
+    def test_protocol_switching_shows_relevant_fields(self, provider_form):
+        from app.core.providers import PROTO_DISABLED, PROTO_OPENAI, PROTO_VOLC_ARK
+
+        form, _ = provider_form
+        self._pick(form, "volc")
+        assert not form.asr_endpoint_field.isHidden(), "火山转写要看 asr_endpoint"
+        assert not form.asr_resource_field.isHidden()
+
+        form.edit_asr_protocol.setCurrentIndex(
+            form.edit_asr_protocol.findData(PROTO_OPENAI)
+        )
+        assert form.asr_endpoint_field.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
+        assert form.asr_resource_field.isHidden()
+        assert not form.base_field.isHidden()
+
+        form.edit_asr_protocol.setCurrentIndex(
+            form.edit_asr_protocol.findData(PROTO_DISABLED)
+        )
+        form.edit_judge_protocol.setCurrentIndex(
+            form.edit_judge_protocol.findData(PROTO_DISABLED)
+        )
+        assert form.base_field.isHidden(), "两条能力都停用时，接口地址没有意义"
+        assert form.asr_model_field.isHidden()
+
+    def test_egress_preview_follows_protocol(self, provider_form):
+        """外发预览必须跟着协议变——它抵掉了本页删掉的两个输入框。"""
+        from app.core.providers import PROTO_OPENAI
+
+        form, _ = provider_form
+        self._pick(form, "volc")
+        form.edit_asr_protocol.setCurrentIndex(
+            form.edit_asr_protocol.findData(PROTO_OPENAI)
+        )
+        preview = form.egress_preview.text()
+        assert "openspeech" not in preview, "换成 OpenAI 兼容后不该再报火山主机"
+        assert "ark.cn-beijing.volces.com" in preview
+
+    def test_new_profile_is_validated_before_save(self, provider_form):
+        from app.core.app_config import AppConfig
+
+        form, config_file = provider_form
+        form._on_new()
+        form.edit_id.setText("Bad-ID")            # 大写不合法
+        form.edit_label.setText("测试厂商")
+        form._on_save()
+        assert "保存失败" in form.hint_label.text()
+        assert not AppConfig.load(config_file).providers, "校验不过就不该落盘"
+
+    def test_save_custom_profile_roundtrips(self, provider_form):
+        from app.core.app_config import AppConfig
+        from app.core.providers import PROTO_OPENAI
+        from app.gui.widgets import message
+
+        form, config_file = provider_form
+        form._on_new()
+        form.edit_id.setText("my-gateway")
+        form.edit_label.setText("自建网关")
+        form.edit_base_url.setText("https://gateway.example.com/v1")
+        form.edit_judge_protocol.setCurrentIndex(
+            form.edit_judge_protocol.findData(PROTO_OPENAI)
+        )
+        form.edit_judge_model.setText("my-model")
+        form._on_save()
+        assert "已保存" in form.hint_label.text(), form.hint_label.text()
+
+        profile = AppConfig.load(config_file).profiles().get("my-gateway")
+        assert profile is not None
+        assert profile.label == "自建网关"
+        assert profile.judge_protocol == PROTO_OPENAI
+        assert profile.supports("judge"), "协议 + 模型名齐了就该算可用"
+        assert message is not None  # 用例里不弹窗，仅确认模块可导入
+
+    def test_duplicate_prepares_new_id(self, provider_form):
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        form._on_duplicate()
+        assert form.edit_id.text() == "", "复制出的档案必须让用户自己填新 id"
+        assert form.edit_id.isEnabled() is True
+        assert "副本" in form.edit_label.text()
+        assert "重复" in form.hint_label.text()
+
+    def test_delete_reverts_referencing_capability(self, provider_form, monkeypatch):
+        from app.core.app_config import LOCAL_BACKEND, AppConfig
+        from app.core.providers import CAP_JUDGE
+        from app.gui.widgets import message
+
+        form, config_file = provider_form
+        config = AppConfig.load(config_file)
+        config.providers = [
+            {"id": "my-gateway", "label": "自建网关", "base_url": "https://g.example.com/v1",
+             "judge_model": "m", "judge_protocol": "openai", "enabled": True,
+             "allow_upload": True}
+        ]
+        config.backend_prefs = {CAP_JUDGE: "my-gateway"}
+        config.save(config_file)
+        form.reload(select="my-gateway")
+
+        monkeypatch.setattr(message, "confirm", lambda *a, **k: True)
+        form._on_delete()
+
+        saved = AppConfig.load(config_file)
+        assert saved.profiles().get("my-gateway") is None, "自定义档案应被删掉"
+        assert saved.backend_for(CAP_JUDGE) == LOCAL_BACKEND, (
+            "引用它的能力必须回落本地，否则用户只会看到云端静默失效"
+        )
+
+    def test_restore_builtin_defaults(self, provider_form, monkeypatch):
+        from app.core.app_config import AppConfig
+        from app.core.providers import DEFAULT_PROFILES
+        from app.gui.widgets import message
+
+        form, config_file = provider_form
+        config = AppConfig.load(config_file)
+        config.providers = [{"id": "volc", "judge_model": "ep-mine", "api_key": "sk-mine"}]
+        config.save(config_file)
+        form.reload(select="volc")
+        assert form.edit_judge_model.text() == "ep-mine"
+
+        monkeypatch.setattr(message, "confirm", lambda *a, **k: True)
+        form._on_restore()
+
+        saved = AppConfig.load(config_file)
+        profile = saved.profiles().get("volc")
+        assert profile.judge_model == DEFAULT_PROFILES[0].judge_model, "回到内置默认"
+        assert profile.api_key == "", "恢复默认要清掉已保存的 Key"

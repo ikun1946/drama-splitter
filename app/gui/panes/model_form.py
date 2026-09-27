@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -61,8 +61,10 @@ from ...core.providers import (
     CAP_JUDGE,
     CAP_LABELS,
     ENV_KEY_TEMPLATE,
+    PROTO_LABELS,
     ProviderError,
     describe_egress,
+    missing_config_reason,
 )
 from ..state import ProjectState
 from ..theme import current_mode, qcolor
@@ -184,6 +186,9 @@ class _ModelRow(QFrame):
 class ModelForm(QWidget):
     """模型管理与「使用中」切换。"""
 
+    #: 请求打开「厂商管理」对话框（携带配置路径，便于注入到临时文件）
+    manage_providers_requested = Signal(object)
+
     LOG_COLLAPSED = 64    # 折叠时约三行
     LOG_EXPANDED = 220
 
@@ -287,12 +292,10 @@ class ModelForm(QWidget):
         # 读的人找不到"哪几项是凭据、哪几项是能力开关"。
         self.cloud_card = Card("云端模型（厂商 API）", parent=self, body_layout=QVBoxLayout())
         self.cloud_combo = NoWheelComboBox()
+        self.cloud_combo.setMaxVisibleItems(12)   # 预置厂商有十几家，别拉成一长条
         self.cloud_combo.currentIndexChanged.connect(self._on_cloud_profile_changed)
-        self.cloud_base_url = QLineEdit()
-        self.cloud_model = QLineEdit()
-        self.cloud_model.setPlaceholderText(
-            "推理接入点 ID 或模型名，如 ep-2026xxxx / doubao-seed-1.6"
-        )
+        self.btn_manage_providers = QPushButton("管理厂商…")
+        self.btn_manage_providers.clicked.connect(self._request_manage_providers)
         self.cloud_key = QLineEdit()
         self.cloud_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.cloud_key.setPlaceholderText("明文保存在本地配置文件，可被环境变量覆盖")
@@ -308,26 +311,28 @@ class ModelForm(QWidget):
         self.cloud_hint = QLabel("")
         self.cloud_hint.setWordWrap(True)
         self.cloud_hint.setProperty("role", "muted")
+        # 地址与模型名搬去「厂商管理」后，这一行必须把"现在到底怎么答的"摆出来，
+        # 否则用户改完协议回到本页，看不出改没改到、生效没有。
+        self.cloud_preview = QLabel("")
+        self.cloud_preview.setWordWrap(True)
+        self.cloud_preview.setProperty("role", "muted")
         cloud_note = QLabel(
-            "两条能力相互独立，可只用其一；未启用时走本地模型（转写＝whisper，"
-            "语义判断＝llama.cpp / Ollama）。勾选后必须先「保存并测试连通性」，"
-            "测通的那一项才会真正切到云端。"
+            "两条能力相互独立，可只用其一；未启用时走本地模型（转写＝「使用中」的 whisper，"
+            "语义判断＝llama.cpp / Ollama 里「使用中」的档位）。地址、协议与模型名在"
+            "「管理厂商…」里改；勾选后必须先「保存并测试连通性」，测通的那一项才会真正切到云端。"
         )
         cloud_note.setWordWrap(True)
         cloud_note.setProperty("role", "muted")
 
         profile_field = LabeledField("厂商档案")
         profile_field.attach(self.cloud_combo)
-
-        url_field = LabeledField("接口地址（base_url）")
-        url_field.attach(self.cloud_base_url)
-        model_field = LabeledField("模型名（judge_model）")
-        model_field.attach(self.cloud_model)
-        endpoint_row = QHBoxLayout()
-        endpoint_row.setContentsMargins(0, 0, 0, 0)
-        endpoint_row.setSpacing(12)
-        endpoint_row.addWidget(url_field, 3)
-        endpoint_row.addWidget(model_field, 2)
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        profile_row.setSpacing(12)
+        profile_row.addWidget(profile_field, 3)
+        profile_row.addWidget(
+            self.btn_manage_providers, 0, Qt.AlignmentFlag.AlignBottom
+        )
 
         key_field = LabeledField("API Key")
         key_field.attach(self.cloud_key)
@@ -357,8 +362,8 @@ class ModelForm(QWidget):
         cloud_action_row.addWidget(self.btn_cloud_save)
         cloud_action_row.addWidget(self.cloud_hint, 1)
 
-        self.cloud_card.body_layout.addWidget(profile_field)
-        self.cloud_card.body_layout.addLayout(endpoint_row)
+        self.cloud_card.body_layout.addLayout(profile_row)
+        self.cloud_card.body_layout.addWidget(self.cloud_preview)
         self.cloud_card.body_layout.addWidget(key_field)
         self.cloud_card.body_layout.addWidget(self.cloud_allow)
         self.cloud_card.body_layout.addWidget(ability_box)
@@ -808,60 +813,103 @@ class ModelForm(QWidget):
 
         profile = self._cloud_profile()
         if profile is None:
+            self.cloud_preview.setText("")
             return
-        self.cloud_base_url.setText(profile.base_url)
-        self.cloud_model.setText(profile.judge_model)
         self.cloud_key.setText(profile.api_key)
         self.cloud_allow.setChecked(profile.allow_upload)
         self.cloud_enable.setChecked(self._capability_uses_cloud(profile, CAP_JUDGE))
         self.cloud_asr_enable.setChecked(self._capability_uses_cloud(profile, CAP_ASR))
+        self._refresh_cloud_preview(profile)
         self._refresh_cloud_hint()
+
+    def _refresh_cloud_preview(self, profile) -> None:
+        """只读预览：这家厂商的两条能力各用什么协议、发往哪台主机、用的是哪个模型。
+
+        地址与模型名搬去「厂商管理」后，本页必须留下这一行：否则用户改完协议回来，
+        看不出"现在到底会怎么发"，也无从核对是不是改对了。
+        """
+        judge_protocol = PROTO_LABELS.get(profile.judge_protocol, profile.judge_protocol)
+        asr_protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
+        self.cloud_preview.setText(
+            "协议：语义判断 = "
+            f"{judge_protocol}，转写 = {asr_protocol}\n"
+            f"接口：{profile.base_url or '（未填）'}\n"
+            f"模型：语义判断 = {profile.judge_model or '（未填）'}，"
+            f"转写 = {profile.asr_model_name or '（未填）'}\n"
+            f"{describe_egress(profile)}"
+        )
 
     def _capability_uses_cloud(self, profile, capability: str) -> bool:
         """该能力此刻是否真的走这家云端（选了 + 档案已测通）。"""
         return profile.enabled and self._config.backend_for(capability) == profile.id
 
+    def _request_manage_providers(self) -> None:
+        """请求主窗口打开「厂商管理」（本分区不自己开对话框，见 panes/__init__ 的约定）。"""
+        self.manage_providers_requested.emit(self._config_path)
+
+    def reload_after_provider_edit(self) -> None:
+        """厂商管理关闭后回来：重新读盘并刷新本页。
+
+        刻意**重新 load** 而不是共用同一个 AppConfig 对象——厂商对话框自己会保存
+        配置，两边各持一份可变对象必然互相覆盖。
+        """
+        self._config = AppConfig.load(self._config_path)
+        self._load_cloud_fields()
+        self.refresh()
+
     def _probe_cloud(self, profile, capability: str) -> str | None:
         """连通性测试的接缝：返回错误描述；可用时返回 None。
 
         单独一个方法是为了让测试能替换掉它——界面测试不允许真联网。
+        能力是否**配置完整**统一问 `missing_config_reason()`（与日志/检查器同一份
+        判据），否则多协议之后这里会与核心层各说各话。
         """
         if not profile.allow_upload:
             return "未勾选「允许外发素材」"
         if not profile.resolved_api_key():
             env_name = ENV_KEY_TEMPLATE.format(id=profile.id.upper())
             return f"没有 API Key（可填在本页，或设环境变量 {env_name}）"
-        if capability == CAP_JUDGE and not profile.judge_model:
-            return "未填写模型名（judge_model）"
-        if capability == CAP_ASR and not profile.supports(CAP_ASR):
-            return "未配置转写接口（asr_endpoint / asr_resource_id）"
+        missing = missing_config_reason(profile, capability)
+        if missing is not None:
+            return missing
         transport = (
             build_judge_transport(profile)
             if capability == CAP_JUDGE
             else build_asr_transport(profile)
         )
         if transport is None:
-            return f"暂不支持该厂商的{CAP_LABELS.get(capability, capability)}：{profile.id}"
+            protocol = profile.judge_protocol if capability == CAP_JUDGE else profile.asr_protocol
+            label = PROTO_LABELS.get(protocol, protocol)
+            return (
+                f"暂不支持「{label}」协议的"
+                f"{CAP_LABELS.get(capability, capability)}：{profile.id}"
+            )
         try:
             transport.probe()
         except ProviderError as exc:
             return exc.describe()
         except Exception as exc:  # noqa: BLE001 - 任何异常都算"不通"
             return str(exc)
+        # 有的厂商不接受静音样片，只能退化为"验过鉴权"：如实写进日志，不假装全测过
+        note = getattr(transport, "probe_note", "")
+        if note:
+            self._append(
+                f"{profile.label}／{CAP_LABELS.get(capability, capability)}：{note}",
+                "warn",
+            )
         return None
 
     def _save_cloud(self) -> None:
-        """保存字段 → 逐能力测连通 → 只把测通的能力切到云端。
+        """保存本页的开关与 Key → 逐能力测连通 → 只把测通的能力切到云端。
 
         失败一律**不允许启用**：否则用户会以为通了，直到真正分析时才回退本地。
+        地址/协议/模型名由「厂商管理」负责，这里只动本页的字段。
         """
         profile = self._cloud_profile()
         if profile is None:
             self._append("没有可用的厂商档案。", "error")
             return
         updated = profile.with_updates(
-            base_url=self.cloud_base_url.text().strip(),
-            judge_model=self.cloud_model.text().strip(),
             api_key=self.cloud_key.text().strip(),
             allow_upload=self.cloud_allow.isChecked(),
         )

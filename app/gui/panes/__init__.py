@@ -6,8 +6,8 @@
 - ``import_pane.py``   左栏·素材（源文件 / 媒体摘要 / 主对白音轨）
 - ``review_pane.py``   左栏·分集审核（集列表 / 当前集 / 切点操作）
 - ``analysis_pane.py`` 中栏·分析进度（阶段 / 进度 / 最近输出）
-- ``settings_form.py`` / ``model_form.py`` / ``export_form.py``
-  三个表单，分别由 ``app/gui/dialogs/`` 下的对话框承载
+- ``settings_form.py`` / ``model_form.py`` / ``export_form.py`` / ``provider_form.py``
+  四个表单，分别由 ``app/gui/dialogs/`` 下的对话框承载
 
 三栏装配与阶段驱动在 ``app/gui/workbench.py``；舞台（预览 + 时间轴 + 播放）
 是 ``app/gui/widgets/stage_view.py``。
@@ -32,6 +32,7 @@ from .analysis_pane import AnalysisPane
 from .export_form import ExportForm, export_precheck
 from .import_pane import ImportPane
 from .model_form import ModelForm
+from .provider_form import ProviderForm
 from .review_pane import ReviewPane
 from .settings_form import SettingsForm
 
@@ -40,6 +41,7 @@ __all__ = [
     "ExportForm",
     "ImportPane",
     "ModelForm",
+    "ProviderForm",
     "ReviewPane",
     "SettingsForm",
     "export_precheck",

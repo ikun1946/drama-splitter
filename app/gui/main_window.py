@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from ..core.app_config import AppConfig
 from ..core.plan import BoundaryPlan
 from ..core.settings import SplitSettings
-from .dialogs import ExportDialog, ModelDialog, SettingsDialog
+from .dialogs import ExportDialog, ModelDialog, ProviderDialog, SettingsDialog
 from .stage import Stage, primary_action, stage_caption
 from .state import ProjectState, payload_text
 from .theme import apply_theme, current_mode
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog: SettingsDialog | None = None
         self.model_dialog: ModelDialog | None = None
         self.export_dialog: ExportDialog | None = None
+        self.provider_dialog: ProviderDialog | None = None
 
         self._connect()
         self._build_menu()
@@ -165,6 +166,7 @@ class MainWindow(QMainWindow):
         tools_menu = bar.addMenu("工具")
         self._add_action(tools_menu, "分集设置…", self.open_settings_dialog)
         self._add_action(tools_menu, "模型管理…", self.open_model_dialog)
+        self._add_action(tools_menu, "厂商管理…", self.open_provider_dialog)
         self._add_action(tools_menu, "导出…", self._start_export, "Ctrl+E")
 
         view_menu = bar.addMenu("视图")
@@ -193,7 +195,23 @@ class MainWindow(QMainWindow):
 
     def build_model_dialog(self) -> ModelDialog:
         self.model_dialog = ModelDialog(self.state, self)
+        # 模型页只负责"选谁 + 填 Key + 测通"；地址/协议/模型名在厂商管理里改，
+        # 因此关掉那个对话框后必须让本页重新读盘（否则两边各持一份旧配置）。
+        self.model_dialog.form.manage_providers_requested.connect(
+            self._on_manage_providers_requested
+        )
         return self.model_dialog
+
+    def build_provider_dialog(self, *, config_path=None) -> ProviderDialog:
+        """构建厂商管理对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
+        self.provider_dialog = ProviderDialog(self.state, self, config_path=config_path)
+        return self.provider_dialog
+
+    def _on_manage_providers_requested(self, config_path=None) -> None:
+        """模型页的「管理厂商…」：打开对话框，回来后刷新模型页的云端卡片。"""
+        self.build_provider_dialog(config_path=config_path).exec()
+        if self.model_dialog is not None:
+            self.model_dialog.form.reload_after_provider_edit()
 
     def build_export_dialog(self) -> ExportDialog:
         dialog = ExportDialog(self.state, self)
@@ -206,6 +224,13 @@ class MainWindow(QMainWindow):
 
     def open_model_dialog(self) -> None:
         self.build_model_dialog().exec()
+
+    def open_provider_dialog(self) -> None:
+        """菜单「工具 → 厂商管理…」：不经过模型页也能直接进来改档案。"""
+        dialog = self.build_provider_dialog()
+        dialog.exec()
+        if self.model_dialog is not None:
+            self.model_dialog.form.reload_after_provider_edit()
 
     def _start_export(self) -> None:
         """打开导出对话框并直接开始（前置检查由对话框负责，Ctrl+E 同路）。"""
