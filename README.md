@@ -36,9 +36,9 @@
 | 分析中 | [03-分析中](docs/screenshots/03-工作台-分析中.png) |
 | 审核（时间轴） | [04-审核](docs/screenshots/04-工作台-审核.png) |
 | 设置（对话框） | [05-设置](docs/screenshots/05-设置.png) |
-| 模型（对话框） | [06-模型](docs/screenshots/06-模型.png) |
+| 模型（对话框 · 本地） | [06-模型](docs/screenshots/06-模型.png) |
 | 导出（对话框） | [07-导出](docs/screenshots/07-导出.png) |
-| 厂商管理（对话框） | [08-厂商管理](docs/screenshots/08-厂商管理.png) |
+| 云端厂商（模型管理里的页签） | [08-云端厂商](docs/screenshots/08-云端厂商.png) |
 | 选择云端模型（对话框） | [09-选择云端模型](docs/screenshots/09-选择云端模型.png) |
 
 ![审核](docs/screenshots/04-工作台-审核.png)
@@ -82,9 +82,10 @@
 
 除了本地模型，**语音转写与语义判断**也都可以走厂商 API：**厂商可自定义**，预置十几家
 （国内 DeepSeek / Kimi / 智谱 / 百炼 / 混元 / 硅基流动 / 星火 / 阶跃，海外 OpenAI / Groq /
-Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方舟）。设置在
-**工具 → 模型管理 → 云端模型（厂商 API）**，或直接 **工具 → 厂商管理…**；
-只想挑一个模型时用 **工具 → 选择云端模型…**（见下）。
+Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方舟）。都在
+**工具 → 模型管理…** 里配——那个对话框两个页签：**本地模型**（whisper 档位 / GGUF 的
+下载与「使用中」）与**云端厂商**（每家一封档案：Key、模型、能力开关与测通）；
+只想快速挑一个模型时用 **工具 → 选择云端模型…**（见下）。
 协议与厂商解耦，设计见 [docs/云端模型接入_设计.md](docs/云端模型接入_设计.md) §11。
 
 **厂商是数据，协议是信封**：加一家厂商 = 加一份预置数据（`DEFAULT_PROFILES`），
@@ -96,23 +97,25 @@ Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方�
 | **火山方舟** | 豆包「大模型录音文件识别极速版」 | 转写专有协议；方舟的语义判断本身是 OpenAI 形态，走上一行 |
 | 停用 | — | 该能力不配云端 |
 
-- **厂商可增删改**：厂商管理对话框里「新增 / 复制为自定义 / 删除 / 恢复默认」；
-  常用字段直接可见（名称 / 接口地址 / 两条能力各自的协议与模型名 / API Key / 允许外发），
-  火山专用的 endpoint 与资源 ID 只在选了火山转写时出现，id 与代理折叠在
-  「显示高级字段」里（点「新增」会自动展开；必填项不会被藏起来）。
-  内置厂商 id 不可改、不可删（可改字段或恢复默认），
-  删除/恢复会把引用它的能力回落本地。
-  「模型管理」的云端卡片只负责"选谁 + 填 Key + 开关 + 测通"，地址/协议/模型名统一在
-  厂商管理里改，卡片上有一行只读的协议与外发预览。
-- **模型名不用手抄**：两个模型名都是可编辑下拉，切换厂商或改完地址 / Key 会自动
-  拉一次该厂商的 `GET {base_url}/models` 填进去（同一厂商第二次进直接读内存缓存，
-  也可点「刷新模型列表」强制重取）；接口不返回清单（如火山转写专有协议）或请求
-  失败时，会在提示行如实写明原因并让你手动输入——下拉里没有的模型名照样能填。
+- **一家厂商都在一页里**（「模型管理 → 云端厂商」）：左列表选厂商，右侧填名称 /
+  接口地址 / 两条能力各自的协议 / API Key / 允许外发；火山专用的 endpoint 与资源 ID
+  只在选了火山转写时出现，id 与代理折叠在「显示高级字段」里（点「新增」会自动展开；
+  必填项不会被藏起来）。Key、外发许可、能力开关、模型名**只有这一处**能改——
+  早先它们分散在「模型管理」的云端卡片与独立的「厂商管理」对话框里，同一份档案
+  两处都能改，实测会撞上"到底哪个算数"。
+- **厂商可增删改**：「新增 / 复制为自定义 / 删除 / 恢复默认」；内置厂商 id 不可改、
+  不可删（可改字段或恢复默认），删除/恢复会把引用它的能力回落本地。
+- **模型清单是一张表**：切换厂商或改完地址 / Key 会自动拉一次该厂商的
+  `GET {base_url}/models` 填进表格（同一厂商第二次进直接读内存缓存，也可点
+  「刷新模型列表」强制重取；接口不给清单或请求失败会如实说明）。每行点
+  「设为语义判断 / 设为转写」即指派用途，当前指派的带 ● 标记；清单里没有的名字
+  可以在表格里**手动添加**——它会记住（存进该厂商档案的 `custom_models`，可单独删除），
+  方舟的推理接入点 ID（`ep-xxx`）、自建网关的别名就靠这个。
 - **专门挑模型的入口**：「工具 → 选择云端模型…」——顶部切「语义判断 / 语音转写」，
   下拉里只有**已配 Key 且能连通**的厂商（打开时实时拉一次各家 `/models`，拉不到的
   不出现、原因写在状态行），悬停厂商项即列出它有哪些模型，选中保存就把模型名写回
   那家厂商。这一页**只管模型名**：是否允许外发素材、是否切到云端，仍在
-  「模型管理 → 云端模型」里决定，页面底部会如实写明"还差什么才生效"。
+  「模型管理 → 云端厂商」里决定，页面底部会如实写明"还差什么才生效"。
 - **默认零外发**：档案默认未启用、未勾选「允许外发素材」；两个开关任一为关，
   分析时不会向厂商发任何素材请求，并在日志里说明"选了云端但没生效"的具体原因。
   （「选择云端模型」打开时会拿 Key 去查各家的 `/models` 清单——只查清单，
@@ -138,7 +141,7 @@ Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方�
   **给了文本却一个时间戳都没有则直接报错**——绝不静默当成"这段没有语音"。
 - **Key 不落日志、不进方案快照**：可存本地 `config.json`（明文，界面有标注），
   也可用环境变量 `DRAMA_<厂商 id>_API_KEY`（如 `DRAMA_VOLC_API_KEY`）覆盖，
-  部署场景更可控；厂商管理里 Key 输入框的提示文字就是该厂商的环境变量名。
+  部署场景更可控；云端厂商页里的 Key 输入框，其提示文字就是该厂商的环境变量名。
 - 接入一个**新协议**（例如某家的原生转写）= 写一对 `JudgeTransport` / `AsrTransport`
   + 在 `app/core/cloud.py` 的协议表里登记一行，调用方与核心算法不动；
   接入前须自证**词级时间戳**，否则只能按质量降级处理。
@@ -205,7 +208,7 @@ dist/drama-splitter/drama-splitter.exe --ui-smoke      # 界面完整性
 | §6.1 规则草案兜底路径 | `app/core/planner.py` | 完成 |
 | §10.1–10.2 候选图 + 动态规划 | `app/core/solver.py` | 完成 |
 | §11 语义判断、请求校验、预算与降级 | `app/core/semantic.py` | 完成（模型接口就绪，推理栈待接入） |
-| § 云端模型（厂商 API，默认关闭；协议化多厂商 + 厂商管理 + 选择云端模型，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_http.py`、`cloud_openai.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge`、`app/gui/panes/provider_form.py`、`model_pick_form.py` | 完成（真机冒烟待跑，需 Key） |
+| § 云端模型（厂商 API，默认关闭；协议化多厂商 + 云端厂商页签 + 选择云端模型，转写 + 语义判断） | `app/core/providers.py`、`cloud.py`、`cloud_http.py`、`cloud_openai.py`、`cloud_volc.py`、`cloud_asr.py`、`semantic.py::CloudLlmJudge`、`app/gui/panes/provider_form.py`、`model_pick_form.py` | 完成（真机冒烟待跑，需 Key） |
 | §11 事件索引与整集复核 | `app/core/semantic.py` / `review.py` | 完成 |
 | § 三种策略（剧情/悬念/时长） | `solver.py` + `recommend.py` | 完成 |
 | §7.2 单集字幕导出（SRT） | `app/core/episode_files.py` | 完成 |
@@ -383,11 +386,11 @@ app/gui/           界面（PySide6-Essentials）
     review_pane.py     左栏·分集审核（集列表 / 当前集 / 切点操作）
     analysis_pane.py   中栏·分析进度（阶段 / 进度 / 最近输出）
     settings_form.py   分集设置表单（由对话框承载，取消即回滚）
-    model_form.py      模型表单（两组卡片 / 「使用中」/ 下载删除 / 云端卡片只留"选厂商+Key+测通"）
-    provider_form.py   厂商表单（列表 + 字段编辑 / 协议显隐 / 只读外发预览）
+    model_form.py      模型表单·本地页签（两组卡片 / 「使用中」/ 下载删除）
+    provider_form.py   云端厂商页签（厂商列表 + 字段编辑 / 协议显隐 / 模型表格 / 能力开关与测通）
     model_pick_form.py 选择云端模型（能力切换 / 厂商下拉悬停出清单 / 只写模型名）
     export_form.py     导出表单（§37 前置检查在这里做，决策点在对话框）
-  dialogs/           对话框：DialogShell + 设置 / 模型 / 选模型 / 厂商 / 导出
+  dialogs/           对话框：DialogShell + 设置 / 模型（本地 + 云端厂商）/ 选模型 / 导出
     base.py            外壳与「自动化里不许 exec()」的约定
   widgets/           通用控件
     timeline.py        轻量时间轴（静态层缓存 + 播放头局部重绘）
@@ -396,7 +399,7 @@ app/gui/           界面（PySide6-Essentials）
     bottom_bar.py      底栏（阶段文案 + 进度 + 提示 + 主动作）
     app_bar.py         顶栏（源文件名 + 保存状态 + 更换视频）
     media_preview.py   帧级预览（HUD 时间码；控制条可横向滚动）
-    card.py / drop_zone.py / labeled_field.py / log_panel.py / status_pill.py
+    card.py / drop_zone.py / labeled_field.py / log_panel.py / status_pill.py / model_table.py
     message.py         统一弹窗出口（测试只 patch 这一处）
     scroll_area.py     scrollable / h_scrollable
   state.py           项目状态与方案版本链（快照 payload + 原子落盘）

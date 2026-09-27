@@ -23,14 +23,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,8 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core.app_config import LOCAL_BACKEND, AppConfig, default_models_root
-from ...core.cloud import build_asr_transport, build_judge_transport
+from ...core.app_config import AppConfig, default_models_root
 from ...core.model_manager import (
     WHISPER_TIERS,
     default_whisper_tier,
@@ -56,21 +52,10 @@ from ...core.model_manager import (
     spec_by_key,
     whisper_spec,
 )
-from ...core.providers import (
-    CAP_ASR,
-    CAP_JUDGE,
-    CAP_LABELS,
-    ENV_KEY_TEMPLATE,
-    PROTO_LABELS,
-    ProviderError,
-    describe_egress,
-    missing_config_reason,
-)
 from ..state import ProjectState
 from ..theme import current_mode, qcolor
 from ..widgets import (
     Card,
-    LabeledField,
     LogPanel,
     NoWheelComboBox,
     StatusPill,
@@ -186,21 +171,24 @@ class _ModelRow(QFrame):
 class ModelForm(QWidget):
     """模型管理与「使用中」切换。"""
 
-    #: 请求打开「厂商管理」对话框（携带配置路径，便于注入到临时文件）
-    manage_providers_requested = Signal(object)
-
     LOG_COLLAPSED = 64    # 折叠时约三行
     LOG_EXPANDED = 220
 
-    def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        state: ProjectState,
+        parent: QWidget | None = None,
+        *,
+        config_path: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self.state = state
         self.setMinimumWidth(680)
         self._worker: "ModelDownloadWorker | None" = None
         self._probe: "JudgeProbeWorker | None" = None
-        self._config = AppConfig.load()
+        self._config = AppConfig.load(config_path)
         # 测试注入点：默认写真实的 config.json，测试指到临时文件，避免污染用户配置
-        self._config_path: Path | None = None
+        self._config_path: Path | None = config_path
         self._rows: list[_ModelRow] = []
         # 两组各一个互斥组，只建一次（行销毁时 Qt 会自动把按钮摘出去）
         self._asr_group = QButtonGroup(self)
@@ -281,94 +269,6 @@ class ModelForm(QWidget):
         self.dir_card.body_layout.addLayout(dir_row)
         self.dir_card.body_layout.addWidget(self.free_label)
 
-        # ---- 云端模型卡片（厂商 API）----------------------------------
-        #
-        # 默认全关：档案未启用、未勾选「允许外发素材」时零外发（见 providers.py）。
-        # 「启用」不是随手勾的开关——必须点「保存并测试连通性」通过之后才允许，
-        # 否则会出现"以为通了、真正分析时才回退本地"。
-        #
-        # 版式：地址与模型名并成两列、能力开关收进分组框并各带一行说明。
-        # 此前是"标签＋输入框"一路平铺下来，卡片独占整页近一半高度，
-        # 读的人找不到"哪几项是凭据、哪几项是能力开关"。
-        self.cloud_card = Card("云端模型（厂商 API）", parent=self, body_layout=QVBoxLayout())
-        self.cloud_combo = NoWheelComboBox()
-        self.cloud_combo.setMaxVisibleItems(12)   # 预置厂商有十几家，别拉成一长条
-        self.cloud_combo.currentIndexChanged.connect(self._on_cloud_profile_changed)
-        self.btn_manage_providers = QPushButton("管理厂商…")
-        self.btn_manage_providers.clicked.connect(self._request_manage_providers)
-        self.cloud_key = QLineEdit()
-        self.cloud_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cloud_key.setPlaceholderText("明文保存在本地配置文件，可被环境变量覆盖")
-        # 外发范围写在勾选框上而不是提示行里：提示行只在配好模型后才说得清"发往哪台主机"，
-        # 而"会发什么"必须在这一刻就能读到——勾这个框就是在授权外发。
-        self.cloud_allow = QCheckBox(
-            "允许外发素材（转写＝整条音轨；语义判断＝候选点前后台词文本，不含画面）"
-        )
-        self.cloud_enable = QCheckBox("语义判断使用云端")
-        self.cloud_asr_enable = QCheckBox("语音转写使用云端")
-        self.btn_cloud_save = QPushButton("保存并测试连通性")
-        self.btn_cloud_save.clicked.connect(self._save_cloud)
-        self.cloud_hint = QLabel("")
-        self.cloud_hint.setWordWrap(True)
-        self.cloud_hint.setProperty("role", "muted")
-        # 地址与模型名搬去「厂商管理」后，这一行必须把"现在到底怎么答的"摆出来，
-        # 否则用户改完协议回到本页，看不出改没改到、生效没有。
-        self.cloud_preview = QLabel("")
-        self.cloud_preview.setWordWrap(True)
-        self.cloud_preview.setProperty("role", "muted")
-        cloud_note = QLabel(
-            "两条能力相互独立，可只用其一；未启用时走本地模型（转写＝「使用中」的 whisper，"
-            "语义判断＝llama.cpp / Ollama 里「使用中」的档位）。地址、协议与模型名在"
-            "「管理厂商…」里改；勾选后必须先「保存并测试连通性」，测通的那一项才会真正切到云端。"
-        )
-        cloud_note.setWordWrap(True)
-        cloud_note.setProperty("role", "muted")
-
-        profile_field = LabeledField("厂商档案")
-        profile_field.attach(self.cloud_combo)
-        profile_row = QHBoxLayout()
-        profile_row.setContentsMargins(0, 0, 0, 0)
-        profile_row.setSpacing(12)
-        profile_row.addWidget(profile_field, 3)
-        profile_row.addWidget(
-            self.btn_manage_providers, 0, Qt.AlignmentFlag.AlignBottom
-        )
-
-        key_field = LabeledField("API Key")
-        key_field.attach(self.cloud_key)
-
-        # 两条能力各占一行：勾选框 + 它自己的外发范围说明。
-        # 说明不塞进勾选框文本，否则一行长句会把"勾的是什么"淹掉。
-        ability_box = QGroupBox("云端能力开关", parent=self)
-        ability_grid = QGridLayout(ability_box)
-        ability_grid.setContentsMargins(12, 8, 12, 10)
-        ability_grid.setHorizontalSpacing(16)
-        ability_grid.setVerticalSpacing(6)
-        for row, (switch, note) in enumerate(
-            (
-                (self.cloud_enable, "只发候选点前后台词文本"),
-                (self.cloud_asr_enable, "整条音轨分块上传，约 10 分钟/块"),
-            )
-        ):
-            note_label = QLabel(note)
-            note_label.setProperty("role", "muted")
-            ability_grid.addWidget(switch, row, 0)
-            ability_grid.addWidget(note_label, row, 1)
-        ability_grid.setColumnStretch(2, 1)
-
-        cloud_action_row = QHBoxLayout()
-        cloud_action_row.setContentsMargins(0, 0, 0, 0)
-        cloud_action_row.setSpacing(12)
-        cloud_action_row.addWidget(self.btn_cloud_save)
-        cloud_action_row.addWidget(self.cloud_hint, 1)
-
-        self.cloud_card.body_layout.addLayout(profile_row)
-        self.cloud_card.body_layout.addWidget(self.cloud_preview)
-        self.cloud_card.body_layout.addWidget(key_field)
-        self.cloud_card.body_layout.addWidget(self.cloud_allow)
-        self.cloud_card.body_layout.addWidget(ability_box)
-        self.cloud_card.body_layout.addLayout(cloud_action_row)
-        self.cloud_card.body_layout.addWidget(cloud_note)
 
         # ---- 进度（只在下load时出现）-----------------------------------
         self.progress = QProgressBar(self)
@@ -401,13 +301,11 @@ class ModelForm(QWidget):
         outer.addWidget(self.asr_card)
         outer.addWidget(self.llm_card)
         outer.addWidget(self.dir_card)
-        outer.addWidget(self.cloud_card)
         outer.addWidget(self.progress_host)
         outer.addWidget(self.log_card)
         outer.addStretch(1)
 
         self.refresh()
-        self._load_cloud_fields()
         self._start_probe()
 
     # ---- 公开面（工具与测试用）------------------------------------------
@@ -665,7 +563,7 @@ class ModelForm(QWidget):
             self.stack_label.setText(
                 "语义判断后端：不可用 → 候选退回规则评分"
                 "（本地：装好下面任一档位并让 Ollama 提供它；"
-                "云端：在「云端模型」卡里填好并测通）"
+                "云端：在「云端厂商」页签里填好并测通）"
             )
 
     # ---- 下载 ----------------------------------------------------------
@@ -782,206 +680,6 @@ class ModelForm(QWidget):
         self.log.append(text, level=level)
 
     # ---- 云端模型（厂商 API）-------------------------------------------
-
-    def _cloud_profile(self):
-        """当前下拉选中的档案（注册表里至少有一个内置档案）。"""
-        profile_id = self.cloud_combo.currentData()
-        if not profile_id:
-            return None
-        return self._config.profiles().get(str(profile_id))
-
-    def _on_cloud_profile_changed(self, *_args) -> None:
-        self._load_cloud_fields()
-
-    def _load_cloud_fields(self) -> None:
-        """把配置回填到控件；下拉按当前后端偏好预选。
-
-        注：后端偏好可能是 "local"（用户选了本地），此时下拉仍停在第一个档案上，
-        但勾选态来自档案自身的 enabled，不会假装已启用。
-        """
-        registry = self._config.profiles()
-        self.cloud_combo.blockSignals(True)
-        self.cloud_combo.clear()
-        for profile in registry.all():
-            self.cloud_combo.addItem(profile.label, profile.id)
-        backend = self._config.backend_for(CAP_JUDGE)
-        if backend == LOCAL_BACKEND:
-            backend = self._config.backend_for(CAP_ASR)
-        index = self.cloud_combo.findData(backend)
-        self.cloud_combo.setCurrentIndex(max(0, index))
-        self.cloud_combo.blockSignals(False)
-
-        profile = self._cloud_profile()
-        if profile is None:
-            self.cloud_preview.setText("")
-            return
-        self.cloud_key.setText(profile.api_key)
-        self.cloud_allow.setChecked(profile.allow_upload)
-        self.cloud_enable.setChecked(self._capability_uses_cloud(profile, CAP_JUDGE))
-        self.cloud_asr_enable.setChecked(self._capability_uses_cloud(profile, CAP_ASR))
-        self._refresh_cloud_preview(profile)
-        self._refresh_cloud_hint()
-
-    def _refresh_cloud_preview(self, profile) -> None:
-        """只读预览：这家厂商的两条能力各用什么协议、发往哪台主机、用的是哪个模型。
-
-        地址与模型名搬去「厂商管理」后，本页必须留下这一行：否则用户改完协议回来，
-        看不出"现在到底会怎么发"，也无从核对是不是改对了。
-        """
-        judge_protocol = PROTO_LABELS.get(profile.judge_protocol, profile.judge_protocol)
-        asr_protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
-        self.cloud_preview.setText(
-            "协议：语义判断 = "
-            f"{judge_protocol}，转写 = {asr_protocol}\n"
-            f"接口：{profile.base_url or '（未填）'}\n"
-            f"模型：语义判断 = {profile.judge_model or '（未填）'}，"
-            f"转写 = {profile.asr_model_name or '（未填）'}\n"
-            f"{describe_egress(profile)}"
-        )
-
-    def _capability_uses_cloud(self, profile, capability: str) -> bool:
-        """该能力此刻是否真的走这家云端（选了 + 档案已测通）。"""
-        return profile.enabled and self._config.backend_for(capability) == profile.id
-
-    def _request_manage_providers(self) -> None:
-        """请求主窗口打开「厂商管理」（本分区不自己开对话框，见 panes/__init__ 的约定）。"""
-        self.manage_providers_requested.emit(self._config_path)
-
-    def reload_after_provider_edit(self) -> None:
-        """厂商管理关闭后回来：重新读盘并刷新本页。
-
-        刻意**重新 load** 而不是共用同一个 AppConfig 对象——厂商对话框自己会保存
-        配置，两边各持一份可变对象必然互相覆盖。
-        """
-        self._config = AppConfig.load(self._config_path)
-        self._load_cloud_fields()
-        self.refresh()
-
-    def _probe_cloud(self, profile, capability: str) -> str | None:
-        """连通性测试的接缝：返回错误描述；可用时返回 None。
-
-        单独一个方法是为了让测试能替换掉它——界面测试不允许真联网。
-        能力是否**配置完整**统一问 `missing_config_reason()`（与日志/检查器同一份
-        判据），否则多协议之后这里会与核心层各说各话。
-        """
-        if not profile.allow_upload:
-            return "未勾选「允许外发素材」"
-        if not profile.resolved_api_key():
-            env_name = ENV_KEY_TEMPLATE.format(id=profile.id.upper())
-            return f"没有 API Key（可填在本页，或设环境变量 {env_name}）"
-        missing = missing_config_reason(profile, capability)
-        if missing is not None:
-            return missing
-        transport = (
-            build_judge_transport(profile)
-            if capability == CAP_JUDGE
-            else build_asr_transport(profile)
-        )
-        if transport is None:
-            protocol = profile.judge_protocol if capability == CAP_JUDGE else profile.asr_protocol
-            label = PROTO_LABELS.get(protocol, protocol)
-            return (
-                f"暂不支持「{label}」协议的"
-                f"{CAP_LABELS.get(capability, capability)}：{profile.id}"
-            )
-        try:
-            transport.probe()
-        except ProviderError as exc:
-            return exc.describe()
-        except Exception as exc:  # noqa: BLE001 - 任何异常都算"不通"
-            return str(exc)
-        # 有的厂商不接受静音样片，只能退化为"验过鉴权"：如实写进日志，不假装全测过
-        note = getattr(transport, "probe_note", "")
-        if note:
-            self._append(
-                f"{profile.label}／{CAP_LABELS.get(capability, capability)}：{note}",
-                "warn",
-            )
-        return None
-
-    def _save_cloud(self) -> None:
-        """保存本页的开关与 Key → 逐能力测连通 → 只把测通的能力切到云端。
-
-        失败一律**不允许启用**：否则用户会以为通了，直到真正分析时才回退本地。
-        地址/协议/模型名由「厂商管理」负责，这里只动本页的字段。
-        """
-        profile = self._cloud_profile()
-        if profile is None:
-            self._append("没有可用的厂商档案。", "error")
-            return
-        updated = profile.with_updates(
-            api_key=self.cloud_key.text().strip(),
-            allow_upload=self.cloud_allow.isChecked(),
-        )
-        self._store_profile(updated)
-
-        results: dict[str, str | None] = {}
-        for capability, checkbox in self._cloud_switches():
-            if not checkbox.isChecked():
-                results[capability] = None       # 没勾就不测（也不算启用）
-                continue
-            error = self._probe_cloud(updated, capability)
-            results[capability] = error
-            if error is not None:
-                checkbox.setChecked(False)
-                self._append(
-                    f"{CAP_LABELS.get(capability, capability)}连通性测试未通过：{error}",
-                    "error",
-                )
-
-        enabled_any = False
-        passed: list[str] = []
-        for capability, checkbox in self._cloud_switches():
-            uses_cloud = checkbox.isChecked() and results.get(capability) is None
-            if uses_cloud:
-                enabled_any = True
-                passed.append(CAP_LABELS.get(capability, capability))
-            self._set_cloud_backend(capability, updated.id if uses_cloud else LOCAL_BACKEND)
-
-        self._store_profile(updated.with_updates(enabled=enabled_any))
-        if enabled_any:
-            self._append(f"连通性正常：{updated.label}，已切到云端的是：{'、'.join(passed)}。")
-        elif any(box.isChecked() for _, box in self._cloud_switches()):
-            self._append("没有能力通过连通性测试，云端未启用。", "error")
-        else:
-            self._append("已保存档案字段；未勾选任何能力，仍走本地模型。")
-        self._refresh_cloud_hint()
-
-    def _cloud_switches(self):
-        """能力 → 勾选框（顺序固定，界面与测试都按这个顺序读）。"""
-        return ((CAP_JUDGE, self.cloud_enable), (CAP_ASR, self.cloud_asr_enable))
-
-    def _store_profile(self, profile) -> None:
-        """按 id 合并一份档案回配置并落盘。"""
-        items = [dict(item) for item in self._config.providers]
-        for index, item in enumerate(items):
-            if str(item.get("id")) == profile.id:
-                items[index] = profile.to_json()
-                break
-        else:
-            items.append(profile.to_json())
-        self._config.providers = items
-        self._save_config()
-
-    def _set_cloud_backend(self, capability: str, backend: str) -> None:
-        prefs = dict(self._config.backend_prefs)
-        prefs[capability] = backend
-        self._config.backend_prefs = prefs
-        self._save_config()
-
-    def _refresh_cloud_hint(self) -> None:
-        profile = self._cloud_profile()
-        if profile is None:
-            self.cloud_hint.setText("")
-            return
-        used = [
-            CAP_LABELS[capability]
-            for capability, _ in self._cloud_switches()
-            if self._capability_uses_cloud(profile, capability)
-        ]
-        state = ("已启用：" + "、".join(used)) if used else "未启用（走本地模型）"
-        capabilities = [c for c, _ in self._cloud_switches() if profile.supports(c)]
-        self.cloud_hint.setText(f"{state}。{describe_egress(profile, capabilities)}")
 
     def can_continue(self) -> tuple[bool, str]:
         return True, ""

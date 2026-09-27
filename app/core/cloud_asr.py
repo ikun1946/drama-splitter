@@ -353,7 +353,7 @@ def select_asr_engine(
                 protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
                 notes.append(
                     f"暂不支持「{protocol}」协议的云端转写：{profile.id}"
-                    "（可在「厂商管理」里改协议），本次仍用本地模型。"
+                    "（可在「模型管理 → 云端厂商」里改协议），本次仍用本地模型。"
                 )
             else:
                 engine = CloudAsrEngine(

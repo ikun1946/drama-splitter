@@ -31,8 +31,8 @@ from .scroll_area import scrollable
 
 __all__ = ["ModelTable"]
 
-#: 行区高度：内容少时贴着内容，多了就固定到上限并出滚动条
-MIN_LIST_HEIGHT = 132
+#: 行区高度：贴着内容长（一行也不要留一大片空白），多了就固定到上限并出滚动条
+MIN_LIST_HEIGHT = 64
 MAX_LIST_HEIGHT = 236
 
 

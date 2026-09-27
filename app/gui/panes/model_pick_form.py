@@ -331,7 +331,7 @@ class ModelPickForm(QWidget):
             self.provider_combo.setToolTip("")
             self.effect_label.setText("")
             return
-        models = self._models.get(profile.id, [])
+        models = list(profile.model_choices(self._models.get(profile.id, [])))
         current = str(getattr(profile, MODEL_FIELDS[self._capability], "") or "")
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
@@ -362,7 +362,7 @@ class ModelPickForm(QWidget):
             if self._no_key:
                 parts.append(
                     f"还没有配好 API Key 的厂商（{self._no_key} 家未检测）：先在"
-                    "「厂商管理」里填 Key，或设环境变量 DRAMA_<厂商 id>_API_KEY。"
+                    "「模型管理 → 云端厂商」里填 Key，或设环境变量 DRAMA_<厂商 id>_API_KEY。"
                 )
             else:
                 parts.append("没有走 OpenAI 兼容协议、能拉取模型清单的厂商。")
@@ -387,12 +387,12 @@ class ModelPickForm(QWidget):
         reason = block_reason(profile, self._capability)
         if reason is not None:
             self.effect_label.setText(
-                f"{head}尚未生效：{reason}。在「模型管理 → 云端模型」里处理。"
+                f"{head}尚未生效：{reason}。在「模型管理 → 云端厂商」里处理。"
             )
             return
         if self._config.backend_for(self._capability) != profile.id:
             self.effect_label.setText(
-                f"{head}档案可用，但这条能力当前没用它——在「模型管理 → 云端模型」里"
+                f"{head}档案可用，但这条能力当前没用它——在「模型管理 → 云端厂商」里"
                 f"勾选「{label}使用云端」并测通，就会切到 {model}。"
             )
             return

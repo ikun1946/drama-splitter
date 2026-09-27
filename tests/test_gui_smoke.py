@@ -927,64 +927,60 @@ class TestImportPreview:
         assert preview.view.text() == "" and not preview.view.pixmap().isNull()
 
 
-class TestCloudModelCard:
-    """云端模型（厂商 API）卡片：默认零外发，且"没测通不许启用"。
+class TestCloudCapabilitySwitches:
+    """云端能力开关（在「模型管理 → 云端厂商」页签）：默认零外发，没测通不许启用。
 
     连通性探测被替换成假实现——界面测试不允许真联网（也不该要求 Key）。
+    合并前这些开关在「模型管理」的云端卡片上，逻辑没变，只是搬到了厂商页签。
     """
 
     @staticmethod
     def _form(window, tmp_path, monkeypatch):
+        """构造合并对话框并停在厂商页签；配置写到临时文件，绝不碰用户配置。"""
         monkeypatch.setattr(
             "app.core.app_config.config_path", lambda: tmp_path / "config.json"
         )
-        return window.build_model_dialog().form
+        return window.build_model_dialog(providers_tab=True).providers
 
     @staticmethod
-    def _set_judge_model(form, model: str = "ep-test") -> None:
-        """judge_model 已搬到「厂商管理」：测试里写进配置再回填本页控件。
-
-        卡片上不再有"模型名"输入框（地址/协议/模型名统一在厂商管理里改），
-        因此这里模拟"用户刚在厂商管理里填好并保存"的状态。
-        """
-        form._config.providers = [
-            item for item in form._config.providers if str(item.get("id")) != "volc"
-        ] + [{"id": "volc", "judge_model": model}]
-        form._load_cloud_fields()
+    def _assign(form, model: str, capability: str) -> None:
+        """等价于用户在模型表格里输入 + 点「设为语义判断 / 设为转写」。"""
+        form.model_table.added.emit(model)
+        form.model_table.assigned.emit(model, capability)
 
     def test_defaults_are_closed_and_local(self, window, tmp_path, monkeypatch):
         from app.core.app_config import LOCAL_BACKEND
         from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        assert form.cloud_enable.isChecked() is False
-        assert form.cloud_allow.isChecked() is False
+        assert form.use_judge.isChecked() is False
+        assert form.allow_upload.isChecked() is False
         assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND, "默认仍走本地"
         assert "未启用" in form.cloud_hint.text()
-        assert "不含画面" in form.cloud_allow.text(), "外发范围必须在勾选那一刻就能读到"
+        assert "不含画面" in form.allow_upload.toolTip(), "外发范围在勾选那一刻就要能读到"
 
     def test_probe_failure_refuses_to_enable(self, window, tmp_path, monkeypatch):
         from app.core.app_config import LOCAL_BACKEND, AppConfig
         from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._set_judge_model(form)
-        form.cloud_key.setText("sk-test")
-        form.cloud_allow.setChecked(True)
-        form.cloud_enable.setChecked(True)
+        self._assign(form, "ep-test", CAP_JUDGE)
+        form.edit_api_key.setText("sk-test")
+        form.allow_upload.setChecked(True)
+        form.use_judge.setChecked(True)
         monkeypatch.setattr(
             type(form),
-            "_probe_cloud",
+            "_probe",
             lambda self, profile, capability: "鉴权失败（API Key 或资源权限）",
         )
 
-        form._save_cloud()
+        form._save_and_probe()
 
-        assert form.cloud_enable.isChecked() is False, "测不通就不该保持勾选"
+        assert form.use_judge.isChecked() is False, "测不通就不该保持勾选"
         assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND
-        assert "未通过" in form.log.toPlainText()
+        assert "未通过" in form.hint_label.text()
 
-        saved = AppConfig.load(tmp_path / "config.json")
+        saved = AppConfig.load()
         assert saved.backend_for(CAP_JUDGE) == LOCAL_BACKEND
         profile = saved.profiles().get("volc")
         assert profile.enabled is False, "失败的档案不得被标记为已启用"
@@ -992,19 +988,20 @@ class TestCloudModelCard:
 
     def test_probe_success_enables_and_persists(self, window, tmp_path, monkeypatch):
         from app.core.app_config import AppConfig
+        from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._set_judge_model(form)
-        form.cloud_key.setText("sk-test")
-        form.cloud_allow.setChecked(True)
-        form.cloud_enable.setChecked(True)
-        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
+        self._assign(form, "ep-test", CAP_JUDGE)
+        form.edit_api_key.setText("sk-test")
+        form.allow_upload.setChecked(True)
+        form.use_judge.setChecked(True)
+        monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
 
-        form._save_cloud()
+        form._save_and_probe()
 
-        assert form.cloud_enable.isChecked() is True
+        assert form.use_judge.isChecked() is True
         assert "已启用" in form.cloud_hint.text()
-        saved = AppConfig.load(tmp_path / "config.json")
+        saved = AppConfig.load()
         assert saved.backend_for("judge") == "volc"
         profile = saved.profiles().get("volc")
         assert profile.enabled is True and profile.allow_upload is True
@@ -1015,54 +1012,58 @@ class TestCloudModelCard:
         from app.core.app_config import AppConfig
 
         form = self._form(window, tmp_path, monkeypatch)
-        form.cloud_key.setText("sk-test")
-        form.cloud_allow.setChecked(True)
-        form.cloud_asr_enable.setChecked(True)      # 只勾转写
-        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
+        form.edit_api_key.setText("sk-test")
+        form.allow_upload.setChecked(True)
+        form.use_asr.setChecked(True)      # 只勾转写
+        monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
 
-        form._save_cloud()
+        form._save_and_probe()
 
-        saved = AppConfig.load(tmp_path / "config.json")
+        saved = AppConfig.load()
         assert saved.backend_for("asr") == "volc"
         assert saved.backend_for("judge") == "local", "没勾的能力不许被切到云端"
         assert "转写" in form.cloud_hint.text() and "语义判断" not in form.cloud_hint.text()
 
-    def test_asr_probe_failure_keeps_local_and_judge_stays(self, window, tmp_path, monkeypatch):
+    def test_asr_probe_failure_keeps_local_and_judge_stays(
+        self, window, tmp_path, monkeypatch
+    ):
         """转写测不通只影响转写：语义判断已测通的不该被连带取消。"""
         from app.core.app_config import AppConfig
+        from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._set_judge_model(form)
-        form.cloud_key.setText("sk-test")
-        form.cloud_allow.setChecked(True)
-        form.cloud_enable.setChecked(True)
-        form.cloud_asr_enable.setChecked(True)
+        self._assign(form, "ep-test", CAP_JUDGE)
+        form.edit_api_key.setText("sk-test")
+        form.allow_upload.setChecked(True)
+        form.use_judge.setChecked(True)
+        form.use_asr.setChecked(True)
 
         def probe(self, profile, capability):
             return "识别失败（45000151）" if capability == "asr" else None
 
-        monkeypatch.setattr(type(form), "_probe_cloud", probe)
-        form._save_cloud()
+        monkeypatch.setattr(type(form), "_probe", probe)
+        form._save_and_probe()
 
-        saved = AppConfig.load(tmp_path / "config.json")
+        saved = AppConfig.load()
         assert saved.backend_for("asr") == "local"
         assert saved.backend_for("judge") == "volc"
-        assert form.cloud_asr_enable.isChecked() is False
-        assert form.cloud_enable.isChecked() is True
+        assert form.use_asr.isChecked() is False
+        assert form.use_judge.isChecked() is True
 
     def test_project_snapshot_never_carries_the_key(self, window, tmp_path, monkeypatch):
         """§6：方案快照只记"能否复现这次分集"，不含任何凭据。"""
         from app.core.app_config import AppConfig
+        from app.core.providers import CAP_JUDGE
         from app.gui.state import payload_text
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._set_judge_model(form)
-        form.cloud_key.setText("sk-secret-value")
-        monkeypatch.setattr(type(form), "_probe_cloud", lambda self, profile, capability: None)
-        form.cloud_enable.setChecked(True)
-        form.cloud_allow.setChecked(True)
-        form._save_cloud()
-        assert AppConfig.load(tmp_path / "config.json").providers, "前置：确实写进了配置"
+        self._assign(form, "ep-test", CAP_JUDGE)
+        form.edit_api_key.setText("sk-secret-value")
+        form.allow_upload.setChecked(True)
+        form.use_judge.setChecked(True)
+        monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
+        form._save_and_probe()
+        assert AppConfig.load().providers, "前置：确实写进了配置"
 
         snapshot = payload_text(window.state.snapshot_payload())
         assert "sk-secret-value" not in snapshot
@@ -1960,7 +1961,11 @@ class TestActiveModelWiring:
 
 
 class TestProviderDialog:
-    """厂商管理对话框：内置不可删、id 不可改，自定义可增删，删了要回落本地。"""
+    """厂商页签（合并进「模型管理」）：内置不可删、id 不可改，自定义可增删。
+
+    合并后厂商不再是独立对话框，而是「模型管理 → 云端厂商」页签；这里仍用
+    ``provider_form`` 这个夹具名，取的正是那页的表单。
+    """
 
     @pytest.fixture
     def provider_form(self, window, qapp, tmp_path):
@@ -1969,10 +1974,10 @@ class TestProviderDialog:
 
         config_file = tmp_path / "config.json"
         AppConfig().save(config_file)
-        dialog = window.build_provider_dialog(config_path=config_file)
+        dialog = window.build_model_dialog(config_path=config_file, providers_tab=True)
         dialog.show()
         qapp.processEvents()
-        form = dialog.form
+        form = dialog.providers
         yield form, config_file
         dialog.close()
         assert DEFAULT_PROFILES, "预置目录不该为空"
@@ -2057,7 +2062,8 @@ class TestProviderDialog:
             form.edit_judge_protocol.findData(PROTO_DISABLED)
         )
         assert form.base_field.isHidden(), "两条能力都停用时，接口地址没有意义"
-        assert form.asr_model_field.isHidden()
+        # 模型表格不随协议收起来：手填一个模型名在任何协议下都有意义
+        assert not form.model_table.isHidden()
 
     def test_egress_preview_follows_protocol(self, provider_form):
         """外发预览必须跟着协议变——它抵掉了本页删掉的两个输入框。"""
@@ -2096,7 +2102,12 @@ class TestProviderDialog:
         form.edit_judge_protocol.setCurrentIndex(
             form.edit_judge_protocol.findData(PROTO_OPENAI)
         )
-        form.edit_judge_model.setEditText("my-model")
+        # 模型名现在从表格里添加 + 指派（等价于用户输入后点「添加」再点「设为语义判断」）
+        form.model_table.edit_add.setText("my-model")
+        form.model_table.btn_add.click()
+        rows = form.model_table.rows()
+        assert rows and rows[0]["custom"] is True, "手填的模型要出现在表格里"
+        form._on_model_assigned("my-model", "judge")
         form._on_save()
         assert "已保存" in form.hint_label.text(), form.hint_label.text()
 
@@ -2149,8 +2160,10 @@ class TestProviderDialog:
         assert "API Key" in form.model_note.text()
         assert form.btn_refresh_models.isEnabled()
 
-    def test_model_list_fills_editable_combos(self, provider_form, monkeypatch):
-        """配好地址与 Key 后自动拉清单：填进两个可编辑下拉，且不覆盖已填的值。"""
+    def test_model_list_fills_the_table_and_keeps_manual_ones(
+        self, provider_form, monkeypatch
+    ):
+        """配好地址与 Key 后自动拉清单填进表格；手填的名字仍在且标"手填"。"""
         from PySide6.QtCore import QObject, Signal as QtSignal
 
         from app.gui.panes import provider_form as module
@@ -2177,19 +2190,58 @@ class TestProviderDialog:
         monkeypatch.setattr(module, "ModelListWorker", FakeWorker)
         form, _ = provider_form
         self._pick(form, "deepseek")           # 切到一家有 base_url 的厂商
-        form.edit_judge_model.setEditText("我手填的模型")
+        form.model_table.edit_add.setText("我手填的模型")
+        form.model_table.btn_add.click()
         form.edit_api_key.setText("sk-test")
         form._request_models(force=True)
 
         assert started == ["https://api.deepseek.com/v1"], "应按该厂商的 base_url 拉取"
-        items = [
-            form.edit_judge_model.itemText(i)
-            for i in range(form.edit_judge_model.count())
-        ]
-        assert items == ["whisper-1", "gpt-4o-mini"]
-        assert form.edit_judge_model.currentText() == "我手填的模型", "刷新不该覆盖已填的值"
-        assert form.edit_asr_model.count() == 2, "两个模型字段共用同一份清单"
-        assert "共 2 个" in form.model_note.text()
+        rows = form.model_table.rows()
+        names = [row["name"] for row in rows]
+        assert names[:2] == ["whisper-1", "gpt-4o-mini"], "接口清单在前（字母序）"
+        assert names.index("我手填的模型") > 1, "手填的补在后面"
+        assert [row["custom"] for row in rows[:2]] == [False, False], "接口拉回来的算自动"
+        assert rows[names.index("我手填的模型")]["custom"] is True
+        assert "2 个来自该厂商的 /models" in form.model_note.text()
+        assert "1 个是手填的" in form.model_note.text()
+
+    def test_assignment_from_table_writes_both_capabilities(
+        self, provider_form, monkeypatch
+    ):
+        """行内指派 = 档案的 judge_model / asr_model_name；保存前只改内存。"""
+        from app.core.app_config import AppConfig
+
+        dialog_form, config_file = provider_form
+        self._pick(dialog_form, "deepseek")
+        dialog_form.model_table.added.emit("m-judge")     # 等价于点「添加」
+        dialog_form.model_table.added.emit("m-asr")
+        dialog_form.model_table.assigned.emit("m-judge", "judge")
+        dialog_form.model_table.assigned.emit("m-asr", "asr")
+
+        rows = {row["name"]: row for row in dialog_form.model_table.rows()}
+        assert rows["m-judge"]["in_judge"] and not rows["m-judge"]["in_asr"]
+        assert rows["m-asr"]["in_asr"] and not rows["m-asr"]["in_judge"]
+        assert AppConfig.load(config_file).profiles().get("deepseek").custom_models == (), (
+            "没点「保存」之前不该落盘"
+        )
+
+        dialog_form._on_save()
+        saved = AppConfig.load(config_file).profiles().get("deepseek")
+        assert saved.judge_model == "m-judge"
+        assert saved.asr_model_name == "m-asr"
+        assert saved.custom_models == ("m-judge", "m-asr"), "手填的名字要记住"
+
+    def test_removing_a_manual_model_clears_its_assignment(self, provider_form):
+        """删掉手填的模型时，它若正被指派，指派一并清空（不留悬空引用）。"""
+        form, _ = provider_form
+        form.model_table.added.emit("ep-abc")
+        form.model_table.assigned.emit("ep-abc", "judge")
+        assert form.model_table.rows()[0]["in_judge"]
+
+        form.model_table.removed.emit("ep-abc")
+        assert "ep-abc" not in form.model_table.names(), "删掉的手填项不该还在表格里"
+        assert form._judge_model == "", "指派也要清掉"
+        assert "指派也已清空" in form.hint_label.text()
 
     def test_model_list_failure_asks_for_manual_input(self, provider_form, monkeypatch):
         """拉不到（如方舟没有 /models）不是错误：如实说明并请用户手填。"""
@@ -2217,7 +2269,7 @@ class TestProviderDialog:
         form.edit_id.setText("volc")
         form.edit_api_key.setText("sk-test")
         form._request_models(force=True)
-        assert "手动填写" in form.model_note.text()
+        assert "手动添加模型名" in form.model_note.text()
         assert form.btn_refresh_models.isEnabled(), "失败后刷新按钮要恢复可用"
 
     def test_model_list_is_cached_per_provider(self, provider_form, monkeypatch):
@@ -2262,7 +2314,8 @@ class TestProviderDialog:
         config.providers = [{"id": "volc", "judge_model": "ep-mine", "api_key": "sk-mine"}]
         config.save(config_file)
         form.reload(select="volc")
-        assert form.edit_judge_model.currentText() == "ep-mine"
+        in_judge = [row["name"] for row in form.model_table.rows() if row["in_judge"]]
+        assert in_judge == ["ep-mine"], "配置里的 judge_model 应在表格里标成「语义判断」"
 
         monkeypatch.setattr(message, "confirm", lambda *a, **k: True)
         form._on_restore()

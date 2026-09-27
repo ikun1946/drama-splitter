@@ -1,10 +1,11 @@
-"""厂商档案管理表单：新增 / 编辑 / 复制内置 / 删除 / 恢复默认。
+"""厂商表单：「模型管理 → 云端厂商」页签（列表 + 编辑区 + 模型表格 + 能力开关）。
 
-为什么要一个独立对话框
-----------------------
-厂商从"代码里写死的一家"变成"用户可增删的数据"之后，编辑入口必须集中：
-「云端模型」卡片只负责"选谁 + 填 Key + 测通"，改地址/协议/模型名一律来这里。
-两处都能改同一份档案，必然出现"改了没生效"的扯皮。
+一个界面管一家厂商的全部
+------------------------
+Key、外发许可、能力开关、模型名原先分散在「模型管理」的云端卡片与独立的
+「厂商管理」对话框里——同一份档案两处都能改，用户实测就撞上了。现在全部收在
+这一页：左列表选厂商，右侧填字段、看/选模型（`/models` 自动刷新 + 手填可记住）、
+勾能力并「保存并测试连通性」。
 
 几条硬规则
 ----------
@@ -14,6 +15,7 @@
   `backend_prefs` 里存的也是 id，因此覆盖不会让"已选中的后端"失效。
 - **删除/恢复默认必须连带处理引用**：把 `backend_prefs` 里指向它的能力改回本地，
   否则用户只会看到"云端静默失效"而不知道为什么。
+- **测通才允许启用**：勾了能力必须点「保存并测试连通性」，通过的才切后端。
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.app_config import LOCAL_BACKEND, AppConfig
+from ...core.cloud import build_asr_transport, build_judge_transport
 from ...core.providers import (
     CAP_ASR,
     CAP_JUDGE,
@@ -44,14 +47,18 @@ from ...core.providers import (
     PROTO_LABELS,
     PROTO_OPENAI,
     PROTO_VOLC_ARK,
+    ProviderError,
     ProviderProfile,
     describe_egress,
+    merge_model_choices,
+    missing_config_reason,
     validate_profile,
 )
 from ..state import ProjectState
 from ..widgets import (
     Card,
     LabeledField,
+    ModelTable,
     NoWheelComboBox,
     scrollable,
 )
@@ -83,6 +90,13 @@ class ProviderForm(QWidget):
         self._models_worker = None
         #: (base_url, key) → 模型清单。同一家不重复拉：切换厂商来回点时不该反复打网络
         self._model_cache: dict[tuple[str, str], list[str]] = {}
+        #: 两条能力当前指派的模型名 + 用户手填的模型清单。模型表格只发信号，
+        #: 真值存在这里；与其它字段一样，等「保存」才写进配置。
+        self._judge_model = ""
+        self._asr_model = ""
+        self._custom_models: list[str] = []
+        #: 最近一次从接口拉到的清单（表格显示的是它 + 手填的合并结果）
+        self._fetched_models: list[str] = []
 
         # ---- 左栏：列表与动作 ------------------------------------------
         self.profile_list = QListWidget(self)
@@ -170,6 +184,32 @@ class ProviderForm(QWidget):
         self.model_table.assigned.connect(self._on_model_assigned)
         self.model_table.added.connect(self._on_model_added)
         self.model_table.removed.connect(self._on_model_removed)
+
+        # ---- 云端能力开关（合并自原「模型管理」的云端卡片）------------------
+        #
+        # 为什么搬到厂商这里：Key、外发许可、能力开关都是"这家厂商怎么被使用"，
+        # 拆在两个对话框里等于同一份档案两处都能改（用户实测就是这么撞上的）。
+        # 排成一行而不是分组框：两个复选框 + 一个按钮的信息量不值得多占三行高度，
+        # 外发/上传范围写进各自的 tooltip（勾选那一刻就能读到）。
+        self.use_judge = QCheckBox("语义判断使用云端", self)
+        self.use_judge.setToolTip("只发候选点前后台词文本（不含画面）")
+        self.use_asr = QCheckBox("语音转写使用云端", self)
+        self.use_asr.setToolTip("整条音轨分块上传，约 10 分钟/块")
+        self.btn_probe = QPushButton("保存并测试连通性", self)
+        self.btn_probe.setToolTip(
+            "保存本页字段，并对勾选的能力各发一次连通性请求；只有测通的那条才会切到云端"
+        )
+        self.btn_probe.clicked.connect(self._save_and_probe)
+        self.cloud_hint = QLabel("", self)
+        self.cloud_hint.setWordWrap(True)
+        self.cloud_hint.setProperty("role", "muted")
+        ability_row = QHBoxLayout()
+        ability_row.setContentsMargins(0, 0, 0, 0)
+        ability_row.setSpacing(12)
+        ability_row.addWidget(self.use_judge)
+        ability_row.addWidget(self.use_asr)
+        ability_row.addStretch(1)
+        ability_row.addWidget(self.btn_probe)
         self.btn_refresh_models = QPushButton("刷新模型列表", self)
         self.btn_refresh_models.clicked.connect(lambda: self._request_models(force=True))
         self.model_note = QLabel("", self)
@@ -257,7 +297,9 @@ class ProviderForm(QWidget):
         key_row.addWidget(self.key_field, 2)
         key_row.addWidget(self.allow_upload, 1, Qt.AlignmentFlag.AlignBottom)
         editor_card.body_layout.addLayout(key_row)
-        # 模型清单放最后：它可能很长（自带滚动），放前面会把 Key 与开关推出首屏
+        editor_card.body_layout.addLayout(ability_row)
+        editor_card.body_layout.addWidget(self.cloud_hint)
+        # 模型清单：它可能很长（自带滚动），但排在配置项之后
         models_title = QLabel("模型（该厂商 /models 拉回来的 + 你手填的）", editor_card)
         models_title.setProperty("role", "muted")
         editor_card.body_layout.addWidget(models_title)
@@ -325,8 +367,8 @@ class ProviderForm(QWidget):
             base_url=self.edit_base_url.text().strip(),
             asr_endpoint=self.edit_asr_endpoint.text().strip(),
             asr_resource_id=self.edit_asr_resource.text().strip(),
-            asr_model_name=self.edit_asr_model.currentText().strip(),
-            judge_model=self.edit_judge_model.currentText().strip(),
+            asr_model_name=self._asr_model,
+            judge_model=self._judge_model,
             judge_protocol=self.edit_judge_protocol.currentData() or PROTO_DISABLED,
             asr_protocol=self.edit_asr_protocol.currentData() or PROTO_DISABLED,
             api_key=self.edit_api_key.text().strip(),
@@ -334,6 +376,7 @@ class ProviderForm(QWidget):
             enabled=self._stored_flag("enabled"),
             allow_upload=self.allow_upload.isChecked(),
             use_system_proxy=self.use_system_proxy.isChecked(),
+            custom_models=tuple(self._custom_models),
         )
 
     def _stored_flag(self, name: str) -> bool:
@@ -374,8 +417,10 @@ class ProviderForm(QWidget):
         self.edit_asr_protocol.setCurrentIndex(
             max(0, self.edit_asr_protocol.findData(profile.asr_protocol))
         )
-        self.edit_judge_model.setEditText(profile.judge_model)
-        self.edit_asr_model.setEditText(profile.asr_model_name)
+        self._judge_model = profile.judge_model
+        self._asr_model = profile.asr_model_name
+        self._custom_models = list(profile.custom_models)
+        self.model_table.set_assignment(self._judge_model, self._asr_model)
         self.edit_asr_endpoint.setText(profile.asr_endpoint)
         self.edit_asr_resource.setText(profile.asr_resource_id)
         self.edit_api_key.setText(profile.api_key)
@@ -393,8 +438,13 @@ class ProviderForm(QWidget):
         # 点下去才发现被拦——不如一开始就置灰。
         self.btn_delete.setEnabled(not builtin)
         self.btn_restore.setEnabled(builtin)
+        self.use_judge.setChecked(self._capability_uses_cloud(profile, CAP_JUDGE))
+        self.use_asr.setChecked(self._capability_uses_cloud(profile, CAP_ASR))
+        self._refresh_cloud_hint()
         self._refresh_field_visibility()
         self.hint_label.setText("")
+        # 换厂先清掉上一家的清单：留着会让表格在新厂商名下短暂显示别人的模型
+        self._fetched_models = []
         # 切到一家厂商就顺手拉一次它的模型列表（地址与 Key 齐了才会真发请求；
         # 同一对 (地址, Key) 命中缓存则不重复拉）
         self._request_models()
@@ -413,13 +463,19 @@ class ProviderForm(QWidget):
         self.edit_asr_protocol.setCurrentIndex(
             self.edit_asr_protocol.findData(PROTO_DISABLED)
         )
-        self.edit_judge_model.clear()
-        self.edit_asr_model.clear()
+        self._judge_model = ""
+        self._asr_model = ""
+        self._custom_models = []
+        self.model_table.set_models(())
+        self.model_table.set_assignment("", "")
         self.edit_asr_endpoint.setText("")
         self.edit_asr_resource.setText("")
         self.edit_api_key.setText("")
         self.allow_upload.setChecked(False)
         self.use_system_proxy.setChecked(False)
+        self.use_judge.setChecked(False)
+        self.use_asr.setChecked(False)
+        self.cloud_hint.setText("")
         self._loading = False
         self.profile_list.setCurrentItem(None)
         self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
@@ -534,24 +590,27 @@ class ProviderForm(QWidget):
         base_url = (draft.base_url or "").strip()
         api_key = draft.resolved_api_key()
         if not base_url:
+            self._show_models([])
             self.model_note.setText(
-                "填好接口地址后可自动获取该厂商的模型列表；也可以直接手输模型名。"
+                "填好接口地址后可自动获取该厂商的模型列表；也可以在表格里直接添加模型名。"
             )
             return
         if not api_key:
             env_name = ENV_KEY_TEMPLATE.format(
                 id=(draft.id or "<id>").upper()
             )
+            self._show_models([])
             self.model_note.setText(
                 f"填好 API Key（或设环境变量 {env_name}）后自动获取模型列表；"
-                "也可以直接手输模型名。"
+                "也可以在表格里直接添加模型名。"
             )
             return
         cached = self._model_cache.get((base_url, api_key))
         if cached is not None and not force:
-            self._populate_models(cached, cached=True)
+            self._show_models(cached, cached=True)
             return
 
+        self._show_models([])          # 先把已手填的显示出来，别让表格空着
         self.model_note.setText("正在获取模型列表…")
         self.btn_refresh_models.setEnabled(False)
         worker = ModelListWorker(draft, parent=self)
@@ -566,30 +625,97 @@ class ProviderForm(QWidget):
         listed = [str(item) for item in (models or []) if str(item).strip()]
         draft = self.current_draft()
         self._model_cache[(draft.base_url.strip(), draft.resolved_api_key())] = listed
-        self._populate_models(listed)
+        self._show_models(listed)
 
     def _on_models_failed(self, message: str) -> None:
         """拉不到不是错误：不少厂商没有 /models（方舟只认推理接入点 ID）。"""
-        self.model_note.setText(f"{message}；请手动填写模型名。")
+        self._show_models([])
+        self.model_note.setText(f"{message}；可在表格里手动添加模型名。")
 
-    def _populate_models(self, models: list[str], *, cached: bool = False) -> None:
-        """把清单填进两个可编辑下拉；用户已填的值不能因为刷新而丢。"""
-        for combo in (self.edit_judge_model, self.edit_asr_model):
-            current = combo.currentText().strip()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(models)
-            combo.setEditText(current)
-            combo.blockSignals(False)
-        suffix = "（来自缓存）" if cached else ""
-        self.model_note.setText(
-            f"模型列表{suffix}：共 {len(models)} 个，来自该厂商的 /models 接口；"
-            "不在列表里的模型名可直接输入。"
+    def _show_models(self, fetched, *, cached: bool = False) -> None:
+        """把（接口拉回来的）清单交给表格，手填的自动接在后面。
+
+        合并规则来自 ``providers.merge_model_choices``（唯一一份定义）——
+        表单里的手填清单可能还没落盘，所以不走 ``profile.model_choices()``。
+        """
+        self._fetched_models = [str(item) for item in fetched if str(item).strip()]
+        # 指派的模型名也要进表格：它可能存在档案里但既不在接口清单、也不在手填
+        # 清单里（老配置就是这样），不显示出来用户就看不到"现在用的是哪个"
+        names = merge_model_choices(
+            self._fetched_models,
+            self._custom_models + [self._judge_model, self._asr_model],
         )
+        self.model_table.set_models(names, fetched=self._fetched_models)
+        self.model_table.set_assignment(self._judge_model, self._asr_model)
+        manual = len(self._custom_models)
+        if self._fetched_models:
+            suffix = "（来自缓存）" if cached else ""
+            extra = f"，另有 {manual} 个是手填的" if manual else ""
+            self.model_note.setText(
+                f"模型列表{suffix}：{len(self._fetched_models)} 个来自该厂商的 /models"
+                f"{extra}。"
+            )
+        elif manual or self._judge_model or self._asr_model:
+            self.model_note.setText(
+                "没有拉到清单（没填 Key 或该厂商不提供 /models）：表格里是档案中已有的"
+                "模型名，也可以继续手动添加。"
+            )
+
+    # ---- 模型表格（指派 / 添加 / 删除）----------------------------------
+
+    def _on_model_assigned(self, name: str, capability: str) -> None:
+        """把某个模型名指派给一条能力。与其它字段一样，等「保存」才写进配置。"""
+        if capability == CAP_ASR:
+            self._asr_model = name
+        else:
+            self._judge_model = name
+        self.model_table.set_assignment(self._judge_model, self._asr_model)
+        self._refresh_egress_preview()
+        label = CAP_LABELS.get(capability, capability)
+        self.hint_label.setText(f"{label}模型已改为「{name}」（点「保存」后写入配置）。")
+
+    def _on_model_added(self, name: str) -> None:
+        """手动添加一个模型名：留在清单里（下次打开还能选）。"""
+        if name not in self._custom_models:
+            self._custom_models.append(name)
+        self.model_table.edit_add.clear()
+        self._show_models(self._fetched_models)
+        self.hint_label.setText(f"已添加模型「{name}」（点「保存」后写入配置）。")
+
+    def _on_model_removed(self, name: str) -> None:
+        """删除一个手填的模型名；它若正被指派，一并清空指派（不留悬空引用）。"""
+        self._custom_models = [item for item in self._custom_models if item != name]
+        cleared = []
+        if self._judge_model == name:
+            self._judge_model = ""
+            cleared.append(CAP_LABELS[CAP_JUDGE])
+        if self._asr_model == name:
+            self._asr_model = ""
+            cleared.append(CAP_LABELS[CAP_ASR])
+        self._show_models(self._fetched_models)
+        note = f"已删除模型「{name}」（点「保存」后写入配置）。"
+        if cleared:
+            note += f"它正被指派给{'、'.join(cleared)}，指派也已清空。"
+        self.hint_label.setText(note)
 
     # ---- 保存 -----------------------------------------------------------
 
     def _on_save(self) -> None:
+        draft = self._validated_draft()
+        if draft is None:
+            return
+        self._write_profile(draft)
+        self._profile_id = draft.id
+        # 先 reload 再写提示：reload 会选中新档案并清空提示行
+        self.reload(select=draft.id)
+        self.hint_label.setText(f"已保存「{draft.label}」（id={draft.id}）。")
+
+    def _validated_draft(self) -> ProviderProfile | None:
+        """校验当前编辑的档案；有问题返回 None（原因写进提示行）。
+
+        「保存」与「保存并测试连通性」共用这一处：两条路径各写一遍校验，
+        迟早出现"一个按钮放行、另一个拦下"。
+        """
         draft = self.current_draft()
         taken = [
             profile.id
@@ -604,21 +730,133 @@ class ProviderForm(QWidget):
             if any(token in joined for token in ("id", "asr_endpoint", "asr_resource_id")):
                 self.advanced_toggle.setChecked(True)
             self.hint_label.setText("保存失败：" + joined)
-            return
+            return None
+        return draft
 
+    def _write_profile(self, profile: ProviderProfile) -> None:
+        """按 id 合并一份档案回配置并落盘。"""
         items = [dict(item) for item in self._config.providers]
         for index, item in enumerate(items):
-            if str(item.get("id")) == draft.id:
-                items[index] = draft.to_json()
+            if str(item.get("id")) == profile.id:
+                items[index] = profile.to_json()
                 break
         else:
-            items.append(draft.to_json())
+            items.append(profile.to_json())
         self._config.providers = items
         self._save_config()
+
+    # ---- 云端能力：开关 / 测通 / 切换后端 --------------------------------
+
+    def _cloud_switches(self):
+        """能力 → 勾选框（顺序固定，界面与测试都按这个顺序读）。"""
+        return ((CAP_JUDGE, self.use_judge), (CAP_ASR, self.use_asr))
+
+    def _capability_uses_cloud(self, profile: ProviderProfile, capability: str) -> bool:
+        """该能力此刻是否真的走这家云端（选了 + 档案已测通）。"""
+        return profile.enabled and self._config.backend_for(capability) == profile.id
+
+    def _save_and_probe(self) -> None:
+        """保存 + 逐能力测连通：**只把测通的能力切到云端**。
+
+        失败一律不允许启用：否则用户会以为通了，直到真正分析时才回退本地并
+        看到一次"莫名其妙的回退"。测不通的勾选框会自动取消，并写明原因。
+        """
+        draft = self._validated_draft()
+        if draft is None:
+            return
+        self._write_profile(draft)
         self._profile_id = draft.id
-        # 先 reload 再写提示：reload 会选中新档案并清空提示行
+
+        results: dict[str, str | None] = {}
+        for capability, checkbox in self._cloud_switches():
+            if not checkbox.isChecked():
+                results[capability] = None       # 没勾就不测（也不算启用）
+                continue
+            error = self._probe(draft, capability)
+            results[capability] = error
+            if error is not None:
+                checkbox.setChecked(False)
+
+        enabled_any = False
+        passed: list[str] = []
+        failures: list[str] = []
+        for capability, checkbox in self._cloud_switches():
+            uses_cloud = checkbox.isChecked() and results.get(capability) is None
+            label = CAP_LABELS.get(capability, capability)
+            if uses_cloud:
+                enabled_any = True
+                passed.append(label)
+            elif results.get(capability) is not None:
+                failures.append(f"{label}：{results[capability]}")
+            self._set_cloud_backend(capability, draft.id if uses_cloud else LOCAL_BACKEND)
+
+        self._write_profile(draft.with_updates(enabled=enabled_any))
         self.reload(select=draft.id)
-        self.hint_label.setText(f"已保存「{draft.label}」（id={draft.id}）。")
+        if failures:
+            self.hint_label.setText("连通性测试未通过——" + "；".join(failures) + "。")
+        elif enabled_any:
+            self.hint_label.setText(
+                f"连通性正常：{draft.label}。已切到云端的是：{'、'.join(passed)}。"
+            )
+        else:
+            self.hint_label.setText("已保存字段；未勾选任何能力，这条能力仍走本地模型。")
+
+    def _probe(self, profile: ProviderProfile, capability: str) -> str | None:
+        """连通性测试的接缝：返回错误描述；可用时返回 None。
+
+        单独一个方法是为了让测试能替换掉它——界面测试不允许真联网。能力是否
+        **配置完整**统一问 `missing_config_reason()`（与日志/检查器同一份判据），
+        否则多协议之后这里会与核心层各说各话。
+        """
+        if not profile.allow_upload:
+            return "未勾选「允许外发素材」"
+        if not profile.resolved_api_key():
+            env_name = ENV_KEY_TEMPLATE.format(id=profile.id.upper())
+            return f"没有 API Key（可填在本页，或设环境变量 {env_name}）"
+        missing = missing_config_reason(profile, capability)
+        if missing is not None:
+            return missing
+        transport = (
+            build_judge_transport(profile)
+            if capability == CAP_JUDGE
+            else build_asr_transport(profile)
+        )
+        if transport is None:
+            protocol = (
+                profile.judge_protocol if capability == CAP_JUDGE else profile.asr_protocol
+            )
+            label = PROTO_LABELS.get(protocol, protocol)
+            return (
+                f"暂不支持「{label}」协议的"
+                f"{CAP_LABELS.get(capability, capability)}：{profile.id}"
+            )
+        try:
+            transport.probe()
+        except ProviderError as exc:
+            return exc.describe()
+        except Exception as exc:  # noqa: BLE001 - 任何异常都算"不通"
+            return str(exc)
+        return None
+
+    def _set_cloud_backend(self, capability: str, backend: str) -> None:
+        prefs = dict(self._config.backend_prefs)
+        prefs[capability] = backend
+        self._config.backend_prefs = prefs
+        self._save_config()
+
+    def _refresh_cloud_hint(self) -> None:
+        profile = self._stored_profile(self._profile_id)
+        if profile is None:
+            self.cloud_hint.setText("")
+            return
+        used = [
+            CAP_LABELS[capability]
+            for capability, _ in self._cloud_switches()
+            if self._capability_uses_cloud(profile, capability)
+        ]
+        self.cloud_hint.setText(
+            ("已启用：" + "、".join(used)) if used else "未启用（走本地模型）"
+        )
 
     def _save_config(self) -> None:
         try:
@@ -649,8 +887,6 @@ class ProviderForm(QWidget):
         self.base_field.setVisible(
             judge_protocol != PROTO_DISABLED or asr_protocol == PROTO_OPENAI
         )
-        self.judge_model_field.setVisible(judge_protocol != PROTO_DISABLED)
-        self.asr_model_field.setVisible(asr_protocol != PROTO_DISABLED)
         env_name = ENV_KEY_TEMPLATE.format(
             id=(self.edit_id.text().strip() or "<id>").upper()
         )

@@ -32,7 +32,7 @@ class ModelPickDialog(DialogShell):
         self.footer_hint.setText(
             "列表里只有已配好 API Key 且能连通的厂商（打开时实时拉一次各家 "
             "/models）；悬停厂商项可看它的全部模型。本页只选模型名——是否允许外发"
-            "素材、是否切到云端，仍在「模型管理 → 云端模型」里决定。"
+            "素材、是否切到云端，仍在「模型管理 → 云端厂商」里决定。"
         )
         self.add_close_button()
         self.install_footer()

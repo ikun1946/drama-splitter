@@ -354,15 +354,26 @@ class ProviderProfile:
     def model_choices(self, fetched: Iterable[str] = ()) -> tuple[str, ...]:
         """候选模型清单 = 接口拉回来的 + 手填的（去重、保序，手填的补在后面）。
 
-        界面（模型表格、「选择云端模型」的下拉）都读这一处，免得两边各写一遍
-        合并规则；没有 Key 或接口不给清单时 `fetched` 为空，只剩手填的那几个。
+        合并规则只有 :func:`merge_model_choices` 一份定义；表单里手填的清单可能
+        还没落盘，那边直接调函数、不走本方法。
         """
-        choices: list[str] = []
-        for name in list(fetched) + list(self.custom_models):
-            text = name.strip() if isinstance(name, str) else ""
-            if text and text not in choices:
-                choices.append(text)
-        return tuple(choices)
+        return merge_model_choices(fetched, self.custom_models)
+
+
+def merge_model_choices(
+    fetched: Iterable[str], custom: Iterable[str]
+) -> tuple[str, ...]:
+    """把"接口拉回来的"与"手填的"合成一张清单：去空白、去重、保序。
+
+    顺序刻意是"接口在前、手填在后"：接口清单是字母序的已知集合，手填的通常
+    是清单里没有的部署名（方舟的 ``ep-xxx``），补在末尾一眼能找到。
+    """
+    choices: list[str] = []
+    for name in list(fetched) + list(custom):
+        text = name.strip() if isinstance(name, str) else ""
+        if text and text not in choices:
+            choices.append(text)
+    return tuple(choices)
 
 
 #: 全空档案：自定义厂商的唯一基底。
@@ -388,7 +399,8 @@ def _base_for(data: object, fallback: "ProviderProfile | None") -> "ProviderProf
 
 #: 内置档案（预置目录）。
 #:
-#: **预置只是起点**：模型名会随厂商迭代而过时，用户可在「工具 → 厂商管理…」里改；
+#: **预置只是起点**：模型名会随厂商迭代而过时，用户可在「工具 → 模型管理… →
+#: 云端厂商」里改；
 #: 这里给出的地址与模型名取自各家官方文档（见每条上方 docs 链接），一律不带 Key，
 #: 且 `enabled=False` / `allow_upload=False`——不给任何隐式外发路径。
 #:

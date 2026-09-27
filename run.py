@@ -141,11 +141,11 @@ def _ui_smoke() -> int:
     assert workbench.inspector is not None, "右栏检查器应常驻"
     print(f"  底栏主动作：{window.bottom.action_text()}")
 
-    # 四个对话框都必须能构造并显示
+    # 三个对话框都必须能构造并显示（厂商已并入「模型管理」的页签；
+    # 「选择云端模型」在下面单独构造——它必须用空配置，免得联网）
     for label, factory in (
         ("分集设置", window.build_settings_dialog),
         ("模型管理", window.build_model_dialog),
-        ("厂商管理", window.build_provider_dialog),
         ("导出", window.build_export_dialog),
     ):
         dialog = factory()
@@ -169,23 +169,13 @@ def _ui_smoke() -> int:
     print(f"    状态行：{pick_dialog.form.status_label.text()}")
     pick_dialog.close()
 
-    provider_dialog = window.build_provider_dialog()
-    provider_dialog.show()
-    app.processEvents()
-    provider_form = provider_dialog.form
-    count = provider_form.profile_list.count()
-    print(f"厂商列表：{count} 家（预置目录 {len(DEFAULT_PROFILES)} 家 + 自定义）")
-    selected = provider_form.selected_id()
-    print(f"  默认选中：{selected}")
-    provider_form.reload()
-    app.processEvents()
-    provider_dialog.close()
-    if count < len(DEFAULT_PROFILES):
-        print("界面自检失败：厂商列表少于预置目录")
-        return 1
-
+    # 模型管理：一个对话框两个页签（本地模型 / 云端厂商），两页都验一遍
     model_dialog = window.build_model_dialog()
     model_dialog.show()
+    app.processEvents()
+    print(f"  模型管理页签：{model_dialog.tabs.count()} 个"
+          f"（{model_dialog.tabs.tabText(0)} / {model_dialog.tabs.tabText(1)}）")
+
     page = model_dialog.form
     rows = page.rows()
     print(f"模型清单：{len(rows)} 行（语音转写 {sum(1 for r in rows if r['kind'] == 'whisper')} 档"
@@ -197,6 +187,14 @@ def _ui_smoke() -> int:
         )
     print(f"模型目录：{page.dir_edit.text()}")
     page._refresh()
+    app.processEvents()
+
+    provider_form = model_dialog.providers
+    count = provider_form.profile_list.count()
+    print(f"厂商列表：{count} 家（预置目录 {len(DEFAULT_PROFILES)} 家 + 自定义）")
+    print(f"  默认选中：{provider_form.selected_id()}")
+    print(f"  模型表格行数：{len(provider_form.model_table.rows())}")
+    provider_form.reload()
     app.processEvents()
 
     # 核心工作流是单页三栏；设置与模型是对话框，不占工作区。
@@ -221,6 +219,10 @@ def _ui_smoke() -> int:
     if len(window.menuBar().actions()) != 4:
         print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")
         return 1
+    if count < len(DEFAULT_PROFILES):
+        print("界面自检失败：厂商列表少于预置目录")
+        return 1
+    model_dialog.close()
     print("界面自检通过")
     return 0
 

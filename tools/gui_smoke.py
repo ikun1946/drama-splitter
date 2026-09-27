@@ -374,15 +374,19 @@ def main() -> int:
     print("  能力切换正常（语义判断 / 语音转写）")
     pick_dialog.close()
 
-    # ---- 厂商管理对话框 ----------------------------------------------------
-    print("[厂商] 对话框：内置不可删、按协议显隐字段…")
+    # ---- 云端厂商页签（合并前的「厂商管理」）--------------------------------
+    # 同样用一份空配置：本机若存了 API Key，切到这页就会真去拉各家的 /models
+    print("[厂商] 页签：内置不可删、按协议显隐字段、模型表格可指派…")
     from app.core.providers import DEFAULT_PROFILES, PROTO_OPENAI, PROTO_VOLC_ARK
 
-    provider_dialog = window.build_provider_dialog()
+    provider_dialog = window.build_model_dialog(
+        config_path=Path(tempfile.mkdtemp()) / "config.json", providers_tab=True
+    )
     provider_dialog.show()
     app.processEvents()
-    assert provider_dialog.isVisible(), "厂商管理对话框未显示"
-    providers = provider_dialog.form
+    assert provider_dialog.isVisible(), "模型管理对话框未显示"
+    assert provider_dialog.tabs.currentIndex() == 1, "应直接停在「云端厂商」页签"
+    providers = provider_dialog.providers
     count = providers.profile_list.count()
     print(f"  厂商数：{count}（预置 {len(DEFAULT_PROFILES)} 家 + 自定义）")
     assert count >= len(DEFAULT_PROFILES), "预置目录里的每一家都必须出现在列表里"
@@ -397,11 +401,20 @@ def main() -> int:
     )
     assert providers.volcano_host.isHidden(), "OpenAI 兼容转写没有 asr_endpoint"
     print("  内置厂商 id 已锁；协议切换后字段显隐正确")
-    # 模型名现在是可编辑下拉 + 按厂商自动刷新：没有 Key 时要在提示行说清原因，
-    # 而不是静默什么都不做（这里绝不发网络请求）
+
+    # 模型表格：接口拉回来的 + 手填的 + 指派的都要能看到（这里没 Key，不发请求）
+    assert providers.model_table.names(), "档案里已指派的模型名也该显示在表格里"
+    providers.model_table.edit_add.setText("ep-smoke")
+    providers.model_table.btn_add.click()
+    providers._on_model_assigned("ep-smoke", "judge")
+    rows = {row["name"]: row for row in providers.model_table.rows()}
+    assert rows["ep-smoke"]["custom"] is True and rows["ep-smoke"]["in_judge"] is True
+    print(f"  模型表格：{'、'.join(providers.model_table.names())}")
+    assert providers.model_note.text(), "提示行要说清怎么拿到模型清单"
+    print(f"  模型提示：{providers.model_note.text()}")
     assert providers.btn_refresh_models.isEnabled(), "刷新按钮默认可用"
-    assert providers.model_note.text(), "应提示如何获取该厂商的模型列表"
-    print(f"  模型列表提示：{providers.model_note.text()}")
+    assert providers.btn_probe.isEnabled(), "「保存并测试连通性」默认可用"
+    print(f"  云端能力：{providers.cloud_hint.text()}")
     print(f"  外发预览：{providers.egress_preview.text().splitlines()[0]}")
     providers.reload()
     app.processEvents()

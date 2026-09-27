@@ -819,7 +819,7 @@ def select_judge(
                 protocol = PROTO_LABELS.get(profile.judge_protocol, profile.judge_protocol)
                 notes.append(
                     f"暂不支持「{protocol}」协议的云端语义判断：{profile.id}"
-                    "（可在「厂商管理」里改协议），本次仍用本地模型。"
+                    "（可在「模型管理 → 云端厂商」里改协议），本次仍用本地模型。"
                 )
             else:
                 primary = CloudLlmJudge(

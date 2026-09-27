@@ -257,16 +257,19 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("07-导出.png", _export_dialog)
 
-    # 08 厂商管理：左列表 + 右字段编辑。选中"火山方舟"（字段最全的一家），
-    # 让截图里能看到"按协议显隐"与只读外发预览。
+    # 08 云端厂商页签（合并前的「厂商管理」）：左列表 + 右字段编辑 + 模型表格。
+    # 选中"火山方舟"（字段最全的一家），让截图里能看到"按协议显隐"与只读外发预览。
+    # 用空配置构造：本机若存了 API Key，切到这页就会真去拉各家的 /models。
     def _provider_dialog():
-        dialog = window.build_provider_dialog()
-        form = dialog.form
+        dialog = window.build_model_dialog(
+            config_path=Path(tempfile.mkdtemp()) / "config.json", providers_tab=True
+        )
+        form = dialog.providers
         form.select_profile("volc")
         pump(app, 0.2)
         return dialog
 
-    shot_dialog("08-厂商管理.png", _provider_dialog)
+    shot_dialog("08-云端厂商.png", _provider_dialog)
 
     # 09 选择云端模型：只列"已配 Key 且能连通"的厂商（悬停看清单）。
     # 刻意用**空配置**构造——本机若存了 API Key，打开它就会真去拉各家的
