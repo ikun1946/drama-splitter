@@ -392,3 +392,29 @@ class TestFallbackInWorker:
         assert "云端转写失败" in joined and "已回退本地模型重跑" in joined, joined
         assert "第 1 段" in joined, "应说清是哪一段失败的"
         assert "跳过语音转写" in joined, "本地模型也没装时，应如实说明并继续（§7.2 可人工审核）"
+
+
+class TestSegmentOnlyDegradation:
+    """只给分句时间戳的后端（硅基流动 SenseVoice 这类）：降级要被记下来。
+
+    这是 OpenAI 兼容协议里最常见的形态之一：厂商认 verbose_json 但不返回
+    `words[]`。此时不能失败、也不能编造词边界，而是合成"分句级"的词并记一条
+    风险——否则候选点会以为"这段没有词级信息"，审核页也就失去了粒度依据。
+    """
+
+    class SegmentsOnlyTransport(StubTransport):
+        def transcribe_file(self, audio: Path, *, language: str, timeout: float = 60.0):
+            result = super().transcribe_file(audio, language=language, timeout=timeout)
+            return ProviderTranscript(
+                words=[], segments=result.segments, duration_ms=result.duration_ms
+            )
+
+    def test_engine_records_quality_degradation(self, binaries, assets):
+        engine = make_engine(self.SegmentsOnlyTransport())
+        transcript = engine.transcribe(
+            assets["cfr"], duration_seconds=None, ffmpeg=str(binaries.ffmpeg)
+        )
+
+        codes = {issue.code for issue in transcript.issues}
+        assert "ASR_NO_WORD_TIMESTAMPS" in codes, "降级必须明说，不能静默"
+        assert transcript.words, "分句会被合成为粗粒度词，句子重建仍要能工作"

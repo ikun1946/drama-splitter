@@ -1,30 +1,24 @@
-"""火山方舟 / 豆包适配器（首版唯一厂商实现）。
+"""火山方舟 / 豆包：**转写**适配器（录音文件识别极速版）。
 
-**只放厂商差异**：鉴权头、请求信封、响应解析、错误映射。上层
-（``CloudLlmJudge`` / 后续的 ``CloudAsrEngine``）只认 ``providers.py`` 里的协议，
-不得出现"Ark 特有的字段名"。
+**只放厂商差异**：鉴权头、请求信封、响应解析、错误映射。通用 HTTP 工具
+（代理策略、超时、错误映射、静音样片）已抽到 ``cloud_http.py``；方舟的对话补全
+本身就是 OpenAI 形态，因此**语义判断走 ``cloud_openai.OpenAiChatTransport``**，
+这里不再单独实现一个 chat 适配器。
 
-为什么走 urllib 而不是官方 SDK
-------------------------------
+为什么用标准库而不是官方 SDK
+----------------------------
 与 ``OllamaJudge`` 同一条理由：本项目不引入新的运行时依赖，打包体积与
-"装机就能跑"优先。请求主干只有一个 JSON POST，用标准库足够。
-
-代理行为
---------
-默认**显式绕过系统代理**（``ProxyHandler({})``）：本机环境里 ``http_proxy``
-会把请求交给代理，代理再拒绝或改写回环/内网地址（Ollama 路径已实测过一次）。
-档案里给了 ``use_system_proxy`` 开关，需要时由用户显式打开。
+"装机就能跑"优先。极速版只有一个 JSON POST（音频以 base64 放进请求体），
+用标准库足够。
 """
 
 from __future__ import annotations
 
 import base64
-import json
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 
+from .cloud_http import post_json, silent_wav_bytes
 from .providers import (
     DEFAULT_TIMEOUT,
     ProviderError,
@@ -34,10 +28,7 @@ from .providers import (
     egress_host,
 )
 
-__all__ = ["VolcArkChatTransport", "VolcFlashAsrTransport"]
-
-#: 尽量把厂商侧的排错线索带回来（不同网关用的头名不一样）
-_LOGID_HEADERS = ("X-Request-Id", "X-Tt-Logid", "X-Client-Request-Id")
+__all__ = ["ASR_STATUS_OK", "ASR_STATUS_SILENT", "VolcFlashAsrTransport"]
 
 # ---- 大模型录音文件识别极速版 -------------------------------------------
 #
@@ -55,195 +46,6 @@ _ASR_FORMATS = {".wav": "wav", ".mp3": "mp3", ".ogg": "ogg", ".opus": "ogg"}
 
 #: 内部语言代码 → 厂商要求的 BCP-47 形式（其余原样透传，如 zh-CN / en-US）
 _LANGUAGE_MAP = {"zh": "zh-CN", "en": "en-US", "yue": "yue-CN"}
-
-
-def _silent_wav_bytes(seconds: float = 1.0, rate: int = 16000) -> bytes:
-    """生成一小段静音 WAV（16k 单声道 16bit）。
-
-    连通性测试用它当"最小请求"：不依赖 ffmpeg、不读用户素材，也不会产生
-    任何真实内容的外发。厂商对它的返回是 20000003（静音音频）——恰好证明
-    Key 与资源权限都是通的。
-    """
-    frames = int(rate * max(0.1, seconds))
-    data = b"\x00\x00" * frames
-    header = (
-        b"RIFF" + (36 + len(data)).to_bytes(4, "little") + b"WAVE"
-        + b"fmt " + (16).to_bytes(4, "little")
-        + (1).to_bytes(2, "little")      # PCM
-        + (1).to_bytes(2, "little")      # 单声道
-        + rate.to_bytes(4, "little")
-        + (rate * 2).to_bytes(4, "little")   # 字节率
-        + (2).to_bytes(2, "little")      # 块对齐
-        + (16).to_bytes(2, "little")     # 位深
-        + b"data" + len(data).to_bytes(4, "little")
-    )
-    return header + data
-
-
-def _post_json(
-    url: str,
-    payload: dict,
-    headers: dict,
-    *,
-    timeout: float,
-    use_system_proxy: bool,
-) -> tuple[dict, object]:
-    """POST 一个 JSON，返回 ``(响应体, 响应头)``；失败抛 :class:`ProviderError`。
-
-    两个适配器（chat 与录音文件识别）共用这一段：代理处理、HTTP 错误映射、
-    JSON 解析只此一份，避免两边各写一套后行为漂移。
-    """
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers},
-    )
-    opener = (
-        urllib.request.build_opener()
-        if use_system_proxy
-        else urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    )
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", "replace")
-            response_headers = response.headers
-    except urllib.error.HTTPError as exc:
-        raise _http_error(exc) from exc
-    except urllib.error.URLError as exc:
-        raise ProviderError(f"网络不可达：{exc.reason}") from exc
-    except OSError as exc:  # 含超时
-        raise ProviderError(f"请求失败：{exc}") from exc
-
-    try:
-        data = json.loads(body or "{}")
-    except json.JSONDecodeError as exc:
-        raise ProviderError(f"返回体不是合法 JSON：{body[:200]}") from exc
-    if not isinstance(data, dict):
-        raise ProviderError(f"返回体不是 JSON 对象：{body[:200]}")
-    return data, response_headers
-
-
-def _http_error(exc: urllib.error.HTTPError) -> ProviderError:
-    """把 HTTP 错误变成带厂商说明与 logid 的 ProviderError。"""
-    detail = ""
-    try:
-        raw = (exc.read() or b"").decode("utf-8", "replace")
-    except OSError:  # pragma: no cover - 读取响应体失败时只保留状态码
-        raw = ""
-    try:
-        payload = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            detail = str(error.get("message") or "")
-        if not detail:
-            detail = str(payload.get("message") or "")
-    if not detail:
-        detail = raw.strip()[:200]
-
-    logid = ""
-    headers = exc.headers
-    for name in _LOGID_HEADERS:
-        value = headers.get(name) if headers is not None else None
-        if value:
-            logid = str(value)
-            break
-
-    status = int(exc.code or 0)
-    if status in (401, 403):
-        headline = "鉴权失败（API Key 或资源权限）"
-    elif status == 429:
-        headline = "被限流或额度不足"
-    elif status >= 500:
-        headline = "厂商服务异常"
-    else:
-        headline = f"请求被拒绝（HTTP {status}）"
-    return ProviderError(headline, status=status, vendor_message=detail, logid=logid)
-
-
-class VolcArkChatTransport:
-    """火山方舟 OpenAI 兼容 ``/chat/completions`` 适配器。"""
-
-    def __init__(
-        self,
-        base_url: str,
-        api_key: str,
-        model: str,
-        *,
-        use_system_proxy: bool = False,
-        temperature: float = 0.1,
-        max_tokens: int = 160,
-    ) -> None:
-        self._base_url = (base_url or "").rstrip("/")
-        self._api_key = (api_key or "").strip()
-        self._model = (model or "").strip()
-        self._use_system_proxy = use_system_proxy
-        self._temperature = temperature
-        self._max_tokens = max_tokens
-
-    # ---- 协议实现 ------------------------------------------------------
-
-    def describe(self) -> str:
-        return f"火山方舟 {self._model} @ {egress_host(self._base_url)}"
-
-    def complete(self, prompt: str, *, timeout: float = DEFAULT_TIMEOUT) -> str:
-        data, _ = self._post(
-            {"model": self._model, "messages": [{"role": "user", "content": prompt}],
-             "temperature": self._temperature, "max_tokens": self._max_tokens},
-            timeout=timeout,
-        )
-        return self._extract_text(data)
-
-    def probe(self, *, timeout: float = 8.0) -> None:
-        """连通性自检：一次最小请求（1 token），只关心"能不能通、鉴权对不对"。"""
-        self._post(
-            {"model": self._model, "messages": [{"role": "user", "content": "ping"}],
-             "temperature": 0.0, "max_tokens": 1},
-            timeout=timeout,
-        )
-
-    # ---- 内部 ----------------------------------------------------------
-
-    def _post(self, payload: dict, *, timeout: float) -> tuple[dict, object]:
-        if not self._base_url:
-            raise ProviderError("未配置接口地址（base_url）")
-        if not self._api_key:
-            raise ProviderError("缺少 API Key")
-        if not self._model:
-            raise ProviderError("未配置模型名（judge_model）")
-        return _post_json(
-            f"{self._base_url}/chat/completions",
-            payload,
-            {"Authorization": f"Bearer {self._api_key}"},
-            timeout=timeout,
-            use_system_proxy=self._use_system_proxy,
-        )
-
-    @staticmethod
-    def _extract_text(data: dict) -> str:
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            error = data.get("error")
-            if isinstance(error, dict) and error.get("message"):
-                raise ProviderError(
-                    "厂商返回错误",
-                    vendor_message=str(error.get("message")),
-                    status=None,
-                )
-            raise ProviderError(f"返回体缺少 choices：{json.dumps(data, ensure_ascii=False)[:200]}")
-        first = choices[0] if isinstance(choices[0], dict) else {}
-        message = first.get("message") if isinstance(first.get("message"), dict) else {}
-        content = message.get("content")
-        if isinstance(content, list):
-            # 部分网关按多段内容返回
-            content = "".join(
-                str(part.get("text") or "")
-                for part in content
-                if isinstance(part, dict)
-            )
-        return str(content or "")
 
 
 class VolcFlashAsrTransport:
@@ -305,7 +107,7 @@ class VolcFlashAsrTransport:
         因此与 20000000 一起视为"可用"。不读用户素材、不依赖 ffmpeg。
         """
         data, headers = self._post(
-            base64.b64encode(_silent_wav_bytes()).decode("ascii"),
+            base64.b64encode(silent_wav_bytes()).decode("ascii"),
             "wav",
             language="zh",
             timeout=timeout,
@@ -344,7 +146,7 @@ class VolcFlashAsrTransport:
                 "enable_itn": True,
             },
         }
-        data, headers = _post_json(
+        data, headers = post_json(
             self._endpoint,
             payload,
             {

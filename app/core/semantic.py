@@ -38,6 +38,7 @@ from .cloud import build_judge_transport
 from .probe import LEVEL_INFO, LEVEL_WARN, Issue
 from .providers import (
     CAP_JUDGE,
+    PROTO_LABELS,
     JudgeTransport,
     ProviderError,
     ProviderProfile,
@@ -815,7 +816,11 @@ def select_judge(
         else:
             transport = build_judge_transport(profile)
             if transport is None:
-                notes.append(f"暂不支持该厂商的云端语义判断：{profile.id}，本次仍用本地模型。")
+                protocol = PROTO_LABELS.get(profile.judge_protocol, profile.judge_protocol)
+                notes.append(
+                    f"暂不支持「{protocol}」协议的云端语义判断：{profile.id}"
+                    "（可在「厂商管理」里改协议），本次仍用本地模型。"
+                )
             else:
                 primary = CloudLlmJudge(
                     transport, profile_id=profile.id, model=profile.judge_model

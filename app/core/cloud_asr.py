@@ -37,14 +37,15 @@ from .cloud import build_asr_transport
 from .probe import LEVEL_WARN, Issue
 from .providers import (
     CAP_ASR,
+    PROTO_LABELS,
     AsrTransport,
     ProviderError,
     ProviderProfile,
     ProviderTranscript,
     ProviderWord,
+    asr_target_host,
     block_reason,
     describe_egress,
-    egress_host,
 )
 
 __all__ = ["CloudAsrEngine", "select_asr_engine"]
@@ -117,7 +118,7 @@ class CloudAsrEngine(AsrEngine):
         """转写结束后的外发流水（设计 §6 要求的那一行）。"""
         return (
             f"外发流水：音频 {float(transcript.duration):.0f} 秒 / "
-            f"{transcript.chunk_count} 块 → {egress_host(self._profile.asr_endpoint)}"
+            f"{transcript.chunk_count} 块 → {asr_target_host(self._profile)}"
         )
 
     # ---- 不依赖本地模型 ------------------------------------------------
@@ -349,7 +350,11 @@ def select_asr_engine(
         else:
             transport = build_asr_transport(profile)
             if transport is None:
-                notes.append(f"暂不支持该厂商的云端转写：{profile.id}，本次仍用本地模型。")
+                protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
+                notes.append(
+                    f"暂不支持「{protocol}」协议的云端转写：{profile.id}"
+                    "（可在「厂商管理」里改协议），本次仍用本地模型。"
+                )
             else:
                 engine = CloudAsrEngine(
                     transport, profile, settings=settings, cache=cache, fingerprint=fingerprint

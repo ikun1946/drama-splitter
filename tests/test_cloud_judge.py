@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from app.core.app_config import LOCAL_BACKEND, AppConfig
-from app.core.cloud_volc import VolcArkChatTransport
+from app.core.cloud_openai import OpenAiChatTransport
 from app.core.providers import DEFAULT_PROFILES, ProviderProfile
 from app.core.semantic import (
     VERDICT_ACCEPTABLE,
@@ -144,7 +144,7 @@ def make_request(**overrides) -> JudgmentRequest:
 
 def make_judge(server: FakeArk) -> CloudLlmJudge:
     return CloudLlmJudge(
-        VolcArkChatTransport(server.base_url, API_KEY, "ep-test"),
+        OpenAiChatTransport(server.base_url, API_KEY, "ep-test", label="火山方舟"),
         profile_id="volc",
         model="ep-test",
     )
