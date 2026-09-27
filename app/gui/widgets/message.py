@@ -21,7 +21,14 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-__all__ = ["information", "warning", "critical", "confirm", "confirm_continue"]
+__all__ = [
+    "information",
+    "warning",
+    "critical",
+    "warning_with_action",
+    "confirm",
+    "confirm_continue",
+]
 
 
 def information(parent: QWidget | None, title: str, text: str) -> None:
@@ -31,6 +38,26 @@ def information(parent: QWidget | None, title: str, text: str) -> None:
 def warning(parent: QWidget | None, title: str, text: str) -> None:
     """既是警告也是"此路不通"的硬约束提示（沿用既有文案习惯）。"""
     QMessageBox.warning(parent, title, text)
+
+
+def warning_with_action(
+    parent: QWidget | None, title: str, text: str, action_text: str
+) -> bool:
+    """带一个动作按钮的警告框：返回 True 表示点了 ``action_text``。
+
+    与 :func:`confirm` 的区别只在语气：这里是"出问题了"，动作按钮是**补救**
+    （如把无解的成因直接应用到设置上），次要按钮是"知道了"。
+    同样是实例级 ``exec()``，离屏自动化必须覆写调用方的方法（见各页的
+    ``request_*`` 钩子），不要直接调用本函数。
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(title)
+    box.setText(text)
+    action = box.addButton(action_text, QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("知道了", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    return box.clickedButton() is action
 
 
 def critical(parent: QWidget | None, title: str, text: str) -> None:

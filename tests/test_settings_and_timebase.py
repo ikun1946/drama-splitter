@@ -11,12 +11,18 @@ from fractions import Fraction
 import pytest
 
 from app.core.settings import (
+    ADVICE_EPISODE_COUNT,
+    ADVICE_MAX_DURATION,
+    ADVICE_MIN_DURATION,
     CountPolicy,
     RangeMode,
     RangeSpec,
+    SettingAdvice,
     SplitMode,
     SplitSettings,
     UnresolvedState,
+    applicable_setting_advice,
+    apply_setting_advice,
     ceiling_div,
     check_feasibility,
     normalized_duration_distance,
@@ -254,3 +260,58 @@ class TestNormalizedDistance:
         )
         # 偏差 10 秒 / 上行空间 24 秒
         assert value == Fraction(10, 24)
+
+
+class TestSettingAdviceApplication:
+    """无解建议的一键应用：把「建议：最长集长放宽到 ≥ 5.4s」落到设置上。
+
+    界面上的按钮与报错文案同源（见 `solver.GraphDiagnostics.advice`），
+    这里只验证"应用"这一半：集长只往更松的方向改、浮动来源切成手动并可切回、
+    集数项不被动。
+    """
+
+    def _settings(self) -> SplitSettings:
+        """目标 2 秒 ±20%：L=1.6s、U=2.4s——与用户遇到的那次报错同一组参数。"""
+        return SplitSettings(
+            split_mode=SplitMode.TARGET_DURATION,
+            target_duration_seconds=Fraction(2),
+            range=RangeSpec(mode=RangeMode.PERCENT, tolerance=Fraction(1, 5)),
+        )
+
+    def test_raises_upper_bound_and_switches_source_to_manual(self):
+        settings = self._settings()
+        note = apply_setting_advice(
+            settings,
+            [SettingAdvice(ADVICE_MAX_DURATION, "≥", Fraction(54, 10))],
+            Fraction(120),
+        )
+        assert note is not None
+        assert settings.range.mode == RangeMode.MANUAL, "建议给的是绝对秒数，只能落到手动上下限"
+        assert settings.range.manual_min == Fraction(8, 5), "没要求的那个界必须原样保留"
+        assert settings.range.manual_max == Fraction(54, 10)
+        assert "最长集长 2.4s → 5.4s" in note
+
+        # 原浮动比例已暂存：用户仍可切回百分比来源
+        settings.range.switch_to(RangeMode.PERCENT)
+        assert settings.range.tolerance == Fraction(1, 5)
+
+    def test_advice_that_tightens_nothing_is_not_applied(self):
+        settings = self._settings()
+        note = apply_setting_advice(
+            settings,
+            [
+                SettingAdvice(ADVICE_MAX_DURATION, "≥", Fraction(1)),   # 比现上限还小
+                SettingAdvice(ADVICE_MIN_DURATION, "≤", Fraction(9)),   # 比现下限还大
+            ],
+            Fraction(120),
+        )
+        assert note is None, "没有带来任何放宽就不该改设置（界面也就不给按钮）"
+        assert settings.range.mode == RangeMode.PERCENT
+
+    def test_count_only_advice_is_not_applicable(self):
+        """集数与集长是「或」关系：一键应用只走集长，不动用户指定的集数。"""
+        settings = self._settings()
+        advice = [SettingAdvice(ADVICE_EPISODE_COUNT, "≤", Fraction(3))]
+        assert applicable_setting_advice(advice) == []
+        assert apply_setting_advice(settings, advice, Fraction(120)) is None
+        assert settings.target_episode_count is None

@@ -19,6 +19,11 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.plan import BoundaryPlan
+from ...core.settings import (
+    SettingAdvice,
+    applicable_setting_advice,
+    apply_setting_advice,
+)
 from ..state import ProjectState
 from ..widgets import message
 from ..workers import AnalysisWorker
@@ -203,8 +208,43 @@ class AnalysisPane(QWidget):
         self.stage_label.setText("分析失败")
         self._active = False
         self.recent.setText(text)
+
+        # 无解报错自带「该把哪个参数改成多少」：能一键应用就不让用户再回
+        # 分集设置里自己改（§10.4 的成因 + 建议，按钮与文案同源）
+        advice = self._failure_advice()
+        if advice and self.request_apply_advice(text, advice):
+            note = apply_setting_advice(
+                self.state.settings, advice, self.state.total_seconds
+            )
+            if note is not None:
+                self._append(note)
+                self._append("已按新设置重新分析。")
+                self.finished.emit()    # 先回到"未在分析"，start() 再切到"分析中"
+                self.start()
+                return
         message.warning(self, "无法完成分析", text)
         self.finished.emit()
+
+    def _failure_advice(self) -> list[SettingAdvice]:
+        """刚失败的那次求解留下的、可一键应用的建议；没有时返回空表。"""
+        worker = self.sender() or self.worker
+        diagnostics = getattr(worker, "failure_diagnostics", None)
+        if diagnostics is None or self.state.media is None:
+            return []
+        return applicable_setting_advice(diagnostics.advice)
+
+    def request_apply_advice(self, text: str, advice: list[SettingAdvice]) -> bool:
+        """问用户要不要把建议应用到分集设置。
+
+        与导出的 ``request_precheck`` 同一条约定：离屏测试覆写这个方法，
+        不走真弹窗（实例级 ``exec()`` 会让自动化永久阻塞）。
+        """
+        return message.warning_with_action(
+            self,
+            "无法完成分析",
+            f"{text}\n\n把建议应用到分集设置，并立即按新设置重新分析？",
+            "应用建议并重新分析",
+        )
 
     def _append(self, text: str, level: str = "info") -> None:
         self.log_appended.emit(text, level)

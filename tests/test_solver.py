@@ -312,6 +312,39 @@ class TestNoPathDiagnostics:
         with pytest.raises(_no_path_error()):
             solver.solve_flexible(2, 3)
 
+    def test_structured_advice_matches_the_advice_text(self, media):
+        """诊断里要留下结构化建议，且与「建议：」文案逐项一致。
+
+        报错框上的「应用建议」按钮照着这份数据改设置——两边若不是同一份，
+        用户读到的和按钮改的就会是两件事。
+        """
+        solver = CandidateGraphSolver(
+            candidates_at([10, 90]), media, derived(30, 10, 30)
+        )
+        solver.build()
+        with pytest.raises(_no_path_error()) as excinfo:
+            solver.solve_exact(2)
+        advice = excinfo.value.diagnostics.advice
+        assert advice, "无解诊断必须带结构化建议，界面才能给出「应用建议」按钮"
+        line = str(excinfo.value).splitlines()[1]
+        for item in advice:
+            assert item.describe() in line, f"{item.describe()} 不在建议文案里：{line}"
+
+    def test_advice_seconds_round_toward_the_required_bound(self, media):
+        """建议值取整到 0.1s 时方向不能反：上限向上、下限向下。
+
+        若把 5.32s 显示成 5.3s、又按 5.3s 去改设置，照建议改完仍然无解。
+        """
+        solver = CandidateGraphSolver(
+            candidates_at([5.32, 25]), media, derived(12, 9.6, 14.4, 100)
+        )
+        solver.build()
+        with pytest.raises(_no_path_error()) as excinfo:
+            solver.solve_exact(8)
+        values = {item.parameter: item.value for item in excinfo.value.diagnostics.advice}
+        assert values["最短集长"] == Fraction(53, 10), "下限 5.32s 只能向下取到 5.3s"
+        assert values["最长集长"] == Fraction(25)
+
     def test_diagnostics_carry_node_and_edge_counts(self, media):
         solver = CandidateGraphSolver(
             candidates_at([25, 50, 75]), media, derived(25, 20, 30)

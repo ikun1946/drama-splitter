@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     message_mod.information = lambda *a, **k: None
     message_mod.warning = lambda *a, **k: None
     message_mod.critical = lambda *a, **k: None
+    message_mod.warning_with_action = lambda *a, **k: False
 
     app = QApplication(sys.argv[:1])
     family = install_fonts(app)

@@ -49,6 +49,8 @@ def _install_dialog_recorders() -> None:
     message.information = record("info")
     message.warning = record("warn")
     message.critical = record("critical")
+    # 带动作按钮的警告框一律当作"用户没点应用"：冒烟不替用户改设置
+    message.warning_with_action = lambda *args, **kwargs: False
 
     # §37 前置检查是对话框里的一个可覆写决策方法。覆写它模拟用户选「继续导出」——
     # 这是唯一的决策缝，绕开它就等于绕开模态阻塞。

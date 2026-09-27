@@ -133,6 +133,9 @@ def recommend_plan(
         if blocking or solution.is_empty:
             comparison.ok = False
             comparison.problems = blocking
+            # 空解仍带诊断（含可应用的设置建议）：界面据此给「应用建议」按钮，
+            # 全部策略都无解时不用让用户自己回去改参数
+            comparison.solution = solution
             recommendation.comparisons.append(comparison)
             continue
 
