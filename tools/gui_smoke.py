@@ -349,30 +349,45 @@ def main() -> int:
     print("  模型清单刷新正常")
     model_dialog.close()
 
-    # ---- 选择云端模型对话框 ------------------------------------------------
+    # ---- 模型设置对话框 --------------------------------------------------
     # 刻意用一份**空配置**构造：这台机器上若存了 API Key，打开这个对话框就会真去
     # 拉各家的 /models——冒烟脚本不该依赖网络，更不该把用户的额度花掉。
-    print("[选模型] 对话框：只列能连通的厂商、悬停出清单、只写模型名…")
+    print("[模型设置] 对话框：两条能力各一个下拉，本地在最上、云端在下…")
     import tempfile
 
     from app.core.providers import CAP_ASR
+    from app.gui.panes.model_setup_form import KIND_CLOUD, KIND_HEADER, KIND_LOCAL
 
-    pick_dialog = window.build_model_pick_dialog(
+    setup_dialog = window.build_model_setup_dialog(
         config_path=Path(tempfile.mkdtemp()) / "config.json"
     )
-    pick_dialog.show()
+    setup_dialog.show()
     app.processEvents()
-    assert pick_dialog.isVisible(), "选择云端模型对话框未显示"
-    pick = pick_dialog.form
-    assert pick.provider_combo.count() == 0, "空配置下不该有可用厂商"
-    assert pick.status_label.text(), "没有可用厂商时必须说清原因与下一步"
-    print(f"  标题：{pick_dialog.windowTitle()}；厂商下拉 {pick.provider_combo.count()} 家")
-    print(f"  状态行：{pick.status_label.text()}")
-    pick.set_capability(CAP_ASR)
-    app.processEvents()
-    assert pick.capability() == CAP_ASR, "能力切换应改变候选集"
-    print("  能力切换正常（语义判断 / 语音转写）")
-    pick_dialog.close()
+    assert setup_dialog.isVisible(), "模型设置对话框未显示"
+    setup = setup_dialog.form
+    asr_card, judge_card = setup.cards()
+    assert judge_card.capability != CAP_ASR, "两张卡应是两条不同的能力"
+    for card in setup.cards():
+        assert card.status_main.text(), "每张卡必须有一句结论"
+        items = card.items()
+        kinds = [c.kind for c in items]
+        locals_ = [c for c in items if c.kind == KIND_LOCAL]
+        clouds = [c for c in items if c.kind == KIND_CLOUD]
+        heads = [c for c in items if c.kind == KIND_HEADER]
+        assert heads, "下拉要有分组标题"
+        # 核心排序：本地项必须全部排在云端项之前
+        assert max(
+            (i for i, k in enumerate(kinds) if k == KIND_LOCAL), default=-1
+        ) < min((i for i, k in enumerate(kinds) if k == KIND_CLOUD), default=len(kinds))
+        print(f"  语音转写 / {card.capability}：本地 {len(locals_)} 个、云端 {len(clouds)} 个"
+              f"，分组 {len(heads)} 段，徽章「{card.badge.text()}」")
+        print(f"    结论：{card.status_main.text()}")
+        if card.status_detail.text():
+            print(f"    细节：{card.status_detail.text()}")
+        for choice in items[:6]:
+            print(f"      [{choice.kind:6}] {choice.label}")
+    print("  本地项全部排在云端项之前（用户指定的核心排序）")
+    setup_dialog.close()
 
     # ---- 云端厂商页签（合并前的「厂商管理」）--------------------------------
     # 同样用一份空配置：本机若存了 API Key，切到这页就会真去拉各家的 /models

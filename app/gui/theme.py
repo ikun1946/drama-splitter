@@ -37,9 +37,20 @@ from PySide6.QtWidgets import QApplication
 # ---------------------------------------------------------------------------
 
 # 与颜色无关的令牌：两套主题共用
-RADIUS_SM = 4
-RADIUS_MD = 8
-RADIUS_LG = 12
+#
+# 圆角 6/10/16 配合间距 4/8/12/16/24 与字号 11/13/15/18，构成一套一致的尺度。
+# **输入框与按钮的圆角必须 ≤ 高度/2**，否则 Qt 在四个角上会露出底色。
+RADIUS_SM = 6        # 输入框、进度条
+RADIUS_MD = 10       # 按钮、列表项、浮层
+RADIUS_LG = 16       # 卡片、分组块
+RADIUS_PILL = 999    # 胶囊标签（日志级别点、状态徽章）
+
+#: 8px 间距网格。原先各处随手写 10 / 14 / 18，模块间对不齐。
+SPACE_XS = 4
+SPACE_SM = 8
+SPACE_MD = 12
+SPACE_LG = 16
+SPACE_XL = 24
 
 SPACE_XS = 4
 SPACE_SM = 8
@@ -53,10 +64,13 @@ FONT_FAMILY = (
 FONT_SYMBOL = "'Segoe UI Symbol', 'Segoe UI Emoji', 'Microsoft YaHei UI'"
 FONT_MONO = "Consolas, 'Cascadia Mono', 'Source Code Pro', monospace"
 
-FONT_SIZE_TITLE = 14
-FONT_SIZE_BODY = 12
+# 字号阶：11 / 13 / 15 / 18。原先只有 11/12/14 三档，级差太小，
+# 除少数几处外整屏看不出层次。
+FONT_SIZE_DISPLAY = 18
+FONT_SIZE_TITLE = 15
+FONT_SIZE_BODY = 13
 FONT_SIZE_CAPTION = 11
-FONT_SIZE_MONO = 12
+FONT_SIZE_MONO = 11
 
 # 配色：两套主题按键集合完全一致
 #
@@ -77,17 +91,21 @@ TOKENS: dict[str, dict[str, str]] = {
         "INFO": "#3d6b35",
         "SUCCESS": "#2e7d32",
         "SUCCESS_SOFT": "#e7f4ea",
-        "NEUTRAL": "#5f6368",
-        "BG": "#f5f6fa",
+        "NEUTRAL": "#5f6672",
+        "NEUTRAL_SOFT": "#eef0f4",
+        "BG": "#f4f5f9",
         "BG_ALT": "#ffffff",
         "BG_HOVER": "#eef1f7",
         "BG_SELECTED": "#e8f0fc",
         "BG_LOG": "#fafbfd",
-        "BORDER": "#d9dce4",
-        "BORDER_STRONG": "#b8bdc8",
-        "TEXT": "#20232a",
-        "TEXT_MUTED": "#5f6368",
-        "TEXT_DISABLED": "#a0a3ac",
+        "BORDER": "#e2e5ec",
+        "BORDER_STRONG": "#c6cbd6",
+        # 伪阴影：Qt 的 QSS **没有 box-shadow**，纵深只能靠"底边用更深的颜色"
+        # 伪造。这一条边是整套层次体系的唯一来源。
+        "SHADOW_EDGE": "#c9cdd8",
+        "TEXT": "#1c1f26",
+        "TEXT_MUTED": "#5f6672",
+        "TEXT_DISABLED": "#a2a8b4",
         "TEXT_INVERSE": "#ffffff",
         # 时间轴（自绘控件取色）
         "TL_TRACK": "#e4e7ef",
@@ -115,6 +133,7 @@ TOKENS: dict[str, dict[str, str]] = {
         "SUCCESS": "#6cc47a",
         "SUCCESS_SOFT": "#1f3325",
         "NEUTRAL": "#8a8f98",
+        "NEUTRAL_SOFT": "#2a2d32",
         "BG": "#181a1d",
         "BG_ALT": "#202226",
         "BG_HOVER": "#2a2d32",
@@ -122,6 +141,8 @@ TOKENS: dict[str, dict[str, str]] = {
         "BG_LOG": "#1b1d21",
         "BORDER": "#33373d",
         "BORDER_STRONG": "#4a4f57",
+        # 深色下的"伪阴影"要更深而不是更浅——亮边会被读成高光。
+        "SHADOW_EDGE": "#0f1113",
         "TEXT": "#e6e8ec",
         "TEXT_MUTED": "#9aa0a8",
         "TEXT_DISABLED": "#5c6169",
@@ -256,15 +277,49 @@ QLabel[role="pill"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
 }}
 
+/* 后端徽章（本地 / 云端）——只描述现状，不可点，所以没有 hover/pressed */
+QLabel[role="badge"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {PRIMARY_PRESSED};
+    background: {PRIMARY_SOFT};
+    border-radius: 9px;
+    padding: 1px 9px;
+}}
+QLabel[role="badge"][tone="warn"] {{
+    color: {WARN};
+    background: {WARN_SOFT};
+}}
+
+/* 状态结论行：一句话说清"此刻到底跑什么" */
+QLabel[tone="ok"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {SUCCESS};
+}}
+QLabel[tone="warn"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    color: {WARN};
+    font-weight: 600;
+}}
+
+/* 下拉里的分组标题与提示项（禁用态由代码设 item flag，这里只管字色） */
+QComboBox QAbstractItemView:disabled {{
+    color: {TEXT_DISABLED};
+}}
+
 /* ===== 按钮 ===== */
+/* 三档：primary（每屏唯一主动作）/ secondary（默认）/ ghost（行内小动作）。
+   圆角 10 = RADIUS_MD，控件高约 36（min-height 20 + padding 8 + 边框 2）。
+   水平内边距取 12 而不是 16：左栏 320px 里「切点操作」是两列并排的按钮，
+   每边 4px 就是每行 8px —— 曾经用 16 时两行合计 331px，超出视口 310 而被静默裁切。 */
 QPushButton {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {BG_ALT};
     color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS_SM}px;
-    padding: 6px 14px;
-    min-height: 18px;
+    border: 1px solid {BORDER_STRONG};
+    border-radius: {RADIUS_MD}px;
+    padding: 8px 12px;
+    min-height: 20px;
 }}
 
 QPushButton:hover {{
@@ -283,6 +338,7 @@ QPushButton:disabled {{
 }}
 
 QPushButton[role="primary"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {PRIMARY};
     color: {TEXT_INVERSE};
     border-color: {PRIMARY};
@@ -323,19 +379,23 @@ QPushButton[role="danger"]:hover {{
 }}
 
 /* ===== 输入控件 ===== */
+/* 圆角 6 = RADIUS_SM（输入框高度约 34，圆角已接近高度一半，再大就露底） */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     background: {BG_ALT};
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
-    padding: 4px 8px;
-    min-height: 22px;
+    padding: 6px 10px;
+    min-height: 20px;
     selection-background-color: {BG_SELECTED};
     selection-color: {TEXT};
 }}
 
+/* 聚焦环：QSS 没有 box-shadow，聚焦只能靠边框加粗。
+   padding 同步减 1px，否则控件在聚焦时会胖 1px、布局跟着抖。 */
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-    border-color: {PRIMARY};
+    border: 2px solid {PRIMARY};
+    padding: 5px 9px;
 }}
 
 QLineEdit:read-only {{
@@ -358,7 +418,11 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background: {BG_ALT};
     color: {TEXT};
-    border: 1px solid {BORDER};
+    /* 浮层层次 L3：描边用强一档，底边再加深一档 */
+    border: 1px solid {BORDER_STRONG};
+    border-bottom: 2px solid {SHADOW_EDGE};
+    border-radius: {RADIUS_MD}px;
+    padding: 4px;
     selection-background-color: {BG_SELECTED};
     selection-color: {TEXT};
     outline: none;
@@ -376,6 +440,7 @@ QCheckBox:disabled, QRadioButton:disabled {{
 
 /* ===== 分组框 ===== */
 QGroupBox {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {BG_ALT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
@@ -385,6 +450,7 @@ QGroupBox {{
 }}
 
 QGroupBox::title {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 0 6px;
@@ -427,6 +493,7 @@ QTableWidget {{
 }}
 
 QHeaderView::section {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: {BG};
     color: {TEXT_MUTED};
     border: none;
@@ -477,10 +544,14 @@ QTextEdit:read-only, QPlainTextEdit:read-only {{
 }}
 
 /* ===== 卡片（QFrame 派生） ===== */
+/* 层次 L1：白底 + 1px 常规边框 + **2px 更深的底边**。
+   Qt 的 QSS 不支持 box-shadow，这一行边框就是全部的"浮起"——
+   给 QFrame 挂 QGraphicsDropShadowEffect 会把它里面的输入框、按钮裁掉。 */
 QFrame[role="card"] {{
     background: {BG_ALT};
     border: 1px solid {BORDER};
-    border-radius: {RADIUS_MD}px;
+    border-bottom: 2px solid {SHADOW_EDGE};
+    border-radius: {RADIUS_LG}px;
 }}
 
 QFrame[role="card-title"] {{
@@ -488,23 +559,43 @@ QFrame[role="card-title"] {{
        Qt 会把控件字体重置为默认值，中文因此落到 SimSun 这类高行距字体上，
        卡片标题被撑高十几像素，多张卡片叠起来会把下半页顶出可视区。 */
     font-family: {FONT_FAMILY};
-    background: {BG};
+    font-size: {FONT_SIZE_TITLE}pt;
+    font-weight: 600;
+    background: {BG_ALT};
     border: none;
     border-bottom: 1px solid {BORDER};
-    border-top-left-radius: {RADIUS_MD}px;
-    border-top-right-radius: {RADIUS_MD}px;
-    padding: 6px 12px;
+    border-top-left-radius: {RADIUS_LG}px;
+    border-top-right-radius: {RADIUS_LG}px;
+    padding: {SPACE_MD}px {SPACE_LG}px;
 }}
 
 QFrame[role="card-body"] {{
     background: {BG_ALT};
     border: none;
-    padding: 12px;
+    padding: {SPACE_LG}px;
 }}
 
+/* 卡片标题左侧的语义色条：彩色点缀只出现在这种小面积元素上，
+   大面积色块在 QSS 里最容易失控（圆角处露底、深浅两套难同步）。 */
+QFrame[role="accent-bar"] {{
+    border: none;
+    border-radius: 2px;
+    min-width: 3px;
+    max-width: 3px;
+}}
+
+QFrame[role="accent-bar"][tone="primary"] {{ background: {PRIMARY}; }}
+QFrame[role="accent-bar"][tone="success"] {{ background: {SUCCESS}; }}
+QFrame[role="accent-bar"][tone="warn"] {{ background: {WARN}; }}
+QFrame[role="accent-bar"][tone="danger"] {{ background: {DANGER}; }}
+QFrame[role="accent-bar"][tone="none"] {{ background: transparent; }}
+
 QLabel[role="card-title-text"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_TITLE}pt;
     font-weight: 600;
     color: {TEXT};
+    background: transparent;
 }}
 
 /* ===== 状态徽章 ===== */
@@ -537,8 +628,137 @@ QLabel[role="pill"][tone="danger"] {{
 }}
 
 QLabel[role="pill"][tone="muted"] {{
-    background: {BG_HOVER};
+    background: {NEUTRAL_SOFT};
     color: {TEXT_MUTED};
+}}
+
+/* ===== 空态 ===== */
+/* 原先所有空态都是一行居中的小字（"暂无问题。"），右栏 95% 面积就那么一句话。 */
+QFrame[role="empty-state"] {{
+    background: transparent;
+    border: none;
+}}
+
+QFrame[role="empty-icon"] {{
+    background: {PRIMARY_SOFT};
+    border: none;
+    border-radius: {RADIUS_PILL}px;
+}}
+
+QLabel[role="empty-title"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_TITLE}pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QLabel[role="empty-detail"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_BODY}pt;
+    color: {TEXT_MUTED};
+    background: transparent;
+}}
+
+/* ===== 集列表行 ===== */
+/* 原先是 QTableWidget，四列被挤到出横向滚动条。改用行卡片后每行自成一格。 */
+QFrame[role="episode-row"] {{
+    background: {BG_ALT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD}px;
+}}
+
+QFrame[role="episode-row"][selected="true"] {{
+    border: 1px solid {PRIMARY};
+    background: {PRIMARY_SOFT};
+}}
+
+QLabel[role="episode-no"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    font-weight: 600;
+    color: {TEXT_MUTED};
+    background: {NEUTRAL_SOFT};
+    border-radius: {RADIUS_SM}px;
+}}
+
+QFrame[role="episode-row"][selected="true"] QLabel[role="episode-no"] {{
+    background: {PRIMARY};
+    color: {TEXT_INVERSE};
+}}
+
+QLabel[role="episode-title"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_BODY}pt;
+    font-weight: 500;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QLabel[role="episode-meta"] {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {TEXT_MUTED};
+    background: transparent;
+}}
+
+/* ===== 结构化日志条目 ===== */
+/* 原先是一整块等宽 QTextEdit，"[00:52:23] [INFO] 正文" 逐行铺开。
+   现在拆成：彩色级别点 + 等宽时间戳 + 自动换行正文。 */
+QFrame[role="log-row"] {{
+    background: transparent;
+    border: none;
+    border-radius: {RADIUS_SM}px;
+}}
+
+QFrame[role="log-row"]:hover {{
+    background: {BG_LOG};
+}}
+
+QFrame[role="log-dot"] {{
+    border: none;
+    border-radius: {RADIUS_PILL}px;
+    min-width: 6px; max-width: 6px;
+    min-height: 6px; max-height: 6px;
+}}
+
+QFrame[role="log-dot"][tone="info"] {{ background: {NEUTRAL}; }}
+QFrame[role="log-dot"][tone="success"] {{ background: {SUCCESS}; }}
+QFrame[role="log-dot"][tone="warn"] {{ background: {WARN}; }}
+QFrame[role="log-dot"][tone="error"] {{ background: {DANGER}; }}
+
+QLabel[role="log-time"] {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {TEXT_DISABLED};
+    background: transparent;
+}}
+
+QLabel[role="log-msg"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_BODY}pt;
+    color: {TEXT};
+    background: transparent;
+}}
+
+/* 折叠提示：说明"后面几条与这条重复"，而不是把重复内容再抄一遍 */
+QLabel[role="log-foldmark"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {TEXT_DISABLED};
+    background: transparent;
+    border-left: 2px solid {BORDER};
+    padding-left: 10px;
+}}
+
+/* ===== 分区小标题（工作台三栏顶部） ===== */
+/* 不用 letter-spacing：Qt 的 QSS 不支持它，写了不会报错也不会生效。 */
+QLabel[role="section-label"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    font-weight: 600;
+    color: {TEXT_MUTED};
+    background: transparent;
 }}
 
 /* ===== 滚动条 ===== */
@@ -648,6 +868,7 @@ QPushButton[role="inspector-tab"]:hover {{
 }}
 
 QPushButton[role="inspector-tab"]:checked {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     color: {PRIMARY};
     border-bottom: 2px solid {PRIMARY};
     font-weight: 600;
@@ -656,12 +877,13 @@ QPushButton[role="inspector-tab"]:checked {{
 QFrame[role="issue-row"] {{
     background: {BG_ALT};
     border: 1px solid {BORDER};
-    border-radius: {RADIUS_SM}px;
+    border-bottom: 2px solid {SHADOW_EDGE};
+    border-radius: {RADIUS_MD}px;
 }}
 
 QFrame[role="issue-bar"] {{
     border: none;
-    border-radius: 1px;
+    border-radius: 2px;
 }}
 
 QFrame[role="issue-bar"][tone="danger"] {{
@@ -763,6 +985,15 @@ QLabel[role="hint"] {{
 }}
 
 /* ===== 拖放导入区文字（inline 样式改角色，深浅主题各取令牌） ===== */
+/* ===== 拖放导入区 ===== */
+/* drop-zone 整个区域是自绘的（虚线框、悬停高亮都在 DropZone.paintEvent 里），
+   这里只给它一个无边框的容器底色，免得默认 QFrame 的边框切进圆角里。 */
+QFrame[role="drop-zone"] {{
+    background: {BG_ALT};
+    border: none;
+    border-radius: {RADIUS_LG}px;
+}}
+
 QLabel[role="drop-icon"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: 48pt;
@@ -894,11 +1125,18 @@ def build_stylesheet(mode: str = DEFAULT_MODE) -> str:
     # 派生量：不在 TOKENS 里，避免两套字典要多写派生键
     palette["RADIUS_SM"] = RADIUS_SM
     palette["RADIUS_MD"] = RADIUS_MD
+    palette["RADIUS_LG"] = RADIUS_LG
+    palette["RADIUS_PILL"] = RADIUS_PILL
     palette["RADIUS_SM_INNER"] = RADIUS_SM - 1
-    palette["RADIUS_PILL"] = RADIUS_SM + 2
+    palette["SPACE_XS"] = SPACE_XS
+    palette["SPACE_SM"] = SPACE_SM
+    palette["SPACE_MD"] = SPACE_MD
+    palette["SPACE_LG"] = SPACE_LG
+    palette["SPACE_XL"] = SPACE_XL
     palette["FONT_FAMILY"] = FONT_FAMILY
     palette["FONT_SYMBOL"] = FONT_SYMBOL
     palette["FONT_MONO"] = FONT_MONO
+    palette["FONT_SIZE_DISPLAY"] = FONT_SIZE_DISPLAY
     palette["FONT_SIZE_TITLE"] = FONT_SIZE_TITLE
     palette["FONT_SIZE_BODY"] = FONT_SIZE_BODY
     palette["FONT_SIZE_CAPTION"] = FONT_SIZE_CAPTION

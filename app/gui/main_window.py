@@ -35,7 +35,7 @@ from ..core.settings import SplitSettings
 from .dialogs import (
     ExportDialog,
     ModelDialog,
-    ModelPickDialog,
+    ModelSetupDialog,
     SettingsDialog,
 )
 from .stage import Stage, primary_action, stage_caption
@@ -53,8 +53,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AI 短剧智能分集器")
         self.resize(1440, 900)
-        # 三栏 + 左右两条边栏的最小宽度预算（320 + 460 + 300 ≈ 1080）
-        self.setMinimumSize(1100, 700)
+        # 三栏最小宽度预算：左 360 + 中 645（视频预览与控制条的最小宽度）
+        # + 右 280（检查器 MIN_WIDTH）≈ 1285，取 1320 留余量。
+        #
+        # 这个数字不是随手写的：低于它，``QSplitter.setSizes`` 会被**静默忽略**，
+        # 左栏被压到 170px 上下，而 ``scrollable()`` 已经关掉了横向滚动条 ——
+        # 结果是内容被裁掉且没有任何报错，表现为"左侧总是看不全"。
+        self.setMinimumSize(1320, 700)
 
         # 主题取自应用配置（记住上次选择）；非法值在 AppConfig.load 已兜底
         self.config = AppConfig.load()
@@ -86,7 +91,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog: SettingsDialog | None = None
         self.model_dialog: ModelDialog | None = None
         self.export_dialog: ExportDialog | None = None
-        self.model_pick_dialog: ModelPickDialog | None = None
+        self.model_setup_dialog: ModelSetupDialog | None = None
 
         self._connect()
         self._build_menu()
@@ -171,7 +176,7 @@ class MainWindow(QMainWindow):
         tools_menu = bar.addMenu("工具")
         self._add_action(tools_menu, "分集设置…", self.open_settings_dialog)
         self._add_action(tools_menu, "模型管理…", self.open_model_dialog)
-        self._add_action(tools_menu, "选择云端模型…", self.open_model_pick_dialog)
+        self._add_action(tools_menu, "模型设置…", self.open_model_setup_dialog)
         self._add_action(tools_menu, "导出…", self._start_export, "Ctrl+E")
 
         view_menu = bar.addMenu("视图")
@@ -210,16 +215,41 @@ class MainWindow(QMainWindow):
         )
         return self.model_dialog
 
-    def build_model_pick_dialog(self, *, config_path=None) -> ModelPickDialog:
-        """构建「选择云端模型」对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
-        self.model_pick_dialog = ModelPickDialog(self.state, self, config_path=config_path)
-        return self.model_pick_dialog
+    def build_model_setup_dialog(self, *, config_path=None) -> ModelSetupDialog:
+        """构建「模型设置」对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
+        self.model_setup_dialog = ModelSetupDialog(
+            self.state, self, config_path=config_path
+        )
+        # 「去配置 Key…」从这里直接跳到「模型管理 → 云端厂商」：填 Key 是选云端模型
+        # 的前置条件，让用户在两个窗口之间自己找是白跑一趟。
+        self.model_setup_dialog.form.configure_providers_requested.connect(
+            self._open_providers_tab
+        )
+        # 「去下载」跳到「模型管理 → 本地模型」：本机没装模型时下拉里只有云端可选，
+        # 不给直达就等于让用户自己猜该去哪儿装。
+        self.model_setup_dialog.form.download_models_requested.connect(
+            self._open_local_models_tab
+        )
+        return self.model_setup_dialog
 
-    def open_model_pick_dialog(self, *, config_path=None) -> None:
-        """菜单「工具 → 选择云端模型…」：改完模型名回来，厂商页签要重新读盘。"""
-        self.build_model_pick_dialog(config_path=config_path).exec()
+    def open_model_setup_dialog(self, *, config_path=None) -> None:
+        """菜单「工具 → 模型设置…」：两条能力各选一个模型（本地 / 云端可混用）。"""
+        self.build_model_setup_dialog(config_path=config_path).exec()
+        # 改过的模型名落在厂商档案里，厂商页要重新读盘才看得到
         if self.model_dialog is not None:
             self.model_dialog.providers.reload()
+
+    def _open_providers_tab(self) -> None:
+        """打开「模型管理」并直接停在「云端厂商」页签。"""
+        if self.model_setup_dialog is not None:
+            self.model_setup_dialog.close()
+        self.build_model_dialog(providers_tab=True).exec()
+
+    def _open_local_models_tab(self) -> None:
+        """打开「模型管理」并停在「本地模型」页签（默认页签）。"""
+        if self.model_setup_dialog is not None:
+            self.model_setup_dialog.close()
+        self.build_model_dialog().exec()
 
     def build_export_dialog(self) -> ExportDialog:
         dialog = ExportDialog(self.state, self)
@@ -333,8 +363,15 @@ class MainWindow(QMainWindow):
         self.app_bar.set_save_status(f"自动保存 {time.strftime('%H:%M')}")
 
     def save_project(self, path: str | Path | None = None) -> Path | None:
-        """另存/保存项目文件。返回实际写入路径；用户取消返回 None。"""
-        if path is None and self.state.project_path is None:
+        """另存/保存项目文件。返回实际写入路径；用户取消返回 None。
+
+        ``path`` 用 ``not path`` 判空而不是 ``path is None``：本方法既被菜单
+        ``triggered`` 又被 ``QShortcut.activated`` 直接连接，而这两个信号都带一个
+        ``bool checked``，PySide6 会把它当第一个实参传进来（键盘触发时恒为
+        ``False``）。用 ``is None`` 拦不住这个哨兵值，会一路走到 ``Path(False)``
+        抛 TypeError。
+        """
+        if not path and self.state.project_path is None:
             stem = Path(self.state.media.path).stem if self.state.media else "未命名项目"
             suggested = str(Path.home() / f"{stem}.drama-project")
             path, _ = QFileDialog.getSaveFileName(
@@ -344,7 +381,7 @@ class MainWindow(QMainWindow):
                 return None
             if not path.endswith(".drama-project"):
                 path += ".drama-project"
-        target = Path(path) if path is not None else self.state.project_path
+        target = Path(path) if path else self.state.project_path
         assert target is not None
         try:
             self.state.save_snapshot(target)
@@ -360,11 +397,15 @@ class MainWindow(QMainWindow):
         """打开项目文件：设置立即恢复，媒体异步探针，方案在探针完成后重建。
 
         返回是否开始了恢复（媒体缺失/文件损坏时给明确提示并返回 False）。
+
+        ``path`` 的判空理由与 :meth:`save_project` 相同：菜单项的 ``triggered``
+        与快捷键的 ``activated`` 都会把 ``bool checked`` 当成路径传进来，
+        ``path is None`` 拦不住这个哨兵值。
         """
         if self.is_busy():
             self.bottom.set_hint("后台任务进行中，结束后再打开项目。")
             return False
-        if path is None:
+        if not path:
             path, _ = QFileDialog.getOpenFileName(
                 self, "打开项目", "", "项目文件 (*.drama-project *.json)"
             )
@@ -437,12 +478,18 @@ class MainWindow(QMainWindow):
         "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
     )
 
+    #: 允许"一类多实例"的任务前缀。模型设置页会同时给多家厂商拉 ``/models``，
+    #: 单键登记会让它们互相顶掉——后一家把前一家 cancel 掉，清单永远拉不齐。
+    #: 前缀白名单而不是放开任意后缀：并发许可只给真正需要的那一类。
+    WORKER_PREFIXES = ("model_list::",)
+
     def register_worker(self, name: str, worker) -> None:
         """登记一个刚开始运行的后台任务，并在结束时自动注销。
 
         必须在 ``worker.start()`` 之前调用，否则可能错过立即发出的结束信号。
         """
-        if name not in self.WORKER_NAMES:
+        allowed = name in self.WORKER_NAMES or name.startswith(self.WORKER_PREFIXES)
+        if not allowed:
             raise ValueError(f"未知任务名：{name}")
         previous = self._workers.get(name)
         if previous is not None and previous.isRunning():

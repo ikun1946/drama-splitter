@@ -14,12 +14,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -49,9 +48,16 @@ class ImportPane(QWidget):
         self.worker: ProbeWorker | None = None
 
         # ---- 源文件 ----
-        self.path_edit = QLineEdit()
-        self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("尚未选择源视频")
+        # 路径用 QLabel + 手写省略号，不用 QLineEdit：后者装不下真实路径时会
+        # 横向滚动，光标在末尾于是**只显示路径尾巴**（截图里是「1s 25fps.mp4」），
+        # 看起来像文件被截断了。栏宽 320px 装不下完整路径，头部省略才是诚实的。
+        self.path_label = QLabel("尚未选择源视频")
+        self.path_label.setProperty("role", "mono")
+        self.path_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.path_label.setToolTip("尚未选择源视频")
+        self._full_path = ""
         self.btn_browse = QPushButton("更换视频…")
         self.btn_browse.setProperty("role", "ghost")
         self.btn_browse.clicked.connect(self.choose_file)
@@ -61,13 +67,15 @@ class ImportPane(QWidget):
 
         file_row = QHBoxLayout()
         file_row.setSpacing(8)
-        file_row.addWidget(self.path_edit, 1)
+        file_row.addWidget(self.path_label, 1)
         file_row.addWidget(self.btn_browse)
-        file_card = Card("源文件", parent=self)
+        file_card = Card("源文件", parent=self, accent="primary")
         file_card.body_layout.addLayout(file_row)
-        file_card.body_layout.addWidget(
-            QLabel("支持 .mp4 / .mov / .mkv / .avi / .ts / .m4v，也可直接拖入")
-        )
+        formats = QLabel("支持 .mp4 / .mov / .mkv / .avi / .ts / .m4v，也可直接拖入")
+        # 漏了 setWordWrap 就会在这一行被硬裁——左栏只有 256px 可用宽度
+        formats.setWordWrap(True)
+        formats.setProperty("role", "muted")
+        file_card.body_layout.addWidget(formats)
         self.file_card = file_card
 
         # ---- 媒体摘要 ----
@@ -100,6 +108,28 @@ class ImportPane(QWidget):
 
     # ---- 行为 ----------------------------------------------------------
 
+    def _set_path(self, path: str) -> None:
+        """显示**头部**省略的路径，完整路径进 tooltip。
+
+        省略号放在中间而不是末尾：路径开头是盘符与目录（用户真正需要确认的
+        「哪个盘」），文件名在末尾反而看得见。完整值由 ``self._full_path`` 持有。
+        """
+        self._full_path = str(path)
+        if not self._full_path:
+            self.path_label.setText("尚未选择源视频")
+            self.path_label.setToolTip("尚未选择源视频")
+            return
+        self.path_label.setToolTip(self._full_path)
+        metrics = self.path_label.fontMetrics()
+        width = max(40, self.path_label.width() or 180)
+        self.path_label.setText(
+            metrics.elidedText(self._full_path, Qt.TextElideMode.ElideMiddle, width)
+        )
+
+    def full_path(self) -> str:
+        """完整路径（界面只显示省略版）。"""
+        return self._full_path
+
     def choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -122,7 +152,7 @@ class ImportPane(QWidget):
                 return
 
         self.status.setText("正在探测媒体信息…")
-        self.path_edit.setText(path)
+        self._set_path(path)
         self.state.reset_media()
         self.worker = ProbeWorker(self.state.binaries, path, self)
         self.worker.completed.connect(self._on_probed)
@@ -160,6 +190,11 @@ class ImportPane(QWidget):
             self.status.setText("探测完成，可在「工具 → 分集设置」里指定分集目标。")
 
         self.probed.emit(info, issues)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        if self._full_path:
+            self._set_path(self._full_path)
 
     def _on_failed(self, text: str) -> None:
         self.status.setText("探测失败，见右侧检查器。")

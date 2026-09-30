@@ -49,15 +49,17 @@ class TimelineRuler(QWidget):
     episode_activated = Signal(int)              # 集号（1 起）
 
     MARGIN = 10                                  # 左右留白（放时长标注）
-    TRACK_TOP = 24                               # 轨道上沿
-    TRACK_HEIGHT = 20
+    TRACK_TOP = 30                               # 轨道上沿
+    TRACK_HEIGHT = 28                            # 轨道高：20 偏扁，集号挤在中间看不清
+    SEGMENT_GAP = 2                              # 分段之间的缝
+    SEGMENT_RADIUS = 4                           # 分段圆角
     MARKER_OVERHANG = 7                          # 切点竖线超出轨道的高度
     HIT_RADIUS = 6                               # 命中半径（像素）
     DRAG_THROTTLE = 1 / 30                       # 拖动播放头的发信号节流
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(62)
+        self.setFixedHeight(72)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -230,25 +232,36 @@ class TimelineRuler(QWidget):
         painter.setBrush(QBrush(QColor(qcolor(mode, "TL_TRACK"))))
         painter.drawRoundedRect(track_rect, 4, 4)
 
-        # 集分段
+        # 集分段：左右各留一条缝并画圆角，相邻集在视觉上才分得开
         if self._segments:
             for position, (index, start, end) in enumerate(self._segments):
                 x0 = self._x_from_seconds(start)
                 x1 = self._x_from_seconds(end)
-                rect = QRect(int(x0), top + 1, max(1, int(x1 - x0) - 1), height - 2)
+                gap = self.SEGMENT_GAP if position < len(self._segments) - 1 else 0
+                rect = QRect(
+                    int(x0) + self.SEGMENT_GAP // 2,
+                    top + 1,
+                    max(1, int(x1 - x0) - self.SEGMENT_GAP - gap // 2),
+                    height - 2,
+                )
                 if index == self._selected:
                     painter.setBrush(QBrush(QColor(qcolor(mode, "BG_SELECTED"))))
                 else:
                     tone = "TL_SEGMENT" if position % 2 == 0 else "TL_SEGMENT_ALT"
                     painter.setBrush(QBrush(QColor(qcolor(mode, tone))))
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawRect(rect)
+                painter.drawRoundedRect(
+                    rect, self.SEGMENT_RADIUS, self.SEGMENT_RADIUS
+                )
                 if index in self._plan.exceptions:
                     self._draw_stripes(painter, rect, qcolor(mode, "WARN"))
                 if index in self._exported:
+                    # 右上角一枚小圆点：比底部那条色带更轻，不与集号打架
                     painter.setBrush(QBrush(QColor(qcolor(mode, "SUCCESS"))))
-                    painter.drawRect(QRect(rect.left(), rect.bottom() - 2,
-                                           rect.width(), 3))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawEllipse(
+                        rect.right() - 9, rect.top() + 5, 5, 5
+                    )
                 if rect.width() >= 22:
                     painter.setPen(QColor(qcolor(mode, "TEXT_MUTED")))
                     font = QFont(FONT_MONO.split(",")[0].strip("'"))
@@ -458,7 +471,7 @@ class TimelineRuler(QWidget):
             self.setCursor(Qt.CursorShape.ForbiddenCursor)
         else:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
-        from ..core.timebase import format_timecode
+        from ...core.timebase import format_timecode
 
         parts = [f"第{boundary_index:02d}集结束 · {format_timecode(seconds)}"]
         if self._media is not None:

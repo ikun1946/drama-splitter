@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
@@ -52,14 +52,24 @@ class ReviewPane(QWidget):
         self.episode_table = QTableWidget(0, 3)
         self.episode_table.setHorizontalHeaderLabels(["集号", "时长", "切点"])
         header = self.episode_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setStretchLastSection(True)
+        # 320px 的左栏里，三列按内容宽度排会超出栏宽 → 出横向滚动条 → 整表被裁。
+        # 全部列按比例拉伸，并关掉横向滚动条：宁可列窄一点，也不能让用户横向拖。
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.episode_table.horizontalHeader().setMinimumSectionSize(48)
+        self.episode_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.episode_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.episode_table.verticalHeader().setVisible(False)
+        self.episode_table.verticalHeader().setDefaultSectionSize(30)
         self.episode_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.episode_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.episode_table.setAlternatingRowColors(True)
         self.episode_table.setMinimumHeight(220)
         self.episode_table.itemSelectionChanged.connect(self._episode_selected)
-        list_card = Card("集列表", parent=self)
+        list_card = Card("集列表", parent=self, accent="primary")
         list_card.body_layout.addWidget(self.episode_table, 1)
 
         # ---- 当前集 ----
@@ -75,21 +85,34 @@ class ReviewPane(QWidget):
         card_card.body_layout.addWidget(self.card, 1)
 
         # ---- 切点操作 ----
-        self.btn_set_boundary = QPushButton("把当前位置设为该集结束切点")
+        # 文案按左栏 320px 的实际预算裁过：两列并排的那一行放不下原来的
+        # 「🔒 锁定该切点 / 🔓 解除锁定」（最小宽度合计 331 > 视口 310），
+        # 整张卡会被撑到 397 然后**静默裁切**——用户看到的是按钮被切掉半截。
+        # 完整说法放进 tooltip（下面统一设置），短文案只保证排得下。
+        self.btn_set_boundary = QPushButton("设为该集结束切点")
         self.btn_set_boundary.setProperty("role", "primary")
-        self.btn_lock = QPushButton("🔒  锁定该切点")
-        self.btn_unlock = QPushButton("🔓  解除锁定")
+        self.btn_lock = QPushButton("🔒  锁定")
+        self.btn_unlock = QPushButton("🔓  解除")
         self.btn_confirm = QPushButton("✔  确认该集")
         self.btn_confirm.setProperty("role", "primary")
-        self.btn_snap = QPushButton("吸附到最近帧")
-        for button in (
-            self.btn_set_boundary,
-            self.btn_lock,
-            self.btn_unlock,
-            self.btn_confirm,
-            self.btn_snap,
+        self.btn_snap = QPushButton("吸附到帧")
+
+        #: 短文案 → 完整说法。窄栏里放不下全称，tooltip 补上。
+        _hints = {
+            "btn_set_boundary": "把当前位置设为该集结束切点",
+            "btn_lock": "锁定该切点，锁定后不能再拖动",
+            "btn_unlock": "解除锁定，恢复可拖动",
+            "btn_confirm": "确认该集已审核通过",
+            "btn_snap": "把播放头吸附到最近帧",
+        }
+        for name, button in (
+            ("btn_set_boundary", self.btn_set_boundary),
+            ("btn_lock", self.btn_lock),
+            ("btn_unlock", self.btn_unlock),
+            ("btn_confirm", self.btn_confirm),
+            ("btn_snap", self.btn_snap),
         ):
-            button.setToolTip(button.text())
+            button.setToolTip(_hints[name])
             # QSS 的 min-height 不进 minimumSizeHint：可用高度不足时按钮会被
             # 布局压成一条细线、文字互相叠印（04-审核 截图缺陷）。显式最小高度
             # 是硬保险。
@@ -109,7 +132,7 @@ class ReviewPane(QWidget):
         self.btn_confirm.clicked.connect(self.confirm_requested)
         self.btn_snap.clicked.connect(self.snap_requested)
 
-        ops_card = Card("切点操作", parent=self)
+        ops_card = Card("切点操作", parent=self, accent="warn")
         ops_grid = QGridLayout()
         ops_grid.setContentsMargins(0, 0, 0, 0)
         ops_grid.setHorizontalSpacing(8)

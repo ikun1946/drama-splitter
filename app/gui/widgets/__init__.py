@@ -2,7 +2,8 @@
 
 包含：
 - Card / LabeledField / StatusPill    —— 区段容器与状态展示
-- ModelTable                           —— 厂商模型清单表格（指派 / 手填 / 删除）
+- EmptyState / ElidingItemDelegate     —— 空态、超长列表项的省略号
+- ModelList / ModelTable              —— 模型清单（筛选 + 单选 / 指派 / 手填）
 - LogPanel                             —— 风格化日志面板
 - MediaPreview                         —— 帧级预览（HUD + 时间码）
 - TimelineRuler                        —— 轻量时间轴（切点 / 播放头 / 拖拽）
@@ -19,10 +20,13 @@ from .app_bar import AppBar
 from .bottom_bar import BottomBar
 from .card import Card
 from .drop_zone import DropZone
+from .eliding_delegate import ElidingItemDelegate
+from .empty_state import EmptyState
 from .inspector import Inspector, InspectorIssue
 from .labeled_field import LabeledField
 from .log_panel import LogPanel
 from .media_preview import MediaPreview
+from .model_list import ModelList
 from .model_table import ModelTable
 from .no_wheel import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
 from .scroll_area import h_scrollable, scrollable
@@ -35,11 +39,14 @@ __all__ = [
     "BottomBar",
     "Card",
     "DropZone",
+    "ElidingItemDelegate",
+    "EmptyState",
     "Inspector",
     "InspectorIssue",
     "LabeledField",
     "LogPanel",
     "MediaPreview",
+    "ModelList",
     "ModelTable",
     "NoWheelComboBox",
     "NoWheelDoubleSpinBox",

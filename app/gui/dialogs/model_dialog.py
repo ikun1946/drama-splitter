@@ -35,7 +35,14 @@ class ModelDialog(DialogShell):
         config_path: Path | None = None,
         providers_tab: bool = False,
     ) -> None:
-        super().__init__("模型管理", parent, width=1000, height=720)
+        # 1320 而不是 1000：云端厂商页是「左列表 240 + 右编辑区」两栏，编辑区里
+        # 一行要并排放 LabeledField + 复选框 + 按钮，量出来的最小宽度约 975px。
+        # 对话框只有 1000 时编辑区只剩 698，**保存并测试按钮、允许外发素材复选框、
+        # 模型表格右半边全部被裁掉**。这个宽度和主窗口的最小宽度对齐。
+        super().__init__("模型管理", parent, width=1320, height=760)
+        # 最小宽度跟住初始宽度：``QDialog`` 默认可缩到外壳的 720px，那样左列表和
+        # 编辑区都会被压扁、控件被裁。与其让用户拖出一个坏界面，不如不让拖。
+        self.setMinimumSize(1320, 640)
         self.tabs = QTabWidget(self)
         self.form = ModelForm(state, self.tabs, config_path=config_path)
         self.tabs.addTab(scrollable(self.form), "本地模型")

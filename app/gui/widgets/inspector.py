@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .empty_state import EmptyState
 from .log_panel import LogPanel
 
 __all__ = ["Inspector", "InspectorIssue", "PRIORITY_LABEL", "PRIORITY_ORDER"]
@@ -198,10 +199,11 @@ class Inspector(QFrame):
         self._problem_layout.setSpacing(6)
         self._problem_layout.addStretch(1)
 
-        self._empty = QLabel("暂无问题。")
-        self._empty.setProperty("role", "muted")
-        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setWordWrap(True)
+        self._empty = EmptyState(
+            "没有问题",
+            detail="导入源片后，兼容性问题与方案校验结果会列在这里。",
+            parent=self,
+        )
 
         problem_scroll = _scrolled(self._problem_list)
         problem_page = QWidget()
@@ -217,10 +219,11 @@ class Inspector(QFrame):
         self._advice_layout.setContentsMargins(6, 6, 6, 6)
         self._advice_layout.setSpacing(6)
         self._advice_layout.addStretch(1)
-        self._advice_empty = QLabel("暂无建议。")
-        self._advice_empty.setProperty("role", "muted")
-        self._advice_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._advice_empty.setWordWrap(True)
+        self._advice_empty = EmptyState(
+            "没有建议",
+            detail="整集复核发现的风险会列在这里。",
+            parent=self,
+        )
         advice_page = QWidget()
         advice_wrap = QVBoxLayout(advice_page)
         advice_wrap.setContentsMargins(0, 0, 0, 0)

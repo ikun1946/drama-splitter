@@ -67,7 +67,7 @@ class SettingsForm(QWidget):
         self.radio_by_duration.setChecked(True)
         for w in (self.radio_by_duration, self.radio_by_count, self.radio_recommend):
             w.toggled.connect(self._refresh)
-        mode_card = Card("分集模式", parent=self)
+        mode_card = Card("分集模式", parent=self, accent="primary")
         mode_card.body_layout.addWidget(self.radio_by_duration)
         mode_card.body_layout.addWidget(self.radio_by_count)
         mode_card.body_layout.addWidget(self.radio_recommend)
@@ -113,7 +113,7 @@ class SettingsForm(QWidget):
         # 默认隐藏：只有「按目标集数 + 弹性集数」下它才有定义（见 _refresh）
         self._flexible_row.setVisible(False)
 
-        count_card = Card("目标集数 / 时长", parent=self)
+        count_card = Card("目标集数 / 时长", parent=self, accent="primary")
         # 同一个框在两种模式下含义不同：手里的输入 vs 系统算出来的值
         dfield = LabeledField("目标时长", suffix="秒")
         dfield.attach(self.duration_spin)
@@ -151,7 +151,7 @@ class SettingsForm(QWidget):
         for w in (self.min_spin, self.max_spin, self.tolerance_spin):
             w.valueChanged.connect(self._refresh)
 
-        range_card = Card("集长范围（两种来源互斥）", parent=self)
+        range_card = Card("集长范围（两种来源互斥）", parent=self, accent="primary")
         range_form = QFormLayout()
         range_form.addRow(self.range_percent)
         pfield = LabeledField("浮动比例 p", suffix="%")
@@ -202,6 +202,9 @@ class SettingsForm(QWidget):
         self.feasibility.setReadOnly(True)
         feasibility_card.body_layout.addWidget(self.feasibility, 1)
         self._feasibility_card = feasibility_card
+        # 结论卡的色条跟着判定结果走：这是这一屏最该被一眼看到的东西，
+        # 而原先只有一个文字状态块，无解与可设在视觉上没有区别。
+        self._feas_card = feasibility_card
 
         # ---- 装配 ----
         left_col = QVBoxLayout()
@@ -232,6 +235,9 @@ class SettingsForm(QWidget):
         else:
             settings.split_mode = SplitMode.RECOMMEND
 
+        # 目标时长 / 集数照常写回：推荐模式下它们是"用户上一次手填的值"，
+        # 留着才能在切回「按目标时长」时恢复。自动判定不读它们
+        # （check_feasibility 对模式C 无条件走 auto_pending）。
         settings.target_duration_seconds = Fraction(str(self.duration_spin.value()))
         settings.target_episode_count = self.count_spin.value()
         settings.count_policy = (
@@ -331,6 +337,7 @@ class SettingsForm(QWidget):
             self.feasibility.setPlainText("\n".join(lines))
             self._feas_pill.set_text("就绪")
             self._feas_pill.set_tone("muted")
+            self._set_feas_accent("primary")
             return
 
         problems = settings.validate()
@@ -341,13 +348,20 @@ class SettingsForm(QWidget):
             self.feasibility.setPlainText("\n".join(lines))
             self._feas_pill.set_text("参数不完整")
             self._feas_pill.set_tone("danger")
+            self._set_feas_accent("danger")
             return
 
         report = check_feasibility(settings, total)
         self._apply_derived(settings, total, report, by_count)
 
         lines.append(f"源片总时长：{format_timecode(total)}")
-        if report.derived is not None:
+        if report.auto_pending:
+            # 模式C 还没有派生参数，也就没有可信的可行集数区间——要等自动判定
+            # 定下集数后才有 L/U。这里绝不能打印默认的 "0 – 0 集"。
+            lines.append(
+                "每集时长与集数：分析后自动判定（依据素材自身的内容节奏）"
+            )
+        elif report.derived is not None:
             lines.append(
                 f"目标时长 D：{format_timecode(report.derived.target_duration)}"
                 "（内部全精度，界面显示才取整）"
@@ -356,7 +370,9 @@ class SettingsForm(QWidget):
                 f"集长范围：{format_seconds_brief(report.derived.min_duration)}"
                 f" – {format_seconds_brief(report.derived.max_duration)}"
             )
-        if report.min_episodes > report.max_episodes:
+        if report.auto_pending:
+            pass                       # 集数区间要等判定，不在这里编
+        elif report.min_episodes > report.max_episodes:
             lines.append("可行集数范围：无（不存在任何集数能满足当前集长范围）")
         else:
             lines.append(
@@ -387,6 +403,7 @@ class SettingsForm(QWidget):
             lines.append("结论：当前参数无解，请先调整参数，不要进入分析。")
             self._feas_pill.set_text("无解")
             self._feas_pill.set_tone("danger")
+            self._set_feas_accent("danger")
         else:
             # 可行但可能有警告
             has_warn = any(iss.level == "warn" for iss in report.issues)
@@ -394,10 +411,12 @@ class SettingsForm(QWidget):
                 lines.append("结论：参数可行但存在警告，可继续。")
                 self._feas_pill.set_text("可行（警告）")
                 self._feas_pill.set_tone("warn")
+                self._set_feas_accent("warn")
             else:
                 lines.append("结论：参数可行，可以开始分析。")
                 self._feas_pill.set_text("可行")
                 self._feas_pill.set_tone("success")
+                self._set_feas_accent("success")
 
         self.feasibility.setPlainText("\n".join(lines))
 
@@ -426,11 +445,16 @@ class SettingsForm(QWidget):
         只读字段去掉步进箭头（``NoButtons``）：既避免误触，也不给它"可以改"
         的暗示；控件保持 enabled 以便正常读出数值。
         """
-        self.duration_spin.setReadOnly(by_count)
-        self.count_spin.setReadOnly(not by_count)
+        recommend = self.radio_recommend.isChecked()
+        # 模式C 里两个都是**判定结果**，一个都不能改
+        duration_ro = by_count or recommend
+        count_ro = (not by_count) or recommend
+
+        self.duration_spin.setReadOnly(duration_ro)
+        self.count_spin.setReadOnly(count_ro)
         self.duration_spin.setButtonSymbols(
             QAbstractSpinBox.ButtonSymbols.NoButtons
-            if by_count
+            if duration_ro
             else QAbstractSpinBox.ButtonSymbols.UpDownArrows
         )
         self.count_spin.setButtonSymbols(
@@ -438,16 +462,26 @@ class SettingsForm(QWidget):
             if by_count
             else QAbstractSpinBox.ButtonSymbols.NoButtons
         )
-        self._duration_field.set_label("预计目标时长（自动）" if by_count else "目标时长")
-        self._count_field.set_label("目标集数 N" if by_count else "预计集数（自动）")
+        if recommend:
+            self._duration_field.set_label("每集时长（分析后自动判定）")
+            self._count_field.set_label("集数（分析后自动判定）")
+        else:
+            self._duration_field.set_label("预计目标时长（自动）" if by_count else "目标时长")
+            self._count_field.set_label("目标集数 N" if by_count else "预计集数（自动）")
 
         # 推荐方案：分析时由系统把三种策略各解一遍再取代价最低者，此时手选
         # 「策略」既不会决定最终取向、又让人以为"我选的生效了"，索性置灰说清。
-        recommend = self.radio_recommend.isChecked()
         self.strategy_combo.setEnabled(not recommend)
         self._strategy_field.set_help(
             "推荐方案会自动比较三种策略，取总代价最低者" if recommend else ""
         )
+
+    def _set_feas_accent(self, tone: str | None) -> None:
+        """结论卡的语义色条，与右下角状态块同步。
+
+        结论只有四种，色条让"能不能开工"在一眼之内就有答案，不必读完那几行字。
+        """
+        self._feas_card.set_accent(tone)
 
     def _set_derived_help(self, by_count: bool, text: str) -> None:
         field = self._duration_field if by_count else self._count_field
@@ -455,6 +489,24 @@ class SettingsForm(QWidget):
 
     def _apply_derived(self, settings, total, report, by_count: bool) -> None:
         """把派生目标值写回只读控件：模式A 反算集数，模式B 反算时长。"""
+        if settings.split_mode == SplitMode.RECOMMEND:
+            # 模式C：时长与集数都交给分析后的自动判定，这里既不反算也不显示
+            # 旧值——显示一个"看着像用户设的"数字，正是这次要消除的误导。
+            decided = settings.decided_episode_count
+            if decided:
+                self._set_value(self.count_spin, decided)
+                self._set_value(
+                    self.duration_spin, float(settings.decided_target_seconds or 0)
+                )
+                self._count_field.set_help(f"上次分析判定为 {decided} 集（只读）")
+                self._duration_field.set_help(
+                    f"上次分析判定为 {float(settings.decided_target_seconds or 0):.1f} 秒（只读）"
+                )
+            else:
+                self._count_field.set_help("分析后自动判定")
+                self._duration_field.set_help("分析后自动判定")
+            return
+
         if by_count:
             count = settings.target_episode_count or 0
             if count <= 0:

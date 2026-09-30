@@ -271,18 +271,18 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("08-云端厂商.png", _provider_dialog)
 
-    # 09 选择云端模型：只列"已配 Key 且能连通"的厂商（悬停看清单）。
+    # 09 模型设置：两条能力各选一个模型，本地 / 云端可以混着用。
     # 刻意用**空配置**构造——本机若存了 API Key，打开它就会真去拉各家的
     # /models；截图脚本不该联网花用户的额度。因此这张图是"还没配 Key"时的
     # 真实样子：状态行会说清下一步怎么做。
-    def _pick_dialog():
-        dialog = window.build_model_pick_dialog(
+    def _setup_dialog():
+        dialog = window.build_model_setup_dialog(
             config_path=Path(tempfile.mkdtemp()) / "config.json"
         )
         pump(app, 0.2)
         return dialog
 
-    shot_dialog("09-选择云端模型.png", _pick_dialog)
+    shot_dialog("09-模型设置.png", _setup_dialog)
 
     workbench.stage_view.player.stop()
     for note in hidden:

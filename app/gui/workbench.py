@@ -104,7 +104,11 @@ class Workbench(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([320, 820, 300])
+        # 左栏 360 而不是原设计的 320：按钮内边距 14→16、卡片内边距 12→16 之后，
+        # 「切点操作」那三张卡的实际最小宽度到了 330px。栏宽不改的话，
+        # `scrollable()` 关掉的横滚动条会让内容**静默裁切**（用户看到的是按钮被切
+        # 掉半截、集列表少一列）。360 留出余量，让以后再加一两个字也不会立刻越界。
+        self.splitter.setSizes([360, 780, 300])
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

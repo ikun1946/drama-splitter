@@ -30,6 +30,11 @@ class LabeledField(QWidget):
         self._help = QLabel(help_text or "", self)
         self._suffix_lbl = QLabel(suffix or "", self)
         self._help.setProperty("role", "muted")
+        # 标题同样必须折行。QLabel 默认**单行不换行**，它的 minimumSizeHint 就是整行
+        # 文字宽度——而 minimumSizeHint 是硬下限，布局再怎么压缩也压不下去。
+        # 「接口地址（base_url，OpenAI 兼容要带 /v1）」单行就要 510px，把云端厂商
+        # 表单的最小宽度顶到超过视口，右边那栏控件于是被挤出可视区。
+        self._title.setWordWrap(True)
         # help 必须折行：不折会把它所在的整行撑宽（厂商管理里就出现过"输入框右侧的
         # 控件被挤出可视区"，因为一行 help 比视口还宽，触发了横向滚动）
         self._help.setWordWrap(True)
