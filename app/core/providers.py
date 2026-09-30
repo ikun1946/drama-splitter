@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any, Iterable, Protocol
 from urllib.parse import urlparse
 
+from .model_info import ModelInfo
+
 __all__ = [
     "CAP_ASR",
     "CAP_JUDGE",
@@ -238,6 +240,30 @@ class ProviderProfile:
     #: （`ep-xxx`）、自建网关常只暴露别名。手填的名字要能记住，否则每次都要重敲。
     #: 用 tuple 而不是 list：档案是 frozen 的，可变默认值会在实例之间共享。
     custom_models: tuple[str, ...] = ()
+    #: 每个模型的参数档案（上下文窗口 / 模态 / 思考等级），按模型名索引。
+    #: 空元组 = 没配过 = **不干预**：能力判定与加这项之前逐字节一致。
+    model_info: tuple["ModelInfo", ...] = ()
+
+    # ---- 模型参数 ------------------------------------------------------
+
+    def info_for(self, model_name: str) -> "ModelInfo":
+        """取某个模型的参数档案；没配过就返回空的（= 不干预）。"""
+        name = (model_name or "").strip()
+        for info in self.model_info:
+            if info.name == name:
+                return info
+        return ModelInfo(name="")
+
+    def with_model_info(self, info: "ModelInfo") -> "ProviderProfile":
+        """写入/更新某个模型的参数档案。
+
+        同一模型名**替换**而不是追加（配置里重复出现时后者生效）；
+        传进来的档案是空的 = 用户清掉了这个模型的参数，不留空壳记录。
+        """
+        kept = tuple(item for item in self.model_info if item.name != info.name)
+        if info.is_empty():
+            return replace(self, model_info=kept)
+        return replace(self, model_info=kept + (info,))
 
     # ---- 能力 ----------------------------------------------------------
 
@@ -252,10 +278,19 @@ class ProviderProfile:
         return False
 
     def supports(self, capability: str) -> bool:
+        """该能力在这份档案上是否可用。
+
+        模态**只在意图明确时**参与判定：``info_for`` 返回空档案时
+        ``can_judge()`` / ``can_transcribe()`` 恒为真，所以老配置不会被拦。
+        """
         if capability == CAP_JUDGE:
-            return self.judge_protocol != PROTO_DISABLED and bool(self.judge_model)
+            if self.judge_protocol == PROTO_DISABLED or not self.judge_model:
+                return False
+            return self.info_for(self.judge_model).can_judge()
         if capability == CAP_ASR:
-            return self.asr_protocol != PROTO_DISABLED and self.asr_configured()
+            if self.asr_protocol == PROTO_DISABLED or not self.asr_configured():
+                return False
+            return self.info_for(self.asr_model_name).can_transcribe()
         raise ValueError(f"未知能力：{capability}")
 
     def egress_allowed(self, capability: str) -> bool:
@@ -283,6 +318,7 @@ class ProviderProfile:
             "allow_upload": self.allow_upload,
             "use_system_proxy": self.use_system_proxy,
             "custom_models": list(self.custom_models),
+            "model_info": [info.to_json() for info in self.model_info],
         }
 
     @classmethod
@@ -330,6 +366,26 @@ class ProviderProfile:
                     kept.append(name)
             return tuple(kept)
 
+        def model_infos(
+            key: str, default: tuple["ModelInfo", ...]
+        ) -> tuple["ModelInfo", ...]:
+            """参数档案容错：解析不出的整条丢弃；**同名后者覆盖前者**。
+
+            同名以配置里靠后的为准——用户改窗口通常是在原条目上就地编辑，
+            保留旧值会让「我明明改过」变成一个无法解释的现象。
+            """
+            value = payload.get(key, None)
+            if value is None:
+                return default
+            if not isinstance(value, (list, tuple)):
+                return ()
+            picked: dict[str, ModelInfo] = {}
+            for item in value:
+                info = ModelInfo.from_json(item)
+                if info is not None and not info.is_empty():
+                    picked[info.name] = info
+            return tuple(picked.values())
+
         return replace(
             base,
             id=text("id", base.id) or base.id,
@@ -346,6 +402,7 @@ class ProviderProfile:
             allow_upload=flag("allow_upload", base.allow_upload),
             use_system_proxy=flag("use_system_proxy", base.use_system_proxy),
             custom_models=models("custom_models", base.custom_models),
+            model_info=model_infos("model_info", base.model_info),
         )
 
     def with_updates(self, **changes: Any) -> "ProviderProfile":

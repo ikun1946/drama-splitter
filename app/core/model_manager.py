@@ -33,7 +33,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path

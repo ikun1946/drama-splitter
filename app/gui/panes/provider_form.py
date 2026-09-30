@@ -36,6 +36,14 @@ from PySide6.QtWidgets import (
 
 from ...core.app_config import LOCAL_BACKEND, AppConfig
 from ...core.cloud import build_asr_transport, build_judge_transport
+from ...core.model_info import (
+    MODALITIES,
+    MODALITY_LABELS,
+    REASONING_LEVELS,
+    ModelInfo,
+    format_context,
+    infer_model_info,
+)
 from ...core.providers import (
     CAP_ASR,
     CAP_JUDGE,
@@ -57,9 +65,11 @@ from ...core.providers import (
 from ..state import ProjectState
 from ..widgets import (
     Card,
+    ElidingItemDelegate,
     LabeledField,
     ModelTable,
     NoWheelComboBox,
+    NoWheelSpinBox,
     scrollable,
 )
 from ..widgets import message
@@ -97,9 +107,19 @@ class ProviderForm(QWidget):
         self._custom_models: list[str] = []
         #: 最近一次从接口拉到的清单（表格显示的是它 + 手填的合并结果）
         self._fetched_models: list[str] = []
+        #: 每个模型的参数档案（上下文窗口 / 思考等级 / 模态）。与其它字段一样，
+        #: 只改内存，等「保存」才写进配置。
+        self._model_info: list[ModelInfo] = []
+        #: 回填参数面板时的护栏：挡住控件自己发出来的信号（见 `_refresh_info_panel`）
+        self._info_syncing = False
 
         # ---- 左栏：列表与动作 ------------------------------------------
         self.profile_list = QListWidget(self)
+        # 条目要**省略**而不是被裁：「阿里云百炼（通义千问）（内置）」单行要 499px，
+        # 而这一栏只有 220px。QListWidget 自己不省略号，拉宽这一栏又会把右侧
+        # 编辑区挤没，所以用一个只改"画什么"的委托，原始文案仍在 item 里，
+        # 悬停由委托给出全文。
+        self.profile_list.setItemDelegate(ElidingItemDelegate(self.profile_list))
         self.profile_list.currentItemChanged.connect(self._on_selected)
         self.profile_list.setMinimumWidth(220)
         self.btn_new = QPushButton("新增")
@@ -184,6 +204,97 @@ class ProviderForm(QWidget):
         self.model_table.assigned.connect(self._on_model_assigned)
         self.model_table.added.connect(self._on_model_added)
         self.model_table.removed.connect(self._on_model_removed)
+        self.model_table.list.selection_changed.connect(self._on_model_selected)
+
+        # ---- 每个模型的参数（上下文窗口 / 思考等级 / 模态）------------------
+        #
+        # 放在表格**下面**而不是每行一组输入框：厂商的清单动辄几百条，逐行挂控件
+        # 会让列表没法看（这正是旧版表格被抱怨的地方）。改成"选中哪个就配哪个"，
+        # 面板只服务当前选中项。
+        #
+        # 三项都遵循"留空 = 不干预"（见 core/model_info.py）：窗口 0 不截断、
+        # 思考等级空则请求里不带 reasoning_effort、模态全不勾则不做能力过滤。
+        # 所以自动填充只填有把握的，猜不出的留空——填错会直接把能用的模型弄坏。
+        self.info_title = QLabel("模型参数", self)
+        self.info_title.setProperty("role", "muted")
+        self.info_title.setWordWrap(True)
+
+        self.info_context = NoWheelSpinBox(self)
+        self.info_context.setRange(0, 100_000_000)
+        self.info_context.setSingleStep(1_000)
+        self.info_context.setSpecialValueText("未知（不截断）")
+        self.info_context.setSuffix(" token")
+        self.info_context.setToolTip(
+            "模型一次能吃下的最大 token 数。留 0 表示不限制（不截断）。"
+            "发送前会按它裁剪输入，并为回复预留四分之一窗口。"
+        )
+        context_field = LabeledField("上下文窗口")
+        context_field.attach(self.info_context)
+
+        self.info_reasoning = NoWheelComboBox(self)
+        self.info_reasoning.addItem("不发送", "")
+        for level in REASONING_LEVELS:
+            self.info_reasoning.addItem(level, level)
+        self.info_reasoning.setToolTip(
+            "按这个值发送 reasoning_effort。留「不发送」则请求里不带该参数——"
+            "不少模型不认它，盲传会直接报错。"
+        )
+        reasoning_field = LabeledField("思考等级")
+        reasoning_field.attach(self.info_reasoning)
+
+        self.info_modalities: dict[str, QCheckBox] = {}
+        modality_row = QWidget(self)
+        modality_layout = QHBoxLayout(modality_row)
+        modality_layout.setContentsMargins(0, 0, 0, 0)
+        modality_layout.setSpacing(10)
+        for key in MODALITIES:
+            box = QCheckBox(MODALITY_LABELS[key], modality_row)
+            box.setToolTip(
+                {
+                    "text": "不勾任何一项 = 未知，不做能力过滤（保持原行为）",
+                    "image": "勾上后这个模型不能用于语音转写",
+                    "audio": "勾上后这个模型不能用于语义判断",
+                }[key]
+            )
+            modality_layout.addWidget(box)
+            self.info_modalities[key] = box
+        modality_layout.addStretch(1)
+        modality_field = LabeledField("模态")
+        modality_field.attach(modality_row)
+
+        self.btn_autofill = QPushButton("自动填充", self)
+        self.btn_autofill.setToolTip(
+            "按模型名推断上下文窗口与模态（内置常见模型知识库 + 名称模式）。"
+            "推断值是估计值，确认无误再保存。"
+        )
+        self.btn_autofill.clicked.connect(self._on_autofill_info)
+        self.btn_clear_info = QPushButton("清除参数", self)
+        self.btn_clear_info.setToolTip("把这个模型的参数恢复成「未设置」，不影响其余模型")
+        self.btn_clear_info.clicked.connect(self._on_clear_info)
+        self.info_note = QLabel("", self)
+        self.info_note.setProperty("role", "muted")
+        self.info_note.setWordWrap(True)
+
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(12)
+        info_row.addWidget(context_field)
+        info_row.addWidget(reasoning_field)
+        info_row.addWidget(modality_field, 1)
+        info_actions = QHBoxLayout()
+        info_actions.setContentsMargins(0, 0, 0, 0)
+        info_actions.setSpacing(8)
+        info_actions.addWidget(self.btn_autofill)
+        info_actions.addWidget(self.btn_clear_info)
+        info_actions.addStretch(1)
+        info_row.addLayout(info_actions)
+
+        # 改任何一项都立刻写回内存（表格里的标记同步刷新），但**不落盘**——
+        # 与其它字段一致，等「保存」才进 config.json
+        self.info_context.valueChanged.connect(self._on_info_edited)
+        self.info_reasoning.currentIndexChanged.connect(self._on_info_edited)
+        for _key, _box in self.info_modalities.items():
+            _box.toggled.connect(self._on_info_edited)
 
         # ---- 云端能力开关（合并自原「模型管理」的云端卡片）------------------
         #
@@ -230,31 +341,44 @@ class ProviderForm(QWidget):
             row.addWidget(right, 1)
             return row
 
-        # ---- 高级字段：默认收起 ------------------------------------------
-        #
-        # 这些字段绝大多数时候不用动：id 只在新增时填、代理只在被本机代理拦截时才要
-        # 打开。**协议相关的必填字段不进这里**（火山转写的 asr_endpoint 与
-        # asr_resource_id 在常用区按协议显隐）——必填项一旦被折叠藏起来，用户会
-        # "看不到却必须填"。新增档案要先填 id，所以 `_on_new()` 会展开这一区。
-        self.advanced_toggle = QCheckBox("显示高级字段（id / 代理）", self)
-        self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
-        id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
-        id_field.attach(self.edit_id)
-        self.advanced_host = QWidget(self)
-        advanced = QVBoxLayout(self.advanced_host)
-        advanced.setContentsMargins(0, 0, 0, 0)
-        advanced.setSpacing(4)
-        advanced.addWidget(id_field)
-        advanced.addWidget(self.use_system_proxy)
-        self.advanced_host.setVisible(False)
-
-        # 火山转写的两个字段：只在火山协议下出现，且属于常用区（必填）
+        # 火山转写的两个字段：只在火山协议下出现（与接口地址一起收进高级区）
         self.volcano_host = QWidget(self)
         volcano = QVBoxLayout(self.volcano_host)
         volcano.setContentsMargins(0, 0, 0, 0)
         volcano.setSpacing(4)
         volcano.addLayout(pair(self.asr_endpoint_field, self.asr_resource_field))
         self.volcano_host.setVisible(False)
+
+        # ---- 高级字段：默认收起 ------------------------------------------
+        #
+        # 常用区只留「填 Key + 加模型」：接口地址、协议、火山专用字段、id、代理
+        # 绝大多数人一辈子不动，逐项摊在首屏反而让人以为每个都得填。收进这里，
+        # 需要时勾一下展开。
+        #
+        # 有意**不设例外**：早期版本把"必填项不许折叠"当规矩，于是接口地址与
+        # 火山 endpoint 一直占着首屏。真正会卡住保存的情况由校验给出明确报错，
+        # 且 `_validated_draft()` 会自动把本区展开——用户不会"看不到却必须填"。
+        # 文案必须短：QCheckBox 的文字是**单行不换行**的，它的 minimumSizeHint 就是
+        # 整行文字宽度。原来那句「显示高级字段（接口地址 / 协议 / 火山专用 / id / 代理）」
+        # 要 598px，把整个表单的最小宽度顶到 768px > 视口 698px，于是保存按钮那一
+        # 栏被切掉。枚举内容移到 tooltip。
+        self.advanced_toggle = QCheckBox("显示高级字段", self)
+        self.advanced_toggle.setToolTip(
+            "接口地址 / 协议 / 火山专用字段 / 厂商 id / 代理设置"
+        )
+        self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
+        id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
+        id_field.attach(self.edit_id)
+        self.advanced_host = QWidget(self)
+        advanced = QVBoxLayout(self.advanced_host)
+        advanced.setContentsMargins(0, 0, 0, 0)
+        advanced.setSpacing(6)
+        advanced.addWidget(self.base_field)
+        advanced.addLayout(pair(self.judge_protocol_field, self.asr_protocol_field))
+        advanced.addWidget(self.volcano_host)
+        advanced.addWidget(id_field)
+        advanced.addWidget(self.use_system_proxy)
+        self.advanced_host.setVisible(False)
 
         self.egress_preview = QLabel(self)
         self.egress_preview.setWordWrap(True)
@@ -283,14 +407,7 @@ class ProviderForm(QWidget):
         editor_card = Card("档案字段", parent=self)
         editor_card.add_header_widget(self.actions_host)
         editor_card.body_layout.addWidget(label_field)
-        editor_card.body_layout.addWidget(self.base_field)
-        editor_card.body_layout.addLayout(
-            pair(self.judge_protocol_field, self.asr_protocol_field)
-        )
-        editor_card.body_layout.addWidget(self.volcano_host)
-        editor_card.body_layout.addWidget(self.advanced_host)
-        # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关，且并排后
-        # 首屏刚好放下全部常用字段（不必为了看 Key 输入框去滚动）
+        # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关
         key_row = QHBoxLayout()
         key_row.setContentsMargins(0, 0, 0, 0)
         key_row.setSpacing(12)
@@ -298,15 +415,26 @@ class ProviderForm(QWidget):
         key_row.addWidget(self.allow_upload, 1, Qt.AlignmentFlag.AlignBottom)
         editor_card.body_layout.addLayout(key_row)
         editor_card.body_layout.addLayout(ability_row)
+        # 结果提示紧跟在「保存并测试连通性」按钮下面，而不是表单末尾。
+        # 放在末尾时，用户点了按钮、结果写进了折叠线以下——**看上去就是"点了没反应"**。
+        # 这一页正文比一屏长，滚动区之外的消息等于没有消息。
+        self.hint_label.setVisible(False)
+        editor_card.body_layout.addWidget(self.hint_label)
         editor_card.body_layout.addWidget(self.cloud_hint)
         # 模型清单：它可能很长（自带滚动），但排在配置项之后
         models_title = QLabel("模型（该厂商 /models 拉回来的 + 你手填的）", editor_card)
         models_title.setProperty("role", "muted")
+        # QLabel 默认单行不换行，minimumSizeHint 即整行文字宽度——那是硬下限，
+        # 布局压不下去。这几处长说明文字以前把厂商表单顶宽到超出对话框视口。
+        models_title.setWordWrap(True)
         editor_card.body_layout.addWidget(models_title)
         editor_card.body_layout.addWidget(self.model_table)
         editor_card.body_layout.addLayout(models_row)
+        editor_card.body_layout.addWidget(self.info_title)
+        editor_card.body_layout.addLayout(info_row)
+        editor_card.body_layout.addWidget(self.info_note)
+        editor_card.body_layout.addWidget(self.advanced_host)
         editor_card.body_layout.addWidget(self.egress_preview)
-        editor_card.body_layout.addWidget(self.hint_label)
 
         right_host = scrollable(editor_card)
         right_host.setMinimumWidth(480)
@@ -377,7 +505,15 @@ class ProviderForm(QWidget):
             allow_upload=self.allow_upload.isChecked(),
             use_system_proxy=self.use_system_proxy.isChecked(),
             custom_models=tuple(self._custom_models),
+            model_info=self._tidy_model_info(),
         )
+
+    def _tidy_model_info(self) -> tuple[ModelInfo, ...]:
+        """三个字段全空的条目直接丢掉，不写进配置。
+
+        留着的唯一效果是让"配过但配成空"和"从没配过"在界面上长得一样，分不清。
+        """
+        return tuple(info for info in self._model_info if not info.is_empty())
 
     def _stored_flag(self, name: str) -> bool:
         """取当前档案已保存的某个开关（表单不暴露它，但不能在保存时把它清掉）。"""
@@ -420,6 +556,7 @@ class ProviderForm(QWidget):
         self._judge_model = profile.judge_model
         self._asr_model = profile.asr_model_name
         self._custom_models = list(profile.custom_models)
+        self._model_info = list(profile.model_info)
         self.model_table.set_assignment(self._judge_model, self._asr_model)
         self.edit_asr_endpoint.setText(profile.asr_endpoint)
         self.edit_asr_resource.setText(profile.asr_resource_id)
@@ -442,7 +579,8 @@ class ProviderForm(QWidget):
         self.use_asr.setChecked(self._capability_uses_cloud(profile, CAP_ASR))
         self._refresh_cloud_hint()
         self._refresh_field_visibility()
-        self.hint_label.setText("")
+        self._refresh_info_panel()
+        self._set_hint("")
         # 换厂先清掉上一家的清单：留着会让表格在新厂商名下短暂显示别人的模型
         self._fetched_models = []
         # 切到一家厂商就顺手拉一次它的模型列表（地址与 Key 齐了才会真发请求；
@@ -466,6 +604,7 @@ class ProviderForm(QWidget):
         self._judge_model = ""
         self._asr_model = ""
         self._custom_models = []
+        self._model_info = []
         self.model_table.set_models(())
         self.model_table.set_assignment("", "")
         self.edit_asr_endpoint.setText("")
@@ -477,12 +616,14 @@ class ProviderForm(QWidget):
         self.use_asr.setChecked(False)
         self.cloud_hint.setText("")
         self._loading = False
+        self._refresh_info_panel()
+        self._loading = False
         self.profile_list.setCurrentItem(None)
         self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
         self.btn_restore.setEnabled(False)
         self.advanced_toggle.setChecked(True)  # 新增必须先填 id，直接把高级区摊开
         self._refresh_field_visibility()
-        self.hint_label.setText("填好 id 与名称后选协议；保存即写入配置。")
+        self._set_hint("填好 id 与名称后选协议；保存即写入配置。")
 
     def _on_duplicate(self) -> None:
         """复制为自定义：同一家厂商两套 Key / 两个账号时用。"""
@@ -494,7 +635,7 @@ class ProviderForm(QWidget):
         self.edit_id.setEnabled(True)
         self.edit_label.setText(f"{source.label} 副本")
         self.edit_label.setFocus()
-        self.hint_label.setText(
+        self._set_hint(
             f"从「{source.label}」复制：请填一个新的 id（不能与已有 id 重复）。"
         )
 
@@ -529,7 +670,7 @@ class ProviderForm(QWidget):
         reverted = self._release_backend(profile.id)
         self._profile_id = None
         self.reload()
-        self.hint_label.setText(
+        self._set_hint(
             f"已删除「{profile.label}」。"
             + (f"引用它的能力已回落本地：{'、'.join(reverted)}。" if reverted else "")
         )
@@ -556,7 +697,7 @@ class ProviderForm(QWidget):
         self._save_config()
         reverted = self._release_backend(profile.id)
         self.reload(select=profile.id)
-        self.hint_label.setText(
+        self._set_hint(
             f"已恢复「{profile.label}」的内置默认。"
             + (f"引用它的能力已回落本地：{'、'.join(reverted)}。" if reverted else "")
         )
@@ -645,7 +786,9 @@ class ProviderForm(QWidget):
             self._fetched_models,
             self._custom_models + [self._judge_model, self._asr_model],
         )
-        self.model_table.set_models(names, fetched=self._fetched_models)
+        self.model_table.set_models(
+            names, fetched=self._fetched_models, tags=self._meta_tags(names)
+        )
         self.model_table.set_assignment(self._judge_model, self._asr_model)
         manual = len(self._custom_models)
         if self._fetched_models:
@@ -672,7 +815,205 @@ class ProviderForm(QWidget):
         self.model_table.set_assignment(self._judge_model, self._asr_model)
         self._refresh_egress_preview()
         label = CAP_LABELS.get(capability, capability)
-        self.hint_label.setText(f"{label}模型已改为「{name}」（点「保存」后写入配置）。")
+        self._set_hint(f"{label}模型已改为「{name}」（点「保存」后写入配置）。")
+        # 模态可能与这条能力冲突（比如把纯文本模型指给了转写），说清比事后报错好
+        self._warn_if_modality_conflicts()
+
+    def _warn_if_modality_conflicts(self) -> None:
+        """指派与已配模态冲突时，在提示行点名。"""
+        checks = (
+            (self._judge_model, CAP_JUDGE, "文本"),
+            (self._asr_model, CAP_ASR, "音频"),
+        )
+        for name, capability, needed in checks:
+            if not name:
+                continue
+            info = self._info_of(name)
+            if not info.modalities:
+                continue
+            if needed == "文本" and not info.can_judge():
+                self._set_hint(
+                    f"「{name}」的模态里没有文本，不能做{CAP_LABELS[capability]}——"
+                    "在下面「模型参数」里改，或换一个模型。"
+                )
+            elif needed == "音频" and not info.can_transcribe():
+                self._set_hint(
+                    f"「{name}」的模态里没有音频，不能做{CAP_LABELS[capability]}——"
+                    "在下面「模型参数」里改，或换一个模型。"
+                )
+
+    # ---- 模型参数 -------------------------------------------------------
+
+    def _info_of(self, name: str) -> ModelInfo:
+        """当前编辑中的某个模型的参数档案；没有就返回全空的一份。"""
+        for info in self._model_info:
+            if info.name == name:
+                return info
+        return ModelInfo(name=name)
+
+    def _store_info(self, info: ModelInfo) -> None:
+        """写回内存里的参数档案，并刷新表格里的标记。"""
+        self._model_info = [item for item in self._model_info if item.name != info.name]
+        if not info.is_empty():
+            self._model_info.append(info)
+        self._show_models(self._fetched_models)
+        self._refresh_info_panel()
+
+    def _selected_model_name(self) -> str:
+        return self.model_table.list.selected()
+
+    def _on_model_selected(self, name: str) -> None:
+        """表格选中项变了 → 参数面板切到那个模型。"""
+        self._refresh_info_panel()
+
+    def _on_info_edited(self, *_args) -> None:
+        """面板被改了：写回内存并刷新标记与说明。"""
+        if self._loading or self._info_syncing:
+            return
+        info = self._current_info_from_panel()
+        if not info.name:
+            return
+        self._model_info = [item for item in self._model_info if item.name != info.name]
+        if not info.is_empty():
+            self._model_info.append(info)
+        self.model_table.set_tags(self._meta_tags(self.model_table.names()))
+        self._refresh_info_panel()
+        self._warn_if_modality_conflicts()
+
+    def _meta_tag(self, name: str) -> str:
+        """某个模型在表格行尾的参数摘要（没配就空串）。"""
+        info = self._info_of(name)
+        if info.is_empty():
+            return ""
+        bits: list[str] = []
+        if info.context_window:
+            bits.append(format_context(info.context_window))
+        if info.reasoning:
+            bits.append(f"思考·{info.reasoning}")
+        if info.modalities:
+            bits.append("+".join(
+                MODALITY_LABELS[key] for key in MODALITIES if key in info.modalities
+            ))
+        return "·".join(bits)
+
+    def _meta_tags(self, names) -> dict[str, str]:
+        return {name: self._meta_tag(name) for name in names if self._meta_tag(name)}
+
+    def _on_autofill_info(self) -> None:
+        """按模型名推断参数并写回。
+
+        推断**不会**凭空多出字段：`infer_model_info` 对认不出的模型留空上下文
+        窗口与思考等级（见 core/model_info.py 的"未知就留空"），所以点一下不会
+        把能用的模型弄坏。
+        """
+        name = self._selected_model_name()
+        if not name:
+            self._set_hint("先在上面选中一个模型，再点「自动填充」。")
+            return
+        inferred = infer_model_info(name)
+        if inferred.is_empty():
+            self._set_hint(
+                f"认不出「{name}」的规格——上下文窗口与思考等级需要手填。"
+            )
+            return
+        current = self._info_of(name)
+        # 已经手填过的值不被推断覆盖：用户的选择优先于知识库
+        merged = inferred.with_updates(
+            context_window=current.context_window or inferred.context_window,
+            reasoning=current.reasoning or inferred.reasoning,
+            modalities=current.modalities or inferred.modalities,
+            note=inferred.note,
+        )
+        self._store_info(merged.with_updates(source="auto"))
+        self._set_hint(
+            f"已按模型名推断「{name}」的参数（估计值，可直接改；点「保存」后生效）。"
+        )
+
+    def _on_clear_info(self) -> None:
+        name = self._selected_model_name()
+        if not name:
+            return
+        self._store_info(ModelInfo(name=name))
+        self._set_hint(
+            f"已清空「{name}」的参数（恢复成未设置，不影响其它模型；点「保存」后生效）。"
+        )
+
+    def _current_info_from_panel(self) -> ModelInfo:
+        """把面板上的控件读成一份 :class:`ModelInfo`。"""
+        name = self._selected_model_name()
+        current = self._info_of(name)
+        modalities = tuple(
+            key for key in MODALITIES if self.info_modalities[key].isChecked()
+        )
+        return ModelInfo(
+            name=name,
+            context_window=self.info_context.value(),
+            reasoning=str(self.info_reasoning.currentData() or ""),
+            modalities=modalities,
+            source="manual" if (self.info_context.value() or modalities
+                               or self.info_reasoning.currentData()) else current.source,
+            note=current.note,
+        )
+
+    def _refresh_info_panel(self) -> None:
+        """把选中模型的参数填进面板；没选中就置灰并说明。
+
+        ``_info_syncing`` 是必需的：``setValue`` / ``setCurrentIndex`` /
+        ``setChecked`` 全都会发信号，而信号槽正是"用户改了 → 写回"那一条。
+        不挡住的话，回填一半的面板会被读成"用户的新值"，把刚填进去的参数覆盖成
+        半截（上下文窗口还在、模态没了）。这类 bug 只在特定顺序下出现，极难复现。
+        """
+        self._info_syncing = True
+        try:
+            self._refresh_info_panel_inner()
+        finally:
+            self._info_syncing = False
+
+    def _refresh_info_panel_inner(self) -> None:
+        name = self._selected_model_name()
+        enabled = bool(name)
+        for widget in (
+            self.info_context,
+            self.info_reasoning,
+            self.btn_autofill,
+            self.btn_clear_info,
+        ):
+            widget.setEnabled(enabled)
+        for box in self.info_modalities.values():
+            box.setEnabled(enabled)
+        if not enabled:
+            self.info_title.setText("模型参数：先在上面选中一个模型")
+            self.info_note.setText("")
+            self.info_context.setValue(0)
+            self.info_reasoning.setCurrentIndex(0)
+            for box in self.info_modalities.values():
+                box.setChecked(False)
+            return
+
+        info = self._info_of(name)
+        self.info_title.setText(f"模型参数：{name}")
+        self.info_context.setValue(info.context_window)
+        index = self.info_reasoning.findData(info.reasoning)
+        self.info_reasoning.setCurrentIndex(index if index >= 0 else 0)
+        for key, box in self.info_modalities.items():
+            box.setChecked(key in info.modalities)
+
+        bits: list[str] = []
+        if info.context_window:
+            bits.append(f"上下文 {format_context(info.context_window)}")
+        if info.reasoning:
+            bits.append(f"思考 {info.reasoning}")
+        if info.modalities:
+            bits.append("模态 " + "+".join(
+                MODALITY_LABELS[key] for key in MODALITIES if key in info.modalities
+            ))
+        origin = "自动推断（估计值）" if info.source == "auto" else "手填"
+        if info.is_empty():
+            self.info_note.setText(
+                "未设置——不截断、不发送思考等级、不做模态过滤（保持原样）。"
+            )
+        else:
+            self.info_note.setText("｜".join(bits) + f"。来源：{origin}。{info.note}")
 
     def _on_model_added(self, name: str) -> None:
         """手动添加一个模型名：留在清单里（下次打开还能选）。"""
@@ -680,7 +1021,7 @@ class ProviderForm(QWidget):
             self._custom_models.append(name)
         self.model_table.edit_add.clear()
         self._show_models(self._fetched_models)
-        self.hint_label.setText(f"已添加模型「{name}」（点「保存」后写入配置）。")
+        self._set_hint(f"已添加模型「{name}」（点「保存」后写入配置）。")
 
     def _on_model_removed(self, name: str) -> None:
         """删除一个手填的模型名；它若正被指派，一并清空指派（不留悬空引用）。"""
@@ -696,7 +1037,7 @@ class ProviderForm(QWidget):
         note = f"已删除模型「{name}」（点「保存」后写入配置）。"
         if cleared:
             note += f"它正被指派给{'、'.join(cleared)}，指派也已清空。"
-        self.hint_label.setText(note)
+        self._set_hint(note)
 
     # ---- 保存 -----------------------------------------------------------
 
@@ -708,7 +1049,7 @@ class ProviderForm(QWidget):
         self._profile_id = draft.id
         # 先 reload 再写提示：reload 会选中新档案并清空提示行
         self.reload(select=draft.id)
-        self.hint_label.setText(f"已保存「{draft.label}」（id={draft.id}）。")
+        self._set_hint(f"已保存「{draft.label}」（id={draft.id}）。")
 
     def _validated_draft(self) -> ProviderProfile | None:
         """校验当前编辑的档案；有问题返回 None（原因写进提示行）。
@@ -725,11 +1066,14 @@ class ProviderForm(QWidget):
         problems = validate_profile(draft, existing_ids=taken)
         if problems:
             joined = "；".join(problems)
-            # 常见缺项（id / 火山字段）就在折叠起来的高级区里：先摊开再报错，
-            # 否则用户看到"缺 asr_endpoint"却在界面上找不到这个字段。
-            if any(token in joined for token in ("id", "asr_endpoint", "asr_resource_id")):
+            # 缺项（id / 接口地址 / 火山字段）都在折叠起来的高级区里：先摊开再报错，
+            # 否则用户看到"缺 base_url"却在界面上找不到这个字段。
+            if any(
+                token in joined
+                for token in ("id", "base_url", "接口地址", "asr_endpoint", "asr_resource_id")
+            ):
                 self.advanced_toggle.setChecked(True)
-            self.hint_label.setText("保存失败：" + joined)
+            self._set_hint("保存失败：" + joined)
             return None
         return draft
 
@@ -754,6 +1098,15 @@ class ProviderForm(QWidget):
     def _capability_uses_cloud(self, profile: ProviderProfile, capability: str) -> bool:
         """该能力此刻是否真的走这家云端（选了 + 档案已测通）。"""
         return profile.enabled and self._config.backend_for(capability) == profile.id
+
+    def _set_hint(self, text: str) -> None:
+        """写提示行，并同步显隐。
+
+        显隐必须跟文字走：这一行的提示有 20 多处写入点，漏配一次就变成
+        「消息设了但看不见」——而这页正文比一屏长，看不见就等于没写。
+        """
+        self.hint_label.setText(text)
+        self.hint_label.setVisible(bool(text))
 
     def _save_and_probe(self) -> None:
         """保存 + 逐能力测连通：**只把测通的能力切到云端**。
@@ -793,13 +1146,13 @@ class ProviderForm(QWidget):
         self._write_profile(draft.with_updates(enabled=enabled_any))
         self.reload(select=draft.id)
         if failures:
-            self.hint_label.setText("连通性测试未通过——" + "；".join(failures) + "。")
+            self._set_hint("连通性测试未通过——" + "；".join(failures) + "。")
         elif enabled_any:
-            self.hint_label.setText(
+            self._set_hint(
                 f"连通性正常：{draft.label}。已切到云端的是：{'、'.join(passed)}。"
             )
         else:
-            self.hint_label.setText("已保存字段；未勾选任何能力，这条能力仍走本地模型。")
+            self._set_hint("已保存字段；未勾选任何能力，这条能力仍走本地模型。")
 
     def _probe(self, profile: ProviderProfile, capability: str) -> str | None:
         """连通性测试的接缝：返回错误描述；可用时返回 None。
@@ -862,7 +1215,7 @@ class ProviderForm(QWidget):
         try:
             self._config.save(self._config_path)
         except OSError as exc:
-            self.hint_label.setText(f"配置写入失败：{exc}")
+            self._set_hint(f"配置写入失败：{exc}")
 
     # ---- 字段显隐与预览 -------------------------------------------------
 
@@ -870,10 +1223,9 @@ class ProviderForm(QWidget):
         """按协议决定哪些字段有意义，并维护"高级字段"的折叠。
 
         规则：
-        - 两条能力都停用时，接口地址没有意义；
-        - 火山转写需要 asr_endpoint / asr_resource_id——它们在**常用区**按协议显隐，
-          不进折叠区（必填项一旦被藏起来，用户会"看不到却必须填"）；
-        - 高级区只放 id 与「走系统代理」，默认收起；点「新增」时自动展开（要先填 id）。
+        - 高级区（接口地址 / 协议 / 火山专用 / id / 代理）默认收起，需要时勾一下；
+        - 两条能力都停用时，接口地址没有意义，连它带标题一起藏；
+        - 火山转写的 asr_endpoint / asr_resource_id 按协议显隐。
 
         藏的是整个 `LabeledField`（标题 + 输入框一起），不是只藏输入框：
         留着一个"孤儿标题"比不藏更让人迷惑。

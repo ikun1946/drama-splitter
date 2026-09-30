@@ -30,12 +30,11 @@ import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Sequence
 
-from .candidates import CandidatePoint
-from .asr import Transcript, TranscriptSentence
+from .candidates import CandidatePoint, CandidateSet
+from .asr import Transcript
 from .cloud import build_judge_transport
-from .probe import LEVEL_INFO, LEVEL_WARN, Issue
 from .providers import (
     CAP_JUDGE,
     PROTO_LABELS,
@@ -890,6 +889,7 @@ def judge_candidates(
     strategy: str,
     budget_requests: int = 24,
     top_k: int | None = None,
+    on_progress: "Callable[[int, int], None] | None" = None,
 ) -> JudgeOutcome:
     """对候选点执行语义判断，并**就地**更新候选的评分与审核状态。
 
@@ -898,6 +898,10 @@ def judge_candidates(
     - 模型不可用时整体降级，**不给出任何结论**；
     - 判定为 poor_cut 的候选会被扣分，好切点加分——调整量是等级到排序分的
       映射（§11.3），不是概率。
+
+    ``on_progress(done, total)`` 在每处理完一个候选（含被跳过的）后回调一次。
+    语义判断是「整体规划」里唯一的长耗时子步骤（云端一次请求数秒），不给进度
+    的话界面会长时间停在同一句话上，用户以为卡死。
     """
     outcome = JudgeOutcome()
 
@@ -912,22 +916,34 @@ def judge_candidates(
     ordered = sorted(candidates.points, key=lambda p: -p.score)
     if top_k is not None:
         ordered = ordered[:top_k]
+    total = len(ordered)
 
+    def tick() -> None:
+        if on_progress is not None:
+            on_progress(processed[0], total)
+
+    processed = [0]
     judged_scores: dict[int, float] = {}
     for point in ordered:
         if budget.remaining() <= 0:
             outcome.skipped_by_budget += 1
+            processed[0] += 1
+            tick()
             continue
         request = build_request(point, index, strategy=strategy)
         if request is None:
             outcome.notes.append(
                 f"候选 {format_short(point.time)} 无前后台词，跳过语义判断"
             )
+            processed[0] += 1
+            tick()
             continue
         try:
             budget.try_consume()
         except BudgetExhaustedError:
             outcome.skipped_by_budget += 1
+            processed[0] += 1
+            tick()
             continue
         verdict = judge.judge(request)
         if verdict.verdict == VERDICT_UNPARSEABLE:
@@ -939,6 +955,8 @@ def judge_candidates(
         point.review_status = "semantic_reviewed"
         judged_scores[id(point)] = VERDICT_SCORE_ADJUSTMENT[verdict.verdict]
         outcome.judged += 1
+        processed[0] += 1
+        tick()
 
     if outcome.skipped_by_budget:
         outcome.notes.append(
