@@ -25,8 +25,6 @@ segment 边界上**——那会把切点放到两句之间本该连续的地方�
 
 from __future__ import annotations
 
-import json
-import re
 import shutil
 import subprocess
 import sys
@@ -38,8 +36,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .cache import CacheKey, CacheStore, SourceFingerprint
-from .probe import LEVEL_BLOCK, LEVEL_WARN, Issue
-from .timebase import format_timecode, round_half_up
+from .probe import LEVEL_WARN, Issue
+from .timebase import format_timecode
 
 __all__ = [
     "AsrWord",
@@ -898,6 +896,9 @@ def _apply_simplified(transcript: Transcript) -> None:
     把繁体残留报成风险。
     """
     try:
+        # 可用性探测，不是「忘了用」：这里只需要知道 zhconv 装没装，
+        # 真正的转换在下面 convert_simplified 里做。
+        # noqa 标记是给清理脚本看的——没有它，`imported but unused` 会把它当垃圾删掉。
         import zhconv  # noqa: F401
     except ImportError:
         transcript.issues.append(

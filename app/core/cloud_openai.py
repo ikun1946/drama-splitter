@@ -38,6 +38,7 @@ from .cloud_http import (
     send_multipart,
     silent_wav_bytes,
 )
+from .model_info import ModelInfo, estimate_max_input_chars
 from .providers import (
     DEFAULT_TIMEOUT,
     ProviderError,
@@ -139,6 +140,7 @@ class OpenAiChatTransport:
         use_system_proxy: bool = False,
         temperature: float = 0.1,
         max_tokens: int = 160,
+        info: ModelInfo | None = None,
     ) -> None:
         self._base_url = (base_url or "").strip().rstrip("/")
         self._api_key = (api_key or "").strip()
@@ -148,6 +150,8 @@ class OpenAiChatTransport:
         self._use_system_proxy = use_system_proxy
         self._temperature = temperature
         self._max_tokens = max_tokens
+        #: 模型参数档案。默认全空 = 不干预：不截断、不发 reasoning_effort。
+        self._info = info or ModelInfo(name=model)
 
     # ---- 协议实现 ------------------------------------------------------
 
@@ -155,12 +159,30 @@ class OpenAiChatTransport:
         return f"{self._label} {self._model} @ {egress_host(self._base_url)}"
 
     def complete(self, prompt: str, *, timeout: float = DEFAULT_TIMEOUT) -> str:
-        data, _ = self._post(
-            {"model": self._model, "messages": [{"role": "user", "content": prompt}],
-             "temperature": self._temperature, "max_tokens": self._max_tokens},
-            timeout=timeout,
-        )
+        payload = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": self._fit(prompt)}],
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+        }
+        # 只在用户确实填了思考等级时才带这个参数：不少模型不认它，盲传会 400。
+        if self._info.reasoning:
+            payload["reasoning_effort"] = self._info.reasoning
+        data, _ = self._post(payload, timeout=timeout)
         return extract_chat_text(data)
+
+    def _fit(self, prompt: str) -> str:
+        """按上下文窗口裁剪输入，超长时保住结尾（系统提示与最近台词在末尾）。
+
+        窗口未配置（0）时原样返回——不猜、不截，避免把证据静默丢掉。
+        """
+        limit = estimate_max_input_chars(self._info.context_window)
+        if limit <= 0 or len(prompt) <= limit:
+            return prompt
+        # 截掉开头并留一行标记：调用方能从返回值看出"这段被裁过"，
+        # 而不是拿到一段看起来完整的台词。
+        dropped = len(prompt) - limit
+        return f"（前 {dropped} 字因超出上下文窗口被截断）\n" + prompt[-limit:]
 
     def probe(self, *, timeout: float = 8.0) -> None:
         """连通性自检：一次最小请求（1 token），只关心"能不能通、鉴权对不对"。"""

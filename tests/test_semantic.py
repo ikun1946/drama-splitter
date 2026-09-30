@@ -36,7 +36,6 @@ from app.core.semantic import (
     VERDICT_GOOD,
     VERDICT_POOR,
     VERDICT_UNPARSEABLE,
-    build_request,
     judge_candidates,
     parse_verdict,
     prepare_prompt,

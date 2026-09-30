@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -136,7 +135,7 @@ def main() -> int:
     from pathlib import Path as _Path
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from app.core.model_manager import download_model, installed_state, list_remote_gguf, llm_spec
+    from app.core.model_manager import download_model, list_remote_gguf, llm_spec
 
     parser = argparse.ArgumentParser(description="下载本地 LLM（GGUF）用于语义判断")
     parser.add_argument("spec", nargs="?", default="2B:Q4_K_M", help="尺寸:量化，如 2B:Q4_K_M")

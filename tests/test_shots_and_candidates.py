@@ -544,7 +544,6 @@ class TestLimiting:
 class TestBuildCandidateSet:
     def test_full_pipeline(self, timeline, binaries, assets):
         """收集 → 合并 → 评分 → 限流。"""
-        from app.core.asr import AsrSettings, AsrEngine
 
         transcript = make_transcript(
             [(1.0, 3.0, "第一句。"), (5.0, 7.0, "第二句。"), (9.0, 12.0, "第三句。")]

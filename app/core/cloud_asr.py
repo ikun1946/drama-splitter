@@ -26,7 +26,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from fractions import Fraction
 from pathlib import Path
 

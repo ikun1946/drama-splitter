@@ -28,7 +28,7 @@ from app.core.settings import (
     SplitMode,
     SplitSettings,
 )
-from verify import ffmpeg_binary, probe_frame_count, read_frame_indices
+from verify import probe_frame_count, read_frame_indices
 from verify import detect_beep_onsets, extract_audio_to_wav, read_wav_mono, measure_av_sync
 
 FPS = 25

@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -150,11 +151,17 @@ def detect_scenes(
     min_scene_len_frames: int = DEFAULT_MIN_SCENE_LEN_FRAMES,
     frame_rate: float | None = None,
     on_progress=None,
+    duration_seconds: float | None = None,
 ) -> tuple[list[SceneBoundary], list[Issue]]:
     """用 PySceneDetect 检测镜头切换。
 
     返回 (切换列表, 问题列表)。PySceneDetect 未安装时返回空列表并说明原因——
     镜头检测是**可选增强**，缺失不应让整条链路失败。
+
+    进度说明：PySceneDetect 只在**检出切换**时回调（没有逐帧进度钩子），
+    因此 ``on_progress(ratio)`` 以"最近一次切换的时间码 / 片长"上报。短剧切换
+    密集，粒度够用；整段没有切换的素材进度会停在原处——不是卡死，只是没有
+    新的检测证据。
     """
     issues: list[Issue] = []
     try:
@@ -184,8 +191,18 @@ def detect_scenes(
         ContentDetector(threshold=threshold, min_scene_len=min_scene_len_frames)
     )
 
+    total = duration_seconds
+    if total is None and getattr(source, "duration", None) is not None:
+        total = float(_scene_time(source.duration))
+
+    def _report(_frame, position) -> None:
+        if on_progress is None or not total:
+            return
+        ratio = max(0.0, min(1.0, float(_scene_time(position)) / float(total)))
+        on_progress(ratio)
+
     try:
-        manager.detect_scenes(source, show_progress=False)
+        manager.detect_scenes(source, show_progress=False, callback=_report)
         scene_list = manager.get_scene_list()
     except Exception as exc:  # noqa: BLE001
         issues.append(
@@ -278,6 +295,8 @@ def detect_black_intervals(
     min_duration: float = 0.3,
     picture_threshold: float = 0.98,
     pixel_threshold: float = 0.10,
+    on_progress=None,
+    duration_seconds: float | None = None,
 ) -> tuple[list[BlackInterval], list[Issue]]:
     """用 FFmpeg `blackdetect` 检测黑场与淡出。
 
@@ -293,10 +312,20 @@ def detect_black_intervals(
     踩过的坑：把 `pix_th` 写成 0.98 意味着"几乎所有像素都算黑"，
     于是整片被报成一段从头到尾的黑场（实测 119.96 秒的素材报出
     `black_start:0 black_end:119.96`）。
+
+    进度说明：检测结果在 stderr 的日志里，进度则走 `-progress pipe:1` 的
+    `out_time_us`。两条管道必须同时消费，否则先被写满的那条会让 ffmpeg 卡住，
+    因此 stderr 由一条排空线程专读，主线程读 stdout 收进度。
     """
     cmd = [
         str(ffmpeg),
         "-hide_banner",
+        "-nostdin",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-stats_period",
+        "0.5",
         "-i",
         str(video),
         "-vf",
@@ -307,22 +336,61 @@ def detect_black_intervals(
         "-",
     ]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             creationflags=_NO_WINDOW,
-            timeout=3600,
+            bufsize=1,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return [], [
             Issue(LEVEL_WARN, "BLACKDETECT_FAILED", f"黑场检测未执行：{exc}", "已跳过。")
         ]
 
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        try:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+        except (OSError, ValueError):  # 进程被杀时管道关闭
+            pass
+
+    reader = threading.Thread(target=_drain_stderr, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if on_progress is None or not duration_seconds:
+                continue
+            if line.startswith("out_time_us="):
+                value = line.split("=", 1)[1].strip()
+                if value.isdigit():
+                    seconds = int(value) / 1_000_000
+                    on_progress(max(0.0, min(1.0, seconds / duration_seconds)))
+        proc.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        reader.join(timeout=5)
+
+    if timed_out:
+        return [], [
+            Issue(LEVEL_WARN, "BLACKDETECT_FAILED", "黑场检测超时（超过 1 小时）。", "已跳过。")
+        ]
+
     intervals: list[BlackInterval] = []
-    for match in _BLACKDETECT_RE.finditer(proc.stderr or ""):
+    for match in _BLACKDETECT_RE.finditer("".join(stderr_lines)):
         start = Fraction(str(round(float(match.group("start")), 4))).limit_denominator(100_000)
         end = Fraction(str(round(float(match.group("end")), 4))).limit_denominator(100_000)
         intervals.append(
@@ -345,8 +413,15 @@ def detect_all(
     detect_blacks: bool = True,
     cache: CacheStore | None = None,
     fingerprint: SourceFingerprint | None = None,
+    on_progress=None,
+    duration_seconds: float | None = None,
 ) -> ShotDetectionResult:
-    """镜头 + 黑场一次性检测，可带缓存（§12.1 与分集参数无关，可长期复用）。"""
+    """镜头 + 黑场一次性检测，可带缓存（§12.1 与分集参数无关，可长期复用）。
+
+    进度：`on_progress(ratio, text)`，ratio 是**整个阶段**的比例。两次检测都要
+    完整解码一遍视频，按耗时把前 60% 划给镜头检测、后 40% 给黑场检测；只做
+    镜头检测时它独占 100%。
+    """
     import time
 
     key = None
@@ -362,14 +437,39 @@ def detect_all(
         if cached is not None:
             return ShotDetectionResult.from_json(cached)
 
+    scene_share = 0.6 if detect_blacks else 1.0
+
+    def _scene_progress(ratio: float) -> None:
+        if on_progress is None:
+            return
+        combined = ratio * scene_share
+        on_progress(combined, f"镜头检测 {combined:.0%}")
+
+    def _black_progress(ratio: float) -> None:
+        if on_progress is None:
+            return
+        combined = scene_share + ratio * (1.0 - scene_share)
+        on_progress(combined, f"黑场检测 {combined:.0%}")
+
     started = time.time()
     scenes, scene_issues = detect_scenes(
-        video, threshold=threshold, min_scene_len_frames=min_scene_len_frames
+        video,
+        threshold=threshold,
+        min_scene_len_frames=min_scene_len_frames,
+        on_progress=_scene_progress,
+        duration_seconds=duration_seconds,
     )
     blacks: list[BlackInterval] = []
     black_issues: list[Issue] = []
     if detect_blacks:
-        blacks, black_issues = detect_black_intervals(ffmpeg, video)
+        blacks, black_issues = detect_black_intervals(
+            ffmpeg,
+            video,
+            on_progress=_black_progress,
+            duration_seconds=duration_seconds,
+        )
+    else:
+        _scene_progress(1.0)
 
     result = ShotDetectionResult(
         scenes=scenes,

@@ -31,7 +31,6 @@ from .timebase import (
     parse_rational,
     parse_seconds,
     parse_time_base,
-    round_half_up,
 )
 
 __all__ = [

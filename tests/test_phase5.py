@@ -19,7 +19,6 @@ from app.core.export import CutMode, ExportPreset, Exporter
 from app.core.ffmpeg import probe_hw_encoders
 from app.core.plan import BoundaryPlan
 from app.core.probe import build_frame_table, probe_keyframe_frames
-from app.core.recommend import recommend_plan
 from app.core.settings import (
     CountPolicy,
     RangeMode,
@@ -376,139 +375,24 @@ class FakeMedia:
             "V", (), {"nominal_fps": Fraction(fps), "nb_frames": self.total_frames}
         )()
         self.video_time_base = TimeBase(num=1, den=12800)
+        # 模式C 的自动判定要读总时长；用精确 Fraction，与时间轴其余部分一致
+        self.timeline_duration = Fraction(self.total_frames, fps)
 
     def duration_ticks(self) -> int:
         return self.total_frames * (12800 // self.fps)
 
     def frame_start_seconds(self, index: int) -> Fraction:
         return Fraction(index, self.fps)
-
-
-class TestRecommendation:
-    def build_candidates(self):
-        from app.core.candidates import CandidatePoint, CandidateSet, SOURCE_SENTENCE_END
-
-        return CandidateSet(
-            points=[
-                CandidatePoint(time=Fraction(t), frame_index=t * 25,
-                               sources=[SOURCE_SENTENCE_END], score=0.8)
-                for t in (25, 50, 75)
-            ]
-        )
-
-    def derived(self):
-        from app.core.settings import DerivedParams
-
-        return DerivedParams(
-            target_duration=Fraction(25),
-            min_duration=Fraction(20),
-            max_duration=Fraction(30),
-            total_seconds=Fraction(100),
-        )
-
-    def test_reports_all_strategies_and_picks_lowest_cost(self):
-        result = recommend_plan(
-            self.build_candidates(),
-            FakeMedia(),
-            self.derived(),
-            settings_count_exact=True,
-            target_episode_count=4,
-            allowed_min=4,
-            allowed_max=4,
-        )
-        assert len(result.comparisons) == 3, "三个策略都要有记录"
-        assert result.chosen is not None
-        usable = [c for c in result.comparisons if c.ok]
-        assert result.chosen.total_cost == min(c.total_cost for c in usable)
-        assert any("落选" in note for note in result.notes), "落选者不能隐藏"
-
-    def test_reports_failure_when_no_path(self):
-        from app.core.candidates import CandidatePoint, CandidateSet, SOURCE_SENTENCE_END
-
-        candidates = CandidateSet(
-            points=[
-                CandidatePoint(time=Fraction(10), frame_index=250,
-                               sources=[SOURCE_SENTENCE_END], score=0.8)
-            ]
-        )
-        result = recommend_plan(
-            candidates,
-            FakeMedia(),
-            self.derived(),
-            settings_count_exact=True,
-            target_episode_count=4,
-            allowed_min=4,
-            allowed_max=4,
-        )
-        assert result.chosen is None
-        assert all(not c.ok for c in result.comparisons)
-        assert "无可用方案" in result.describe()
-
-    def test_describe_lists_every_strategy(self):
-        result = recommend_plan(
-            self.build_candidates(),
-            FakeMedia(),
-            self.derived(),
-            settings_count_exact=True,
-            target_episode_count=4,
-            allowed_min=4,
-            allowed_max=4,
-        )
-        text = result.describe()
-        # 输出是给人看的：用设置面板里的中文策略名，不暴露 story/suspense/duration
-        for label in ("剧情优先", "悬念优先", "时长优先"):
-            assert label in text
-        for internal in ("story", "suspense", "duration"):
-            assert internal not in text
-
-    def test_chosen_plan_is_the_cheapest_strategy(self):
-        """推荐＝同一代价函数下总代价最低者，且它的方案就是要交付的那一份。"""
-        result = recommend_plan(
-            self.build_candidates(),
-            FakeMedia(),
-            self.derived(),
-            settings_count_exact=True,
-            target_episode_count=4,
-            allowed_min=4,
-            allowed_max=4,
-        )
-        chosen = result.chosen
-        assert chosen is not None
-        assert chosen.plan is not None and chosen.solution is not None
-        assert chosen.ok and not chosen.problems
-        usable = [c for c in result.comparisons if c.ok]
-        assert all(chosen.total_cost <= c.total_cost for c in usable)
-        assert chosen.label in result.describe()
-
-
 class TestRecommendationWiring:
-    """「推荐方案」接进分析流程：三策略各解一遍，取代价最低者当方案。
+    """「推荐方案」接进分析流程：自动判定集长与集数，再在该集数下比较三种策略。
 
     直接调 ``AnalysisWorker._solve_recommended``——它只依赖媒体对象、设置与
-    可行性报告，不需要 ffmpeg/ASR，所以这条分支可以在离屏环境里真跑起来
+    候选点，不需要 ffmpeg/ASR，所以这条分支可以在离屏环境里真跑起来
     （整条 ``_analyze`` 需要语音素材与转写模型，本地常年是 skip）。
     """
 
     @staticmethod
-    def _report():
-        from types import SimpleNamespace
-
-        from app.core.settings import DerivedParams
-
-        # FakeMedia(100s) + 目标 25s → 4 集，每集 20–30s
-        return SimpleNamespace(
-            derived=DerivedParams(
-                target_duration=Fraction(25),
-                min_duration=Fraction(20),
-                max_duration=Fraction(30),
-                total_seconds=Fraction(100),
-            ),
-            allowed_min=4,
-            allowed_max=4,
-        )
-
-    @staticmethod
-    def _candidates(times=(25, 50, 75)):
+    def _candidates(times=(3, 6, 9, 12, 15, 18, 21, 24, 27, 30)):
         from app.core.candidates import CandidatePoint, CandidateSet, SOURCE_SENTENCE_END
 
         return CandidateSet(
@@ -522,62 +406,76 @@ class TestRecommendationWiring:
         )
 
     @staticmethod
-    def _worker():
+    def _worker(**settings_fields):
         from app.gui.workers import AnalysisWorker
 
-        settings = SplitSettings(
-            split_mode=SplitMode.RECOMMEND,
-            target_duration_seconds=Fraction(25),
-        )
+        # 注意：**不填** target_duration_seconds —— 模式C 的时长与集数由分析
+        # 后自动判定，用户事先不需要给（这也是这次改动的核心）。
+        settings = SplitSettings(split_mode=SplitMode.RECOMMEND, **settings_fields)
         return AnalysisWorker(None, FakeMedia(), None, settings)
 
-    def test_cheapest_strategy_becomes_the_plan(self):
+    def test_decides_timing_then_strategy(self):
         worker = self._worker()
         logs: list[str] = []
         failures: list[str] = []
         worker.stage_log.connect(logs.append)
         worker.failed.connect(failures.append)
 
-        plan, solution, problems, notes = worker._solve_recommended(
-            self._candidates(), self._report(), True, {}
-        )
+        plan, solution, problems, _notes = worker._solve_recommended(self._candidates(), {})
 
         assert not failures, f"不应报错：{failures}"
         assert plan is not None and solution is not None, "推荐模式必须交出方案"
         assert [p for p in problems if p.is_blocking] == []
+        assert plan.episode_count >= 2, "至少要切出两集"
+        assert plan.episode_count == solution.episode_count
 
-        text = "\n".join(logs)
-        for label in ("剧情优先", "悬念优先", "时长优先"):
-            assert label in text, f"三种策略都要写进日志：{text}"
-        assert "推荐：" in text, "日志要说明采用了哪个"
-        assert "落选：" in text, "落选者不能隐藏"
-        assert any("采用推荐策略" in note for note in notes)
-
-    def test_flexible_count_mode_also_works(self):
-        """应用里推荐模式走的是弹性集数（集数是反算出来的），这条也要覆盖。"""
+    def test_logs_beat_anchor_and_every_candidate(self):
+        """节拍依据与落选者都要写进日志——推荐不隐藏比较记录。"""
         worker = self._worker()
-        report = self._report()
-        report.allowed_min, report.allowed_max = 3, 5
+        logs: list[str] = []
+        worker.stage_log.connect(logs.append)
 
-        plan, solution, problems, notes = worker._solve_recommended(
-            self._candidates(), report, False, {}
-        )
+        worker._solve_recommended(self._candidates(), {})
+        text = "\n".join(logs)
 
-        assert plan is not None and solution is not None
-        assert 3 <= plan.episode_count <= 5, f"集数应落在弹性区间内：{plan.episode_count}"
+        assert "内容节拍" in text, f"要说清时长是怎么来的：{text}"
+        assert "自动判定：每集" in text, "要把结论写在一行里"
+        assert "集数 / 策略比较" in text
+        assert "落选：" in text, "落选者不能隐藏"
 
-    def test_all_strategies_failing_reports_concise_cause(self):
-        """三策略全无解时：报错要能照着改设置，且不重复整段话。"""
+    def test_decision_is_written_back_to_settings(self):
+        """判定结果回填到设置：随项目快照保存，重开项目仍看得到判成了什么。"""
+        worker = self._worker()
+        worker._solve_recommended(self._candidates(), {})
+
+        settings = worker._settings
+        assert settings.decided_episode_count and settings.decided_episode_count >= 2
+        assert settings.decided_target_seconds is not None
+        assert settings.decided_strategy in ("story", "suspense", "duration")
+        # 关键：不能写回 target_duration_seconds —— 用户从没填过那个值
+        assert settings.target_duration_seconds is None
+
+    def test_nothing_feasible_reports_a_cause(self):
+        """一个候选点都切不动时：报错要能照着改，不要只说"无解"。"""
         worker = self._worker()
         failures: list[str] = []
         worker.failed.connect(failures.append)
 
-        plan, *_ = worker._solve_recommended(
-            self._candidates(times=(10,)), self._report(), True, {}
-        )
+        plan, *_ = worker._solve_recommended(self._candidates(times=(10,)), {})
 
         assert plan is None, "无解时不得交出方案"
         assert failures, "无解必须报错"
-        assert "都没有可行解" in failures[0]
-        assert "建议：" in failures[0], f"要带上可操作的建议：{failures[0]}"
-        assert failures[0].count("建议：") == 1, f"成因不应重复：{failures[0]}"
+        assert "自动判定失败" in failures[0]
+
+    def test_recommend_needs_no_target_duration(self):
+        """模式C 下 ``check_feasibility`` 不能再要求用户先填时长。"""
+        from app.core.settings import check_feasibility
+
+        settings = SplitSettings(split_mode=SplitMode.RECOMMEND)
+        report = check_feasibility(settings, Fraction(100))
+
+        assert report.auto_pending, "应标记为待自动判定"
+        assert not report.blocking, "待判定不等于无解"
+        assert report.derived is None
+        # 界面不能把默认的 0 打印成「0 – 0 集」那种假信息
+        assert report.min_episodes == 0 and report.max_episodes == 0

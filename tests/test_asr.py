@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from fractions import Fraction
-from pathlib import Path
 
 import pytest
 

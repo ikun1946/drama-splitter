@@ -38,6 +38,7 @@ JUDGE_BUILDERS = {
         profile.judge_model,
         label=profile.label,
         use_system_proxy=profile.use_system_proxy,
+        info=profile.info_for(profile.judge_model),
     ),
 }
 

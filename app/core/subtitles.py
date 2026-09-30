@@ -21,7 +21,6 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Iterable
 
-from .cache import CacheKey, CacheStore, SourceFingerprint
 from .probe import LEVEL_INFO, LEVEL_WARN, Issue
 from .timebase import format_timecode, round_half_up
 

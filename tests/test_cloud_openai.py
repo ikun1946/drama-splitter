@@ -209,6 +209,65 @@ class TestOpenAiChat:
         assert payload["max_tokens"] == 1, "自检只要证明「能通」，不该真花一次判断的额度"
         assert payload["temperature"] == 0.0
 
+    def test_without_model_info_the_payload_is_unchanged(self, gateway):
+        """没配参数 = 不干预：请求里既没有 reasoning_effort，输入也没被裁。"""
+        make_chat(gateway).complete("判断这个切点")
+        payload = json.loads(gateway.requests[0].body)
+        assert "reasoning_effort" not in payload
+        assert payload["messages"][0]["content"] == "判断这个切点"
+
+    def test_reasoning_effort_is_sent_when_set(self, gateway):
+        from app.core.model_info import ModelInfo
+
+        make_chat(gateway, info=ModelInfo(name="o3", reasoning="high")).complete("x")
+        payload = json.loads(gateway.requests[0].body)
+        assert payload["reasoning_effort"] == "high"
+
+    def test_probe_never_sends_reasoning_effort(self, gateway):
+        """自检只证明"能通"：带着思考等级去探测会平白多花一次推理额度。"""
+        from app.core.model_info import ModelInfo
+
+        make_chat(gateway, info=ModelInfo(name="o3", reasoning="high")).probe()
+        payload = json.loads(gateway.requests[0].body)
+        assert "reasoning_effort" not in payload
+
+    def test_long_prompt_is_trimmed_to_the_context_window(self, gateway):
+        from app.core.model_info import ModelInfo
+
+        transport = make_chat(gateway, info=ModelInfo(name="m", context_window=1_000))
+        transport.complete("头" * 5_000)
+        payload = json.loads(gateway.requests[0].body)
+        content = payload["messages"][0]["content"]
+        assert len(content) < 5_000, "超窗必须裁"
+        assert "被截断" in content, "裁过要说明，否则用户以为台词是完整的"
+        assert content.endswith("头"), "保住结尾（系统提示与最近台词在末尾）"
+
+    def test_prompt_within_window_is_untouched(self, gateway):
+        from app.core.model_info import ModelInfo
+
+        transport = make_chat(gateway, info=ModelInfo(name="m", context_window=100_000))
+        transport.complete("短提示")
+        payload = json.loads(gateway.requests[0].body)
+        assert payload["messages"][0]["content"] == "短提示"
+
+    def test_info_reaches_the_transport_through_the_profile(self, gateway):
+        """档案里配了思考等级 → 经 build_judge_transport 一路传到请求。"""
+        from app.core.cloud import build_judge_transport
+        from app.core.model_info import ModelInfo
+        from app.core.providers import PROTO_OPENAI, ProviderProfile
+
+        profile = ProviderProfile(
+            id="p", label="厂", base_url=gateway.base_url, api_key=API_KEY,
+            judge_protocol=PROTO_OPENAI, judge_model="gpt-x", enabled=True,
+            allow_upload=True,
+            model_info=(ModelInfo(name="gpt-x", reasoning="low"),),
+        )
+        transport = build_judge_transport(profile)
+        assert transport is not None
+        transport.complete("判断")
+        payload = json.loads(gateway.requests[0].body)
+        assert payload["reasoning_effort"] == "low"
+
     def test_describe_carries_label_and_host(self, gateway):
         text = make_chat(gateway).describe()
         assert "测试厂商" in text

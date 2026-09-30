@@ -314,7 +314,7 @@ def run_ffmpeg(
         )
 
 
-def probe_hw_encoders(binaries: "Binaries") -> dict:
+def probe_hw_encoders(binaries: "FfmpegBinaries") -> dict:
     """探测硬件 H.264 编码器的**存在性**（§ 硬件兼容）。
 
     注意：`-encoders` 列表里有，不代表当前驱动可用——NVENC 需要显卡驱动、

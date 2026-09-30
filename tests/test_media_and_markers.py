@@ -10,17 +10,10 @@ from fractions import Fraction
 
 import pytest
 
-from app.core.probe import (
-    LEVEL_BLOCK,
-    LEVEL_INFO,
-    LEVEL_WARN,
-    check_compatibility,
-    describe_media,
-    probe_media,
-)
+from app.core.probe import check_compatibility, describe_media, probe_media
 from markers import BEEP_INTERVAL_FRAMES, FPS, MAX_FRAME_INDEX, encode_marker_bits
 from verify import detect_beep_onsets, extract_audio_to_wav, probe_frame_count, probe_start_time
-from verify import ffmpeg_binary, read_frame_indices, read_wav_mono
+from verify import read_frame_indices, read_wav_mono
 
 EXPECTED_FRAMES = 3000
 EXPECTED_SECONDS = 120
