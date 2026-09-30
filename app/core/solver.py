@@ -47,7 +47,6 @@ from .settings import (
     ADVICE_MIN_DURATION,
     DerivedParams,
     SettingAdvice,
-    UnresolvedState,
 )
 
 __all__ = [
@@ -55,6 +54,9 @@ __all__ = [
     "GraphDiagnostics",
     "GraphSolution",
     "CandidateGraphSolver",
+    "build_strategy_solver",
+    "solve_with_strategy",
+    "solve_flexible_with_strategy",
     "solve_from_candidates",
 ]
 
@@ -263,8 +265,6 @@ class CandidateGraphSolver:
             [(1.0 - node.score) * self.weights.boundary for node in self._nodes],
             dtype=np.float64,
         )
-        target_frames = float(self.derived.target_duration * fps)
-
         # 时长代价只与两帧之差有关，可按差值预计算，避免 V² 次 float 除法
         max_span = int(frames[-1])
         span_cost = np.abs(np.arange(max_span + 1, dtype=np.float64) / self._fps
@@ -560,30 +560,16 @@ def solve_from_candidates(
     `ends_with_question` 是「切点帧 → 前一句是否以问号/叹号结尾」的映射，
     由调用方从事件索引算出——图节点本身不承载语义信息。
     """
-    notes: list[str] = []
-    weights = weights or SolverWeights.for_strategy(strategy)
-    solver = CandidateGraphSolver(candidates, media, derived, weights=weights)
-    solver.build()
-
-    # 策略性奖惩：悬念优先时，问句/叹句后的切点更优（§ 策略）
-    if strategy == "suspense" and solver._cost is not None:
-        bonus = strategy_boundary_bonus(
-            strategy,
-            {node.frame: node.score for node in solver._nodes},
-            ends_with_question or {},
-        )
-        if bonus:
-            applied = 0
-            for index, node in enumerate(solver._nodes):
-                value = bonus.get(node.frame)
-                if value:
-                    # 奖励施加在"以该节点为切点"的所有边上
-                    solver._cost[:, index] = np.maximum(
-                        solver._cost[:, index] + value, -1.0
-                    )
-                    applied += 1
-            if applied:
-                notes.append(f"悬念策略：{applied} 个问句/叹句后的切点获得优先")
+    # 构图与策略性奖惩走公共入口：搜索阶段（auto_timing）用的是同一个函数，
+    # 两边各写一份就会出现「搜的时候按悬念加分、出方案时没加」这种对不上。
+    solver, notes = build_strategy_solver(
+        candidates,
+        media,
+        derived,
+        strategy=strategy,
+        weights=weights,
+        ends_with_question=ends_with_question,
+    )
 
     try:
         if settings_count_exact:
@@ -639,6 +625,104 @@ def _uniform_cost(
     # 因此注明口径差异，比较时以趋势为准
     total += (len(durations) - 1) * (1.0 - 0.0) * weights.boundary
     return total
+
+
+def build_strategy_solver(
+    candidates: CandidateSet,
+    media: MediaInfo,
+    derived: DerivedParams,
+    *,
+    strategy: str,
+    weights: SolverWeights | None = None,
+    ends_with_question: "dict[int, bool] | None" = None,
+) -> tuple[CandidateGraphSolver, list[str]]:
+    """构图并施加策略性奖惩，返回 ``(solver, 说明)``。
+
+    抽出来是为了让**搜索阶段**与**最终求解**走同一份逻辑。悬念优先的奖励施加
+    在 ``solver._cost`` 上，若各写一份，迟早会出现"搜的时候按悬念加分、真正出
+    方案的时候没加"——两边结果对不上，而且极难察觉（只是切点稍差，不会报错）。
+    """
+    notes: list[str] = []
+    weights = weights or SolverWeights.for_strategy(strategy)
+    solver = CandidateGraphSolver(candidates, media, derived, weights=weights)
+    solver.build()
+
+    # 策略性奖惩：悬念优先时，问句/叹句后的切点更优（§ 策略）
+    if strategy == "suspense" and solver._cost is not None:
+        bonus = strategy_boundary_bonus(
+            strategy,
+            {node.frame: node.score for node in solver._nodes},
+            ends_with_question or {},
+        )
+        if bonus:
+            applied = 0
+            for index, node in enumerate(solver._nodes):
+                value = bonus.get(node.frame)
+                if value:
+                    # 奖励施加在"以该节点为切点"的所有边上
+                    solver._cost[:, index] = np.maximum(
+                        solver._cost[:, index] + value, -1.0
+                    )
+                    applied += 1
+            if applied:
+                notes.append(f"悬念策略：{applied} 个问句/叹句后的切点获得优先")
+    return solver, notes
+
+
+def solve_with_strategy(
+    candidates: CandidateSet,
+    media: MediaInfo,
+    derived: DerivedParams,
+    *,
+    strategy: str,
+    episode_count: int,
+    weights: SolverWeights | None = None,
+    ends_with_question: "dict[int, bool] | None" = None,
+) -> tuple[GraphSolution | None, GraphDiagnostics]:
+    """恰好 ``episode_count`` 集。无路径时返回 ``(None, 诊断)`` 而不是抛异常。
+
+    搜索阶段要把同一个 N 试很多次（换 D 就要重建代价矩阵），任何一次失败都
+    只是"这个 N 不行"，不该打断整轮搜索——所以这里吞掉 ``_NoPathError``，
+    把成因留在诊断里。
+    """
+    solver, _notes = build_strategy_solver(
+        candidates,
+        media,
+        derived,
+        strategy=strategy,
+        weights=weights,
+        ends_with_question=ends_with_question,
+    )
+    try:
+        return solver.solve_exact(episode_count), solver.diagnostics
+    except _NoPathError as exc:
+        return None, exc.diagnostics
+
+
+def solve_flexible_with_strategy(
+    candidates: CandidateSet,
+    media: MediaInfo,
+    derived: DerivedParams,
+    *,
+    strategy: str,
+    allowed_min: int,
+    allowed_max: int,
+    weights: SolverWeights | None = None,
+    ends_with_question: "dict[int, bool] | None" = None,
+) -> tuple[GraphSolution | None, GraphDiagnostics]:
+    """在 ``[allowed_min, allowed_max]`` 内取总代价最小者；无解返回 ``(None, 诊断)``。"""
+    solver, _notes = build_strategy_solver(
+        candidates,
+        media,
+        derived,
+        strategy=strategy,
+        weights=weights,
+        ends_with_question=ends_with_question,
+    )
+    try:
+        return solver.solve_flexible(allowed_min, allowed_max), solver.diagnostics
+    except _NoPathError as exc:
+        return None, exc.diagnostics
 
 
 def _empty_plan(media: MediaInfo) -> BoundaryPlan:

@@ -19,12 +19,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fractions import Fraction
-from pathlib import Path
 
-from .asr import Transcript, TranscriptSentence
+from .asr import Transcript
 from .probe import LEVEL_INFO, LEVEL_WARN, Issue
 from .shots import BlackInterval, SceneBoundary
-from .timebase import format_seconds_brief, format_timecode, round_half_up
+from .timebase import format_seconds_brief, format_timecode
 
 __all__ = [
     "CandidateSource",

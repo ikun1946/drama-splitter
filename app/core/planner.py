@@ -28,7 +28,26 @@ from .settings import (
     check_feasibility,
 )
 
-__all__ = ["PlanningError", "choose_episode_count", "plan_rule_based"]
+__all__ = [
+    "PlanningError",
+    "choose_episode_count",
+    "fallback_episode_count",
+    "plan_rule_based",
+]
+
+
+#: 模式C 拿不到候选点时的中性兜底单集时长（秒）。
+#:
+#: 走到这一步时**没有任何内容依据**（没有候选点就估不出节拍），而"什么都不做"
+#: 比"按一个明确写下的默认切"更糟——后者至少让结果可预期、可追溯。这里把这个
+#: 数字摆在明面上，报告与日志都会说明它是兜底而非判定结果。
+FALLBACK_EPISODE_SECONDS = Fraction(60)
+
+
+def fallback_episode_count(total_seconds: Fraction) -> int:
+    """无候选点时的兜底集数：按 ``FALLBACK_EPISODE_SECONDS`` 等分，至少 1 集。"""
+    seconds = max(float(total_seconds), float(FALLBACK_EPISODE_SECONDS))
+    return max(1, int(round(seconds / float(FALLBACK_EPISODE_SECONDS))))
 
 
 class PlanningError(RuntimeError):
@@ -40,8 +59,13 @@ def choose_episode_count(settings: SplitSettings, report: FeasibilityReport) -> 
 
     - 严格模式：必须恰好等于用户指定值，无解则报错，绝不用 N±1 冒充完成（§4.2）。
     - 弹性模式：在允许区间内取最接近名义目标的值。
-    - 按目标时长 / 推荐：取使每集时长最接近目标值的集数。
+    - 按目标时长：取使每集时长最接近目标值的集数。
+    - 推荐方案（模式C）：D 交给分析后自动判定；走到这里说明没候选点可用
+      （``auto_timing`` 跑不了），按中性默认切，并在报告里说明是兜底。
     """
+    if report.auto_pending:
+        return fallback_episode_count(report.total_seconds)
+
     if report.derived is None:
         raise PlanningError("缺少派生参数")
 
@@ -92,7 +116,8 @@ def plan_rule_based(
         raise PlanningError(detail or "参数无解")
 
     derived = report.derived
-    assert derived is not None
+    if derived is None and not report.auto_pending:
+        raise PlanningError("缺少派生参数")
 
     episode_count = choose_episode_count(settings, report)
 
@@ -112,7 +137,16 @@ def plan_rule_based(
     if snap_issues:
         raise PlanningError("；".join(p.message for p in snap_issues))
 
-    problems = plan.validate(settings, derived)
+    problems = plan.validate(settings, derived) if derived is not None else []
+    if derived is None:
+        problems.append(
+            PlanProblem(
+                "AUTO_TIMING_FALLBACK",
+                "warn",
+                "推荐方案未取得候选点，已按默认单集时长等分，"
+                "这是兜底结果而非内容判定。",
+            )
+        )
     return plan, report, problems
 
 

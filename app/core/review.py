@@ -66,10 +66,17 @@ def review_plan(
     *,
     transcript: Transcript | None = None,
     blacks: list[BlackInterval] | None = None,
+    on_progress=None,
 ) -> list[EpisodeReview]:
-    """对方案的每一集做复核。"""
+    """对方案的每一集做复核。
+
+    进度：`on_progress(done, total)`，每复核完一集回调一次（集数少时就是
+    这个阶段最细的粒度）。
+    """
+    episodes = plan.episodes()
+    total = len(episodes)
     reviews: list[EpisodeReview] = []
-    for episode in plan.episodes():
+    for position, episode in enumerate(episodes, start=1):
         reviews.append(
             _review_one(
                 episode.index,
@@ -79,6 +86,8 @@ def review_plan(
                 blacks or [],
             )
         )
+        if on_progress is not None:
+            on_progress(position, total)
     _ = transcript, media  # 保留参数位：后续可加入画面级证据
     return reviews
 

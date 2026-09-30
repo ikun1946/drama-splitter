@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 from fractions import Fraction
 
 import pytest
@@ -21,7 +20,7 @@ from app.core.candidates import (
     SOURCE_SENTENCE_END,
     SOURCE_SHOT_CUT,
 )
-from app.core.settings import DerivedParams, RangeMode, RangeSpec, SplitMode, SplitSettings
+from app.core.settings import DerivedParams, RangeMode, RangeSpec
 from app.core.solver import (
     CandidateGraphSolver,
     SolverWeights,
@@ -546,7 +545,12 @@ class TestEndToEnd:
         """
         from app.core.candidates import build_candidate_set
         from app.core.probe import probe_media
-        from app.core.settings import DerivedParams, RangeSpec, SplitMode, SplitSettings, check_feasibility
+        from app.core.settings import (
+            RangeSpec,
+            SplitMode,
+            SplitSettings,
+            check_feasibility,
+        )
         from app.core.solver import solve_from_candidates
 
         media = probe_media(binaries, speech_video)

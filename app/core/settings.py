@@ -174,6 +174,14 @@ class SplitSettings:
     duration_policy: str = "hard"          # 集长上下限是否硬约束（默认硬）
     allow_episode_exceptions: bool = False  # §4.4 默认关闭
 
+    # ---- 模式C 的判定结果（由 auto_timing 回填，只用于展示与快照）--------
+    # 单独存而不是直接改 target_duration_seconds：用户当初**没有**填过这个值，
+    # 把它写成"用户的输入"会让下次打开分集设置时误以为可以照着改。
+    decided_episode_count: int | None = None
+    decided_target_seconds: Fraction | None = None
+    decided_strategy: str | None = None
+    decided_beat_seconds: Fraction | None = None
+
     def validate(self) -> list[str]:
         problems: list[str] = []
         problems.extend(self.range.validate())
@@ -221,8 +229,13 @@ class SplitSettings:
                 raise ValueError("目标集数未设置")
             target = Fraction(total_seconds, self.target_episode_count)
         else:
+            # 模式C：D 通常是空的（要等分析后自动判定）。走到这里说明调用方
+            # 在自动判定之前就来要派生参数了——那是个真错误，不该悄悄给个默认值。
             if self.target_duration_seconds is None:
-                raise ValueError("推荐模式需要候选时长")
+                raise ValueError(
+                    "推荐方案的目标时长由分析后自动判定；"
+                    "调用方应改用 auto_timing.auto_decide_timing()"
+                )
             target = self.target_duration_seconds
 
         low, high = self.range.resolve(target)
@@ -250,6 +263,10 @@ class SplitSettings:
             "strategy": self.strategy.value,
             "duration_policy": self.duration_policy,
             "allow_episode_exceptions": self.allow_episode_exceptions,
+            "decided_episode_count": self.decided_episode_count,
+            "decided_target_seconds": _frac_to_json(self.decided_target_seconds),
+            "decided_strategy": self.decided_strategy,
+            "decided_beat_seconds": _frac_to_json(self.decided_beat_seconds),
         }
 
     @classmethod
@@ -286,6 +303,18 @@ class SplitSettings:
             strategy=Strategy(data.get("strategy", Strategy.STORY.value)),
             duration_policy=data.get("duration_policy", "hard"),
             allow_episode_exceptions=bool(data.get("allow_episode_exceptions", False)),
+            decided_episode_count=data.get("decided_episode_count"),
+            decided_target_seconds=(
+                _parse_frac_json(data["decided_target_seconds"])
+                if data.get("decided_target_seconds") is not None
+                else None
+            ),
+            decided_strategy=data.get("decided_strategy"),
+            decided_beat_seconds=(
+                _parse_frac_json(data["decided_beat_seconds"])
+                if data.get("decided_beat_seconds") is not None
+                else None
+            ),
         )
 
 
@@ -333,6 +362,10 @@ class FeasibilityReport:
     exact_count_ok: bool | None = None
     state: UnresolvedState = UnresolvedState.NONE
     issues: list[FeasibilityIssue] = field(default_factory=list)
+    #: 推荐方案（模式C）把 D 交给分析后的自动判定：此时**还没有**派生参数，
+    #: 也没有可信的可行集数区间（要等 N 定下来才有 L/U）。界面必须认这条，
+    #: 否则会把默认的 0 打印成"0 – 0 集"——把"还没算"当成"算出来是 0"。
+    auto_pending: bool = False
 
     @property
     def blocking(self) -> bool:
@@ -370,6 +403,22 @@ def check_feasibility(
             report.issues.append(FeasibilityIssue("PARAM_INVALID", "block", text))
         return report
 
+    # 模式C 的 D 由分析后的自动判定给出（见 auto_timing），**无条件**如此——
+    # 不能写成"if D 为空"。用户从「按目标时长」切过来时 D 还留着，切走再回来
+    # 还得能用；靠"D 是不是 None"来判断，切过去的那一刻判定就被绕过了。
+    if settings.split_mode == SplitMode.RECOMMEND:
+        report.auto_pending = True
+        report.issues.append(
+            FeasibilityIssue(
+                "AUTO_TIMING_PENDING",
+                "info",
+                "推荐方案：每集时长与集数将在分析后自动判定。",
+                "判定依据是素材自身的内容节奏（候选点分布），"
+                "不套用任何预设秒数；手动上下限作为软偏好参与打分。",
+            )
+        )
+        return report
+
     derived = settings.derive(total_seconds)
     report.derived = derived
 
@@ -385,13 +434,11 @@ def check_feasibility(
 
     # §4.1 本版要求 L ≤ D ≤ U
     #
-    # 仅在"目标时长由用户给定"时检查（模式A、模式C）。模式B 的 D = T/N 是
-    # 派生值，此时 L ≤ D ≤ U 与 §5.1 的 N×L ≤ T ≤ N×U 等价，而后者能给出
-    # "分成 N 集至少需要多少秒"这种可操作的提示，故交给 §5.1 处理。
-    user_supplied_target = settings.split_mode in (
-        SplitMode.TARGET_DURATION,
-        SplitMode.RECOMMEND,
-    )
+    # 仅在"目标时长由用户给定"时检查（模式A）。模式B 的 D = T/N 是派生值，
+    # 此时 L ≤ D ≤ U 与 §5.1 的 N×L ≤ T ≤ N×U 等价，而后者能给出
+    # "分成 N 集至少需要多少秒"这种可操作的提示，故交给 §5.1 处理；
+    # 模式C 已经走到上面那个 auto_pending 分支去了。
+    user_supplied_target = settings.split_mode == SplitMode.TARGET_DURATION
     if user_supplied_target and not (low <= derived.target_duration <= high):
         report.state = UnresolvedState.MATH_INFEASIBLE
         report.issues.append(
@@ -625,6 +672,10 @@ def apply_setting_advice(
     """
     items = applicable_setting_advice(advice)
     if not items:
+        return None
+    if settings.split_mode == SplitMode.RECOMMEND:
+        # 模式C 没有"目标时长"可供放宽——集长区间是随自动判定一起定的。
+        # 到这一步还拿到建议，说明调用方用错了场景，不该把建议写进设置。
         return None
     derived = settings.derive(total_seconds)
     low, high = derived.min_duration, derived.max_duration
