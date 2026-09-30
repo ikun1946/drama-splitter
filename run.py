@@ -142,7 +142,7 @@ def _ui_smoke() -> int:
     print(f"  底栏主动作：{window.bottom.action_text()}")
 
     # 三个对话框都必须能构造并显示（厂商已并入「模型管理」的页签；
-    # 「选择云端模型」在下面单独构造——它必须用空配置，免得联网）
+    # 「模型设置」在下面单独构造——它必须用空配置，免得联网）
     for label, factory in (
         ("分集设置", window.build_settings_dialog),
         ("模型管理", window.build_model_dialog),
@@ -154,20 +154,28 @@ def _ui_smoke() -> int:
         print(f"  {label}对话框：可构造、可显示（{dialog.width()}×{dialog.height()}）")
         dialog.close()
 
-    # 「选择云端模型」用一份空配置构造：本自检是打包验收，绝不能发网络请求
+    # 「模型设置」用一份空配置构造：本自检是打包验收，绝不能发网络请求
     # （真实配置里若存了 Key，打开这个对话框就会去拉各家的 /models）
     import tempfile
     from pathlib import Path
 
-    pick_dialog = window.build_model_pick_dialog(
+    setup_dialog = window.build_model_setup_dialog(
         config_path=Path(tempfile.mkdtemp()) / "config.json"
     )
-    pick_dialog.show()
+    setup_dialog.show()
     app.processEvents()
-    print(f"  选择云端模型对话框：可构造、可显示（{pick_dialog.width()}×{pick_dialog.height()}）")
-    print(f"    厂商下拉：{pick_dialog.form.provider_combo.count()} 家（空配置下为 0）")
-    print(f"    状态行：{pick_dialog.form.status_label.text()}")
-    pick_dialog.close()
+    setup_form = setup_dialog.form
+    print(f"「模型设置」对话框：可构造、可显示（{setup_dialog.width()}×{setup_dialog.height()}）")
+    for card in setup_form.cards():
+        items = card.items()
+        print(
+            f"  {card.capability}：下拉 {len(items)} 项"
+            f"（本地 {sum(1 for c in items if c.kind == 'local')} 个 /"
+            f" 云端 {sum(1 for c in items if c.kind == 'cloud')} 个）"
+            f"，徽章「{card.badge.text()}」"
+        )
+        print(f"    结论：{card.status_main.text()}")
+    setup_dialog.close()
 
     # 模型管理：一个对话框两个页签（本地模型 / 云端厂商），两页都验一遍
     model_dialog = window.build_model_dialog()

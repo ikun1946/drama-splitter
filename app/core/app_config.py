@@ -23,21 +23,25 @@ from pathlib import Path
 from .model_manager import WHISPER_TIERS, spec_by_key
 from .providers import CAP_ASR, CAP_JUDGE, ProfileRegistry
 
-__all__ = ["AppConfig", "config_path", "default_models_root", "LOCAL_BACKEND"]
+__all__ = ["AppConfig", "app_dir", "config_path", "default_models_root", "LOCAL_BACKEND"]
 
 #: backend_prefs 里"用本地模型"的取值；其余取值是厂商档案 id（如 "volc"）
 LOCAL_BACKEND = "local"
 
 
-def _app_dir() -> Path:
-    """配置与产物的基准目录。打包后取 exe 同级，源码运行取项目根。"""
+def app_dir() -> Path:
+    """配置与产物的基准目录。打包后取 exe 同级，源码运行取项目根。
+
+    需要"用户可写"的路径（配置、缓存、模型目录）都必须走这里：打包后
+    源码位于只读的安装目录里，直接用 `__file__` 推导会写进 Program Files。
+    """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent.parent
 
 
 def config_path() -> Path:
-    return _app_dir() / "config.json"
+    return app_dir() / "config.json"
 
 
 def default_models_root() -> Path:
@@ -46,7 +50,7 @@ def default_models_root() -> Path:
     与 `asr.model_search_roots()` 的第一候选保持一致——用户不配置时，
     行为与之前完全一样。
     """
-    return _app_dir() / "models"
+    return app_dir() / "models"
 
 
 @dataclass

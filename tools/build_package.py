@@ -5,7 +5,12 @@
 ------------------------------
 - onefile 每次启动都要把整包解压到临时目录，PySide6 的体量下启动要十几秒；
 - onedir 启动快、便于用户替换/排查（日志、模型目录都看得见）。
-代价是产物是一个文件夹而非单个 exe——用 `tools/make_installer.ps1` 可再封成安装包。
+代价是产物是一个文件夹而非单个 exe——若要分发给终端用户，可在产物外再套一层
+安装包（Inno Setup / NSIS），把整个 `dist/drama-splitter/` 装进用户可写目录。
+实测产物约 124 MB（排除下列重型可选依赖之后）。
+
+依赖：PyInstaller 属构建期依赖，不在 requirements.txt 里，打包前需先
+    pip install pyinstaller
 
 为什么要显式排除一批模块
 ------------------------
@@ -109,17 +114,17 @@ def main() -> int:
     # 两项自检：运行前提（--self-check）与界面完整性（--ui-smoke）。
     # 后者是必须的：`--self-check` 根本不碰界面，漏打 Qt 插件或界面模块时
     # 它照样"通过"，而用户双击才崩。
+    #
+    # 注意：产物是 `--windowed` 编译的 GUI 子系统程序，标准输出没有宿主控制台，
+    # 里面 `sys.stdout is None` → print() 是空操作。所以这里**拿不到自检文本**，
+    # 只能依据返回码判定（返回码不受影响）。要看得见输出，把下面的
+    # subprocess 换成 ["cmd", "/c", ...] 之类带控制台的包装，或改用源码运行自检。
     ok = True
     for flag, title in (("--self-check", "运行前提自检"), ("--ui-smoke", "界面完整性自检")):
         print()
-        print(f"{title}：")
-        check = subprocess.run(
-            [str(exe), flag], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=300,
-        )
-        print(check.stdout or "")
-        if check.stderr:
-            print("stderr:", check.stderr[:500])
+        print(f"{title}（窗口版无控制台输出，仅看返回码）：")
+        check = subprocess.run([str(exe), flag], timeout=300)
+        print(f"  返回码：{check.returncode}")
         if check.returncode != 0:
             ok = False
     return 0 if ok else 1
