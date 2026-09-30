@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>界面现代化 · 设计原型</title>
+<style>
+/* ============================================================
+   新设计令牌（对应 app/gui/theme.py 的改造目标）
+   字体栈与真程序一致（Segoe UI / Microsoft YaHei UI），
+   ���为这是界面评审稿，不是营销页——换成别的字会看不准。
+   ============================================================ */
+:root{
+  /* 层次：Qt 无 box-shadow，靠「底边加深」伪造浮起 */
+  --bg:#f4f5f9;
+  --surface:#ffffff;
+  --surface-2:#fafbfd;
+  --border:#e2e5ec;
+  --border-strong:#c6cbd6;
+  --shadow-edge:#c9cdd8;
+
+  --text:#1c1f26;
+  --text-muted:#5f6672;
+  --text-disabled:#a2a8b4;
+  --text-inverse:#ffffff;
+
+  --primary:#3b6cb8;
+  --primary-hover:#4a7bc6;
+  --primary-press:#2f5aa0;
+  --primary-soft:#e8f0fc;
+
+  --success:#2e7d32;  --success-soft:#e6f4e8;
+  --warn:#9a6700;     --warn-soft:#fbf1d9;
+  --danger:#b3261e;   --danger-soft:#fce9e7;
+  --neutral:#5f6672;  --neutral-soft:#eef0f4;
+
+  /* 圆角 6/10/16 */
+  --r-sm:6px; --r-md:10px; --r-lg:16px; --r-pill:999px;
+  /* 字号阶 11/13/15/18 */
+  --fs-cap:11px; --fs-body:13px; --fs-title:15px; --fs-display:18px;
+  /* 间距 4/8/12/16/24 */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px;
+  --mono:'Cascadia Mono','Consolas','Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:'Segoe UI','Microsoft YaHei UI','PingFang SC',sans-serif;
+  background:var(--bg);color:var(--text);
+  font-size:var(--fs-body);line-height:1.55;
+  padding:36px 20px 80px;
+}
+.page{max-width:1120px;margin:0 auto}
+h1{font-size:var(--fs-display);font-weight:600;letter-spacing:-.01em}
+.lede{color:var(--text-muted);margin-top:6px;max-width:720px}
+h2{font-size:var(--fs-title);font-weight:600;margin:44px 0 4px;display:flex;align-items:center;gap:8px}
+h2 svg{flex:none;color:var(--primary)}
+.h2note{color:var(--text-muted);font-size:var(--fs-body);margin-bottom:16px}
+
+/* ---------- 组件：卡片（层次 L1） ---------- */
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-bottom-color:var(--shadow-edge);   /* ← 伪阴影，唯一的纵深来源 */
+  border-bottom-width:2px;
+  border-radius:var(--r-lg);
+}
+.card-h{
+  display:flex;align-items:center;gap:var(--s2);
+  padding:var(--s3) var(--s4) 0;
+}
+.card-t{font-size:var(--fs-title);font-weight:600;letter-spacing:.01em}
+.accent{width:3px;height:15px;border-radius:2px;background:var(--primary);flex:none}
+.accent.warn{background:var(--warn)} .accent.danger{background:var(--danger)}
+.accent.success{background:var(--success)} .accent.none{background:transparent}
+.card-b{padding:var(--s3) var(--s4) var(--s4);display:flex;flex-direction:column;gap:var(--s3)}
+
+/* ---------- 组件：按钮三档 ---------- */
+.btn{
+  font:inherit;font-size:var(--fs-body);height:36px;padding:0 16px;
+  border-radius:var(--r-md);border:1px solid var(--border-strong);
+  background:var(--surface);color:var(--text);cursor:pointer;white-space:nowrap;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  transition:background .12s,border-color .12s;
+}
+.btn:hover{background:var(--neutral-soft)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:var(--text-inverse);font-weight:600}
+.btn.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+.btn.danger{color:var(--danger);border-color:#e4b7b2}
+.btn.danger:hover{background:var(--danger-soft)}
+.btn.ghost{
+  height:28px;padding:0 10px;border-color:transparent;background:none;
+  color:var(--primary);font-size:var(--fs-cap);
+}
+.btn.ghost:hover{background:var(--primary-soft)}
+.btn:disabled{color:var(--text-disabled);border-color:var(--border);background:var(--surface);cursor:default}
+
+/* ---------- 组件：彩色标签胶囊 ---------- */
+.chip{
+  display:inline-flex;align-items:center;gap:5px;
+  height:22px;padding:0 10px;border-radius:var(--r-pill);
+  font-size:var(--fs-cap);font-weight:600;white-space:nowrap;
+}
+.chip.primary{background:var(--primary-soft);color:var(--primary-press)}
+.chip.success{background:var(--success-soft);color:var(--success)}
+.chip.warn{background:var(--warn-soft);color:var(--warn)}
+.chip.danger{background:var(--danger-soft);color:var(--danger)}
+.chip.neutral{background:var(--neutral-soft);color:var(--neutral)}
+.dot{width:6px;height:6px;border-radius:50%;flex:none;background:currentColor}
+
+/* ---------- 组件：空态 ---------- */
+.empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:var(--s2);padding:48px var(--s4);text-align:center;
+}
+.empty-ico{
+  width:36px;height:36px;border-radius:50%;
+  background:var(--primary-soft);color:var(--primary-press);
+  display:flex;align-items:center;justify-content:center;margin-bottom:var(--s1);
+}
+.empty-t{font-size:var(--fs-title);font-weight:600}
+.empty-d{font-size:var(--fs-body);color:var(--text-muted);max-width:240px}
+
+/* ---------- 组件：输入 ---------- */
+.field{
+  display:flex;align-items:center;gap:var(--s3);
+}
+.field>label{width:46px;flex:none;font-size:var(--fs-cap);color:var(--text-muted);text-align:right}
+.input{
+  flex:1;height:34px;display:flex;align-items:center;padding:0 12px;
+  border:1px solid var(--border);border-radius:var(--r-sm);
+  background:var(--surface);font-size:var(--fs-body);
+  color:var(--text);overflow:hidden;
+}
+.input.focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(59,108,184,.14)}
+.input .val{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.input .val.ph{color:var(--text-disabled)}
+.input .unit{color:var(--text-disabled);font-size:var(--fs-cap);margin-left:6px}
+.caret{color:var(--text-disabled);flex:none;margin-left:8px}
+
+/* ---------- 应用窗口 ---------- */
+.win{
+  background:var(--bg);border-radius:var(--r-lg);overflow:hidden;
+  border:1px solid var(--border-strong);
+  box-shadow:0 1px 2px rgba(28,31,38,.05);
+}
+.appbar{
+  display:flex;align-items:center;gap:var(--s3);
+  height:52px;padding:0 var(--s4);
+  background:var(--surface);border-bottom:1px solid var(--border);
+}
+.appbar .f{font-weight:600;font-size:var(--fs-title);flex:1;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.saved{font-size:var(--fs-cap);color:var(--text-muted);white-space:nowrap}
+.cols{display:grid;grid-template-columns:320px 1fr 300px;min-height:520px}
+.col{border-right:1px solid var(--border);background:var(--bg);overflow:hidden}
+.col:last-child{border-right:none}
+.col-h{
+  display:flex;align-items:center;gap:var(--s2);
+  padding:var(--s3) var(--s4);font-size:var(--fs-cap);font-weight:600;
+  color:var(--text-muted);letter-spacing:.04em;
+}
+.col-b{padding:0 var(--s4) var(--s4);display:flex;flex-direction:column;gap:var(--s3)}
+
+/* 集列表 */
+.ep{
+  display:flex;align-items:center;gap:var(--s2);
+  padding:9px 12px;border:1px solid var(--border);border-radius:var(--r-md);
+  background:var(--surface);cursor:default;
+}
+.ep.sel{border-color:var(--primary);background:var(--primary-soft)}
+.ep-n{
+  width:24px;height:24px;flex:none;border-radius:var(--r-sm);
+  background:var(--neutral-soft);color:var(--text-muted);
+  font-size:var(--fs-cap);font-weight:600;
+  display:flex;align-items:center;justify-content:center;
+}
+.ep.sel .ep-n{background:var(--primary);color:#fff}
+.ep-b{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.35}
+.ep-t{font-size:var(--fs-body);font-weight:500}
+.ep-m{font-size:var(--fs-cap);color:var(--text-muted);font-family:var(--mono)}
+/* 胶囊在纵向 flex 容器里会被拉伸，必须自己收窄 */
+.card-b > .chip, .col-b > .chip{align-self:flex-start}
+
+/* 预览 + 时间轴 */
+.stage{padding:var(--s3) var(--s4);display:flex;flex-direction:column;gap:var(--s3);height:100%}
+.canvas{
+  position:relative;background:#0e0f13;border-radius:var(--r-md);
+  aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;
+}
+.canvas .bars{display:flex;gap:6px;opacity:.5}
+.canvas .bars i{width:26px;height:38px;background:#fff;display:block}
+.canvas .bars i:nth-child(even){background:#0e0f13}
+.hud{
+  position:absolute;right:10px;bottom:10px;
+  font-family:var(--mono);font-size:var(--fs-cap);
+  background:rgba(26,28,34,.86);color:#cfd2d8;
+  padding:3px 8px;border-radius:var(--r-sm);
+}
+.transport{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.tl{padding-top:var(--s2)}
+.tl-track{
+  position:relative;height:28px;border-radius:var(--r-sm);
+  background:var(--neutral-soft);display:flex;gap:2px;padding:0;
+}
+.tl-seg{
+  flex:1;background:#eef1f7;border-radius:3px;position:relative;
+  display:flex;align-items:flex-end;justify-content:center;
+}
+.tl-seg.alt{background:#f8f9fc}
+.tl-seg.sel{background:var(--primary-soft);box-shadow:inset 0 0 0 2px var(--primary)}
+.tl-seg.done::after{
+  content:"";position:absolute;top:4px;right:4px;
+  width:5px;height:5px;border-radius:50%;background:var(--success);
+}
+.tl-seg span{font-size:10px;color:var(--text-muted);padding-bottom:3px}
+.tl-mark{
+  position:absolute;top:-5px;width:9px;height:9px;
+  border:1.5px solid var(--primary);transform:rotate(45deg);
+  background:var(--surface);
+}
+.tl-mark.lock{background:var(--primary)}
+.tl-axis{display:flex;justify-content:space-between;margin-top:6px;
+  font-family:var(--mono);font-size:10px;color:var(--text-disabled)}
+
+/* 检查器 */
+.tabs{
+  display:flex;background:var(--surface);border-bottom:1px solid var(--border);
+  position:sticky;top:0;
+}
+.tab{
+  flex:1;padding:10px 0;font-size:var(--fs-body);color:var(--text-muted);
+  border-bottom:2px solid transparent;cursor:default;text-align:center;
+}
+.tab.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.tab .n{
+  display:inline-block;margin-left:5px;padding:0 6px;border-radius:var(--r-pill);
+  background:var(--danger-soft);color:var(--danger);
+  font-size:10px;font-weight:600;line-height:16px;
+}
+.pane{padding:var(--s3) var(--s3) var(--s4)}
+
+/* 问题条目 */
+.issue{
+  display:flex;gap:var(--s2);padding:10px 12px;margin-bottom:var(--s2);
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-md);
+}
+.issue-bar{width:3px;border-radius:2px;background:var(--warn);flex:none}
+.issue-t{font-size:var(--fs-body);font-weight:500;line-height:1.45}
+.issue-m{font-size:var(--fs-cap);color:var(--text-muted);font-family:var(--mono);margin-top:3px}
+
+/* ★ 日志结构化条目 */
+.log{padding:0 var(--s3) var(--s4)}
+.logrow{
+  display:flex;gap:var(--s2);padding:5px 8px;border-radius:var(--r-sm);
+  align-items:flex-start;
+}
+.logrow:hover{background:var(--surface-2)}
+.log-dot{width:6px;height:6px;border-radius:50%;background:var(--text-disabled);
+  flex:none;margin-top:6px}
+.log-dot.warn{background:var(--warn)} .log-dot.error{background:var(--danger)}
+.log-dot.success{background:var(--success)} .log-dot.info{background:var(--neutral)}
+.log-time{
+  font-family:var(--mono);font-size:var(--fs-cap);color:var(--text-disabled);
+  flex:none;width:52px;margin-top:2px;
+}
+.log-msg{flex:1;font-size:var(--fs-body);line-height:1.5;color:var(--text);
+  word-break:break-word}
+.log-fold{
+  display:flex;align-items:center;gap:var(--s2);margin-top:4px;padding-left:4px;
+}
+.log-foldmark{
+  font-size:var(--fs-cap);color:var(--text-disabled);
+  border-left:2px solid var(--border);padding-left:10px;line-height:1.4;
+}
+.log-sep{height:1px;background:var(--border);margin:8px 0}
+
+/* 底栏 */
+.botbar{
+  display:flex;align-items:center;gap:var(--s3);
+  height:52px;padding:0 var(--s4);
+  background:var(--surface);border-top:1px solid var(--border);
+  font-size:var(--fs-body);
+}
+.botbar .cap{color:var(--text-muted);font-size:var(--fs-cap)}
+.botbar .sp{flex:1}
+
+/* ---------- 令牌表 ---------- */
+.tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:var(--s3)}
+.tcard{
+  background:var(--surface);border:1px solid var(--border);
+  border-bottom-color:var(--shadow-edge);border-bottom-width:2px;
+  border-radius:var(--r-md);padding:var(--s3);
+}
+.tcard .sw{height:40px;border-radius:var(--r-sm);margin-bottom:var(--s2);
+  border:1px solid rgba(0,0,0,.06)}
+.tcard .n{font-size:var(--fs-cap);color:var(--text-muted);font-family:var(--mono)}
+.tcard .v{font-size:var(--fs-body);font-weight:500;margin-top:2px}
+.specrow{display:flex;align-items:baseline;gap:var(--s3);padding:7px 0;
+  border-bottom:1px solid var(--border)}
+.specrow:last-child{border-bottom:none}
+.specrow .k{width:150px;flex:none;font-size:var(--fs-body);font-weight:500}
+.specrow .v{font-family:var(--mono);font-size:var(--fs-cap);color:var(--text-muted)}
+.demo{
+  display:flex;align-items:baseline;gap:10px;padding:6px 0;
+}
+.demo .tag{width:76px;flex:none;font-size:var(--fs-cap);color:var(--text-muted);
+  font-family:var(--mono)}
+.note{
+  margin-top:var(--s3);padding:var(--s3) var(--s4);
+  background:var(--primary-soft);border:1px solid #cddff5;border-radius:var(--r-md);
+  font-size:var(--fs-body);color:var(--primary-press);line-height:1.6;
+}
+.note b{font-weight:600}
+.warnbox{
+  margin-top:var(--s3);padding:var(--s3) var(--s4);
+  background:var(--warn-soft);border:1px solid #e8d5a0;border-radius:var(--r-md);
+  font-size:var(--fs-body);color:var(--warn);line-height:1.6;
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>界面现代化 · 设计原型</h1>
+  <p class="lede">大圆角 + 彩色标签胶囊 + 卡片化。三屏 + 一张令牌表。纵深只用「底边加深」伪造——Qt 的 QSS 没有 box-shadow，投影做不出来也不会假装能做。</p>
+
+  <div class="note">
+    <b>与现状的三处直接对照：</b>卡片现在只有 1px 边框、与背景同白 → 改为底边 2px 加深；
+    字号只有 11/12/14 三档 → 改为 11/13/15/18；圆角 4/8/12 → 改为 6/10/16。
+  </div>
+
+  <!-- ================= 屏 1：工作台 · 审核态 ================= -->
+  <h2>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M9 9h12"/></svg>
+    屏一 · 工作台（审核态）
+  </h2>
+  <p class="h2note">现状最大的两处：左栏文字被横向滚动条切掉（底部那条横条），右栏日志是四行几乎逐字重复的文字墙。</p>
+
+  <div class="win">
+    <div class="appbar">
+      <span class="f">cfr_120s_25fps.mp4</span>
+      <span class="saved">已保存 17:04</span>
+      <button class="btn ghost">更换视频</button>
+    </div>
+
+    <div class="cols">
+      <!-- 左 -->
+      <div class="col">
+        <div class="col-h">集列表 · 4 集</div>
+        <div class="col-b">
+          <div class="ep sel">
+            <span class="ep-n">1</span>
+            <span class="ep-b"><span class="ep-t">第01集</span><span class="ep-m">00:00 – 00:30</span></span>
+            <span class="chip neutral">未锁定</span>
+          </div>
+          <div class="ep">
+            <span class="ep-n">2</span>
+            <span class="ep-b"><span class="ep-t">第02集</span><span class="ep-m">00:30 – 01:00</span></span>
+            <span class="chip primary">已锁定</span>
+          </div>
+          <div class="ep">
+            <span class="ep-n">3</span>
+            <span class="ep-b"><span class="ep-t">第03集</span><span class="ep-m">01:00 – 01:30</span></span>
+            <span class="chip success">已确认</span>
+          </div>
+          <div class="ep">
+            <span class="ep-n">4</span>
+            <span class="ep-b"><span class="ep-t">第04集</span><span class="ep-m">01:30 – 02:00</span></span>
+            <span class="chip neutral">未锁定</span>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="accent"></span><span class="card-t">当前集</span></div>
+            <div class="card-b">
+              <span class="chip warn">未审核</span>
+              <div style="font-size:var(--fs-body)">第02集 ｜ 00:00:30.000 – 01:00.000</div>
+              <div style="font-size:var(--fs-cap);color:var(--text-muted);font-family:var(--mono)">
+                首帧号 750　帧数 750
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-h"><span class="accent warn"></span><span class="card-t">切点操作</span></div>
+            <div class="card-b">
+              <button class="btn primary">把当前位置设为该集结束切点</button>
+              <div style="display:flex;gap:var(--s2)">
+                <button class="btn" style="flex:1">锁定该切点</button>
+                <button class="btn" style="flex:1">解除锁定</button>
+              </div>
+              <div style="display:flex;gap:var(--s2)">
+                <button class="btn" style="flex:1">确认该集</button>
+                <button class="btn" style="flex:1">吸附到最近帧</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 中 -->
+      <div class="col" style="background:var(--bg)">
+        <div class="stage">
+          <div class="canvas">
+            <div class="bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="hud">#750</span>
+          </div>
+          <div style="font-family:var(--mono);font-size:var(--fs-cap);color:var(--text-muted)">
+            00:00:30.000　（30.000s）
+          </div>
+          <div class="transport">
+            <button class="btn ghost">◀ 上一帧</button>
+            <button class="btn primary">▶ 播放</button>
+            <button class="btn ghost">下一帧 ▶</button>
+            <button class="btn">切点前后</button>
+            <button class="btn">成片连看</button>
+            <span style="flex:1"></span>
+            <button class="btn ghost">−5s</button>
+            <button class="btn ghost">−1s</button>
+            <button class="btn ghost">+1s</button>
+            <button class="btn ghost">+5s</button>
+          </div>
+          <div class="tl">
+            <div class="tl-track">
+              <div class="tl-seg sel done"><span>1</span></div>
+              <div class="tl-seg alt done"><span>2</span></div>
+              <div class="tl-seg done"><span>3</span></div>
+              <div class="tl-seg alt"><span>4</span></div>
+              <div class="tl-mark" style="left:24.5%"></div>
+              <div class="tl-mark lock" style="left:49.5%"></div>
+              <div class="tl-mark" style="left:74.5%"></div>
+            </div>
+            <div class="tl-axis"><span>00:00.000</span><span>120.000s</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右 -->
+      <div class="col">
+        <div class="tabs">
+          <span class="tab">问题 <span class="n">4</span></span>
+          <span class="tab">建议</span>
+          <span class="tab on">日志</span>
+        </div>
+        <div class="pane" style="padding-bottom:0">
+          <div class="issue">
+            <span class="issue-bar" style="background:var(--danger)"></span>
+            <div>
+              <div class="issue-t">第03集：该移动会使相邻集变为零时长或跨越相邻边界</div>
+              <div class="issue-m">第03集　00:50:00</div>
+            </div>
+          </div>
+        </div>
+        <div class="log-sep" style="margin:0 12px"></div>
+        <div class="log">
+          <div style="padding:10px 8px 4px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:var(--fs-title);font-weight:600">分析日志</span>
+            <span class="chip neutral">86 条</span>
+          </div>
+
+          <div class="logrow"><span class="log-dot success"></span><span class="log-time">00:52:20</span>
+            <span class="log-msg">候选点：共 128 个（对白句末 96 / 镜头边界 24 / 黑场 8）</span></div>
+          <div class="logrow"><span class="log-dot success"></span><span class="log-time">00:52:21</span>
+            <span class="log-msg">自动判定：每集 30.0 秒，共 4 集，时长优先</span></div>
+          <div class="logrow"><span class="log-dot info"></span><span class="log-time">00:52:23</span>
+            <span class="log-msg">整集复核（阶段4）：</span></div>
+
+          <!-- 折叠的重复条目 -->
+          <div class="logrow" style="background:var(--surface);border:1px solid var(--border)">
+            <span class="log-dot warn"></span><span class="log-time">00:52:23</span>
+            <div style="flex:1">
+              <div class="log-msg">第01集[留意] 集内没有完整对白——只有画面没有叙事单元，
+                多半不是预期切法；无对白信息，无法做句级复核（转写缺失或素材无对白）。</div>
+              <div class="log-fold">
+                <span class="log-foldmark">第 02 / 03 / 04 集结论完全相同</span>
+                <span class="chip warn">×4</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="logrow"><span class="log-dot success"></span><span class="log-time">00:52:23</span>
+            <span class="log-msg">帧对齐：全部落在合法帧起点</span></div>
+          <div class="logrow"><span class="log-dot warn"></span><span class="log-time">00:52:23</span>
+            <span class="log-msg">方案层校验：2 项需处理</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="botbar">
+      <span class="cap">第02集 · 00:00:30.000–00:01:00.000 · 方案 v1 · 4 集</span>
+      <span class="sp"></span>
+      <button class="btn primary">导出…</button>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>左栏不再有横向滚动条。</b>根因是滚动容器把横向策略设成了「按需」——内容最小宽度超过 320px 就出横条并把文字切掉。改为「永不横向滚动」+ 子控件允许压缩到 0 宽，长路径走<b>省略号 + 悬停显示完整路径</b>。
+  </div>
+
+  <div class="note" style="background:var(--success-soft);border-color:#bcdcc2;color:var(--success)">
+    <b>日志重复折叠：</b>「第01集…第04集 整集复核」四条正文逐字相同，现状是原样铺开四行。改为折叠成一条 + <b>×4 胶囊</b>，可点开。
+    <b>只折叠连续相同</b>，不跨时间折叠——跨时间合并会让人以为中间漏了信息。
+  </div>
+
+  <!-- ================= 屏 2：分集设置 ================= -->
+  <h2>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+    屏二 · 分集设置
+  </h2>
+  <p class="h2note">现状右栏是一整块纯文本。改成分层的结论 + 明细，结论用语义色胶囊承载。</p>
+
+  <div class="win" style="max-width:900px">
+    <div class="appbar">
+      <span class="f">分集设置</span>
+      <span class="saved">修改会即时反映到参数检查</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s4);padding:var(--s4)">
+      <div style="display:flex;flex-direction:column;gap:var(--s3)">
+        <div class="card">
+          <div class="card-h"><span class="accent"></span><span class="card-t">分集模式</span></div>
+          <div class="card-b">
+            <label style="display:flex;gap:8px;align-items:center"><span style="width:14px;height:14px;border-radius:50%;background:var(--primary);display:inline-block;position:relative"><span style="position:absolute;inset:4px;background:#fff;border-radius:50%"></span></span>按目标时长（系统求集数）</label>
+            <label style="display:flex;gap:8px;align-items:center;color:var(--text-muted)"><span style="width:14px;height:14px;border-radius:50%;border:1.5px solid var(--border-strong);display:inline-block"></span>按目标集数</label>
+            <label style="display:flex;gap:8px;align-items:center;color:var(--text-muted)"><span style="width:14px;height:14px;border-radius:50%;border:1.5px solid var(--border-strong);display:inline-block"></span>推荐方案（自动判定集长与集数）</label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><span class="accent"></span><span class="card-t">目标集数 / 时长</span></div>
+          <div class="card-b">
+            <div class="field">
+              <label>目标时长</label>
+              <div class="input"><span class="val">30.000</span><span class="unit">秒</span></div>
+            </div>
+            <div class="field">
+              <label>预计集数</label>
+              <div class="input" style="background:var(--surface-2);border-style:dashed">
+                <span class="val" style="color:var(--text-muted)">4</span>
+                <span class="chip neutral" style="margin-left:auto">自动反算</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="align-self:start">
+        <div class="card-h"><span class="accent success"></span><span class="card-t">即时可行性检查</span>
+          <span style="flex:1"></span><span class="chip warn">可行（警告）</span></div>
+        <div class="card-b">
+          <div>
+            <div style="font-size:var(--fs-title);font-weight:600;margin-bottom:6px">参数可行，存在 1 条警告</div>
+            <div style="font-size:var(--fs-body);color:var(--text-muted)">
+              源片总时长 00:02:00.000　·　目标时长 00:00:30.000
+            </div>
+          </div>
+          <div class="issue" style="margin:0">
+            <span class="issue-bar" style="background:var(--warn)"></span>
+            <div>
+              <div class="issue-t">浮动比例为 0%，实际切点可能因帧边界无法精确落在目标时长上</div>
+              <div class="issue-m">允许输入，但请预期部分集长与目标存在一帧以内的差异</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span class="chip neutral">可行集数 4 – 4 集</span>
+            <span class="chip neutral">集长范围 30.0 – 30.0 秒</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="botbar">
+      <span class="cap">「取消」会恢复打开时的参数</span>
+      <span class="sp"></span>
+      <button class="btn">取消</button>
+      <button class="btn primary">保存并关闭</button>
+    </div>
+  </div>
+
+  <!-- ================= 屏 3：模型设置 ================= -->
+  <h2>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg>
+    屏三 · 模型设置
+  </h2>
+  <p class="h2note">上一轮已按批准的原型重做完（单一下拉）。本轮只跟随新令牌：卡片圆角 16、结论用胶囊分层、输入框圆角 6。</p>
+
+  <div class="win" style="max-width:820px">
+    <div class="appbar">
+      <span class="f">模型设置</span>
+      <span class="saved">选中即生效</span>
+      <button class="btn ghost">刷新清单</button>
+      <button class="btn">去配置 Key…</button>
+    </div>
+    <div style="padding:var(--s4);display:flex;flex-direction:column;gap:var(--s3)">
+      <div class="card">
+        <div class="card-h">
+          <span class="accent success"></span><span class="card-t">语音转写</span>
+          <span class="chip success" style="margin-left:6px">本地</span>
+          <span style="flex:1"></span>
+          <span style="font-size:var(--fs-cap);color:var(--text-muted)">把视频里的声音转成带时间戳的文字</span>
+        </div>
+        <div class="card-b">
+          <div class="field">
+            <label>模型</label>
+            <div class="input focus"><span class="dot" style="background:var(--success)"></span>
+              <span class="val">whisper base — 较快，中文准确率一般</span>
+              <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+          <div style="padding-left:58px;font-size:var(--fs-body);color:var(--success);font-weight:600">
+            正在使用 本地 whisper base
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <span class="accent danger"></span><span class="card-t">语义判断</span>
+          <span class="chip danger" style="margin-left:6px">未生效</span>
+          <span style="flex:1"></span>
+          <span style="font-size:var(--fs-cap);color:var(--text-muted)">判断哪里该断开，剧情才连贯</span>
+        </div>
+        <div class="card-b">
+          <div class="field">
+            <label>模型</label>
+            <div class="input"><span class="val ph">本机未安装语义模型 — 去「模型管理 → 本地模型」下载</span>
+              <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+          <div style="padding-left:58px;display:flex;flex-direction:column;gap:6px">
+            <div style="font-size:var(--fs-body);color:var(--danger);font-weight:600">
+              语义判断不会执行。
+            </div>
+            <div style="font-size:var(--fs-body);color:var(--text-muted);display:flex;align-items:center;gap:8px">
+              本机没有装模型；已选云端 深度求索 DeepSeek，但尚未生效：档案未启用。
+              <button class="btn ghost">去配置</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="botbar">
+      <span class="cap">本机已装的模型排在最上面，云端按厂商分组</span>
+      <span class="sp"></span>
+      <button class="btn">关闭</button>
+    </div>
+  </div>
+
+  <!-- ================= 令牌表 ================= -->
+  <h2>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.1 2.5-.4L21 22l1-5-6-6"/></svg>
+    令牌表
+  </h2>
+  <p class="h2note">浅深两套同步改。品牌主色保持现状（#3b6cb8 / #4aa6ff），不在本次授权范围内动。</p>
+
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div class="card-h"><span class="accent"></span><span class="card-t">色板（浅色主题）</span></div>
+    <div class="card-b">
+      <div class="tgrid">
+        <div class="tcard"><div class="sw" style="background:#f4f5f9"></div><div class="n">BG</div><div class="v">工作台底</div></div>
+        <div class="tcard"><div class="sw" style="background:#ffffff"></div><div class="n">SURFACE</div><div class="v">卡片面</div></div>
+        <div class="tcard"><div class="sw" style="background:#c9cdd8"></div><div class="n">SHADOW_EDGE</div><div class="v">伪阴影（底边）</div></div>
+        <div class="tcard"><div class="sw" style="background:#3b6cb8"></div><div class="n">PRIMARY</div><div class="v">主色（不动）</div></div>
+        <div class="tcard"><div class="sw" style="background:#e8f0fc"></div><div class="n">PRIMARY_SOFT</div><div class="v">主色底</div></div>
+        <div class="tcard"><div class="sw" style="background:#2e7d32"></div><div class="n">SUCCESS</div><div class="v">通过 / 已装</div></div>
+        <div class="tcard"><div class="sw" style="background:#9a6700"></div><div class="n">WARN</div><div class="v">留意 / 警告</div></div>
+        <div class="tcard"><div class="sw" style="background:#b3261e"></div><div class="n">DANGER</div><div class="v">阻断 / 未生效</div></div>
+        <div class="tcard"><div class="sw" style="background:#eef0f4"></div><div class="n">NEUTRAL_SOFT</div><div class="v">中性底</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s4)">
+    <div class="card">
+      <div class="card-h"><span class="accent"></span><span class="card-t">圆角 · 字号 · 间距</span></div>
+      <div class="card-b">
+        <div class="specrow"><span class="k">圆角</span><span class="v">6 / 10 / 16 / pill 999</span></div>
+        <div class="specrow"><span class="k">字号阶</span><span class="v">11 / 13 / 15 / 18</span></div>
+        <div class="specrow"><span class="k">间距网格</span><span class="v">4 / 8 / 12 / 16 / 24</span></div>
+        <div class="specrow"><span class="k">卡片</span><span class="v">圆角 16 · 内边距 16</span></div>
+        <div class="specrow"><span class="k">按钮</span><span class="v">圆角 10 · 高 36 / 28</span></div>
+        <div class="specrow"><span class="k">输入框</span><span class="v">圆角 6 · 高 34</span></div>
+        <div class="specrow"><span class="k">时间轴轨道</span><span class="v">高 20 → 28</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="accent"></span><span class="card-t">字号阶预览</span></div>
+      <div class="card-b">
+        <div class="demo"><span class="tag">display 18</span><span style="font-size:18px;font-weight:600">整集复核</span></div>
+        <div class="demo"><span class="tag">title 15</span><span style="font-size:15px;font-weight:600">当前集 · 第02集</span></div>
+        <div class="demo"><span class="tag">body 13</span><span>把当前位置设为该集结束切点</span></div>
+        <div class="demo"><span class="tag">caption 11</span><span style="color:var(--text-muted)">首帧号 750　帧数 750　未锁定</span></div>
+        <div class="demo"><span class="tag">mono 11</span><span style="font-family:var(--mono);color:var(--text-disabled)">00:52:23</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="warnbox">
+    <b>两个必须遵守的实现约束：</b><br>
+    ① <b>Qt 的 QSS 没有 <code>box-shadow</code></b>。卡片浮起全靠「底边 2px 用 SHADOW_EDGE」，
+    给卡片挂 QGraphicsDropShadowEffect 会裁切里面的输入框和按钮。<br>
+    ② <b>QSS 里写 <code>font-size</code> 必须同时写 <code>font-family</code></b>，否则字体族被重置，
+    中文回退成方块——本项目已经踩过这个坑，会加守卫测试挡住。
+  </div>
+
+  <div class="note" style="margin-top:var(--s4)">
+    <b>这一轮改什么、不改什么：</b>改 theme.py 的令牌与 QSS、日志面板结构、左栏滚动与空态、时间轴绘制。
+    <b>不动</b>三栏比例、四阶段划分、任何业务逻辑与信号，也不重做「模型设置」的交互。
+  </div>
+
+</div>
+</body>
+</html>
