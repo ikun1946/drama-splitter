@@ -1092,6 +1092,9 @@ class TestWorkers:
         outcome: dict = {}
 
         worker.stage_started.connect(lambda name: outcome.setdefault("stages", []).append(name))
+        worker.stage_progress.connect(
+            lambda text, ratio: outcome.setdefault("progress", []).append((text, ratio))
+        )
         worker.stage_log.connect(lambda text: outcome.setdefault("log", []).append(text))
         worker.completed.connect(
             lambda plan, report, problems, candidates, reviews: outcome.update(
@@ -1108,6 +1111,11 @@ class TestWorkers:
         assert "字幕解析" in outcome["stages"]
         assert "语音转写" in outcome["stages"]
         assert "候选点" in outcome["stages"]
+        assert "边界审核" in outcome["stages"], "整集复核应有独立阶段，进度才有条可挂"
+        assert outcome["progress"], "黑场检测与整集复核都应上报进度"
+        assert all(
+            0.0 <= ratio <= 1.0 for _, ratio in outcome["progress"]
+        ), "阶段内进度必须落在 0–100%"
 
     def test_analysis_worker_reports_missing_model_as_log_not_crash(
         self, binaries, assets, monkeypatch
@@ -1258,6 +1266,48 @@ class TestSettingsPageBehaviour:
         page.radio_by_duration.setChecked(True)
         assert page.strategy_combo.isEnabled(), "切回按目标时长后策略要恢复可选"
         assert page._strategy_field._help.text() == ""
+
+    def test_recommend_locks_both_target_fields(self, window, qapp, binaries, assets):
+        """推荐方案里时长与集数**都是**判定结果，一个都不能改。"""
+        window.state.media = probe_media(binaries, assets["cfr"])
+        page = window.build_settings_dialog().form
+
+        page.radio_recommend.setChecked(True)
+        assert page.duration_spin.isReadOnly(), "每集时长应由分析判定"
+        assert page.count_spin.isReadOnly(), "集数应由分析判定"
+        assert "分析后自动判定" in page._duration_field._title.text()
+        assert "分析后自动判定" in page._count_field._title.text()
+
+    def test_recommend_does_not_write_stale_target_back(self, window, qapp, binaries, assets):
+        """只读框里的旧值不能被当成"推荐模式的输入"。
+
+        判定不读 ``target_duration_seconds``（``check_feasibility`` 对模式C
+        无条件走 ``auto_pending``），所以这里保留手填值只为切回时能恢复——
+        但绝不能因此让自动判定失效。
+        """
+        from app.core.settings import check_feasibility
+
+        window.state.media = probe_media(binaries, assets["cfr"])
+        page = window.build_settings_dialog().form
+        page.duration_spin.setValue(999.0)
+        page.radio_recommend.setChecked(True)
+
+        settings = page.collect_settings()
+        assert settings.split_mode == SplitMode.RECOMMEND
+        report = check_feasibility(settings, window.state.total_seconds)
+        assert report.auto_pending, "推荐模式必须走自动判定，不能被手填值绕过"
+        assert not report.blocking
+
+    def test_recommend_panel_says_pending_not_zero(self, window, qapp, binaries, assets):
+        """待判定时不能打印「0 – 0 集」——那把"没算"说成了"算出来是 0"。"""
+        window.state.media = probe_media(binaries, assets["cfr"])
+        page = window.build_settings_dialog().form
+        page.radio_recommend.setChecked(True)
+        qapp.processEvents()
+
+        text = page.feasibility.toPlainText()
+        assert "分析后自动判定" in text
+        assert "0 – 0 集" not in text and "0 - 0 集" not in text
 
     def test_infeasible_parameters_block_progress(self, window, binaries, assets):
         """§5.1 参数无解必须在调用分析之前就拦住（§17.4），且提示要可操作。"""
@@ -2065,6 +2115,37 @@ class TestProviderDialog:
         # 模型表格不随协议收起来：手填一个模型名在任何协议下都有意义
         assert not form.model_table.isHidden()
 
+    def test_common_area_is_just_key_and_models(self, provider_form):
+        """首屏只留「填 Key + 加模型」：地址、协议、火山字段全收进高级区。
+
+        用户实测里这一页太复杂——十几个字段摊在眼前，每一项都像必填。
+        """
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        assert form.advanced_host.isHidden(), "高级区默认收起"
+        # 常用区里这两个必须一直在（Key 是首屏唯一的必填项）
+        assert not form.key_field.isHidden()
+        assert not form.model_table.isHidden()
+        # 收进去的字段：确实住在高级区里（isHidden 只看自身开关，父级折叠它不知道，
+        # 所以这里查父子关系而不是可见性）
+        for field in (form.base_field, form.judge_protocol_field, form.asr_endpoint_field):
+            assert form.advanced_host.isAncestorOf(field)
+
+        form.advanced_toggle.setChecked(True)
+        assert not form.advanced_host.isHidden()
+        assert not form.base_field.isHidden(), "展开后地址要能改"
+
+    def test_validation_error_expands_the_advanced_section(self, provider_form):
+        """缺必填项时自动摊开高级区：不会"看不到却必须填"。"""
+        form, _ = provider_form
+        self._pick(form, "deepseek")
+        form.edit_base_url.setText("")
+        form.advanced_toggle.setChecked(False)
+        form._on_save()
+        assert "保存失败" in form.hint_label.text()
+        assert form.advanced_toggle.isChecked(), "报错时要顺手展开高级区"
+
+
     def test_egress_preview_follows_protocol(self, provider_form):
         """外发预览必须跟着协议变——它抵掉了本页删掉的两个输入框。"""
         from app.core.providers import PROTO_OPENAI
@@ -2326,37 +2407,57 @@ class TestProviderDialog:
         assert profile.api_key == "", "恢复默认要清掉已保存的 Key"
 
 
-class TestModelPickDialog:
-    """「选择云端模型」：只列能连通的厂商、悬停出清单、只写模型名。
+class TestModelSetupDialog:
+    """「模型设置」：每条能力一个下拉——本地模型在最上面，然后是云端（按厂商分子组）。
 
-    界面测试绝不联网：扫描 worker 换成脚本化的假实现（真网络在
+    界面测试绝不联网：模型清单 worker 换成脚本化的假实现（真网络在
     ``tools/gui_smoke.py`` 与真机上验证）。
     """
 
     @staticmethod
-    def _write_config(config_file, providers):
+    def _write_config(config_file, providers=None, **fields):
         from app.core.app_config import AppConfig
 
         config = AppConfig.load(config_file)
-        config.providers = providers
+        if providers is not None:
+            config.providers = providers
+        for key, value in fields.items():
+            setattr(config, key, value)
         config.save(config_file)
 
-    def _open(self, window, qapp, tmp_path, monkeypatch, providers, results):
-        """构造对话框；``results`` 是 {厂商 id: 模型清单 或 失败原因}。"""
+    def _open(
+        self,
+        window,
+        qapp,
+        tmp_path,
+        monkeypatch,
+        providers=None,
+        models=None,
+        *,
+        install_whisper=(),
+        install_llm=None,
+        **fields,
+    ):
+        """构造对话框；``models`` 是 {厂商 id: 模型清单 或 失败原因}。
+
+        ``models_dir`` 一律指到 tmp 下的空目录：否则用例结果会随**开发机恰好装了什么
+        模型**而变——本机有 whisper base，CI 上没有，同一份代码两套结论。
+        """
         from PySide6.QtCore import QObject, Signal as QtSignal
 
-        from app.gui.panes import model_pick_form as module
+        from app.gui.panes import model_setup_form as module
 
-        started: list[list[str]] = []
+        results = models or {}
+        started: list[str] = []
 
-        class FakeScan(QObject):
-            probed = QtSignal(str, object)
-            unresolved = QtSignal(str, str)
+        class FakeList(QObject):
+            listed = QtSignal(object)
+            failed = QtSignal(str)
             finished_ok = QtSignal()
 
-            def __init__(self, profiles, parent=None):
+            def __init__(self, profile, parent=None):
                 super().__init__(parent)
-                self.profiles = list(profiles)
+                self.profile = profile
 
             def isRunning(self):  # noqa: N802 - 与 QThread 同名
                 return False
@@ -2365,26 +2466,33 @@ class TestModelPickDialog:
                 self.cancelled = True
 
             def start(self):  # noqa: N802
-                started.append([p.id for p in self.profiles])
-                for profile in self.profiles:
-                    outcome = results.get(profile.id)
-                    if isinstance(outcome, str):
-                        self.unresolved.emit(profile.id, outcome)
-                    else:
-                        self.probed.emit(profile.id, list(outcome or []))
+                started.append(self.profile.id)
+                outcome = results.get(self.profile.id)
+                if isinstance(outcome, str):
+                    self.failed.emit(outcome)
+                else:
+                    self.listed.emit(list(outcome or []))
                 self.finished_ok.emit()
 
-        monkeypatch.setattr(module, "ModelScanWorker", FakeScan)
+        monkeypatch.setattr(module, "ModelListWorker", FakeList)
+
+        models_root = tmp_path / "models"
+        models_root.mkdir(exist_ok=True)
+        for tier in install_whisper:
+            _install_whisper(models_root, tier)
+        if install_llm is not None:
+            _install_llm(models_root, *install_llm)
+
         config_file = tmp_path / "config.json"
-        self._write_config(config_file, providers)
-        dialog = window.build_model_pick_dialog(config_path=config_file)
+        self._write_config(config_file, providers, models_dir=str(models_root), **fields)
+        dialog = window.build_model_setup_dialog(config_path=config_file)
         dialog.show()
         qapp.processEvents()
         return dialog, dialog.form, config_file, started
 
     @staticmethod
     def _two_providers():
-        """甲：两条能力都走 OpenAI 兼容；乙：转写走火山专有协议。"""
+        """甲：两条能力齐备且已测通；乙：有 Key 但没测通；丙：测通了但没配 Key。"""
         return [
             {
                 "id": "my-a",
@@ -2393,6 +2501,10 @@ class TestModelPickDialog:
                 "api_key": "sk-a",
                 "judge_protocol": "openai",
                 "asr_protocol": "openai",
+                "judge_model": "my-chat",
+                "asr_model_name": "my-asr",
+                "enabled": True,
+                "allow_upload": True,
             },
             {
                 "id": "my-b",
@@ -2400,184 +2512,615 @@ class TestModelPickDialog:
                 "base_url": "https://b.example.com/v1",
                 "api_key": "sk-b",
                 "judge_protocol": "openai",
-                "asr_protocol": "volc_ark",
-                "asr_endpoint": "ep-b",
-                "asr_resource_id": "rid-b",
+                "asr_protocol": "openai",
+                "judge_model": "b-chat",
+            },
+            {
+                "id": "my-c",
+                "label": "丙厂",
+                "base_url": "https://c.example.com/v1",
+                "api_key": "",
+                "judge_protocol": "openai",
+                "asr_protocol": "openai",
+                "enabled": True,
+                "allow_upload": True,
             },
         ]
 
-    def test_lists_only_connected_providers(self, window, qapp, tmp_path, monkeypatch):
-        """探测成功才进下拉；失败的进状态行（不静默消失）。"""
-        dialog, form, _cfg, started = self._open(
-            window, qapp, tmp_path, monkeypatch,
-            self._two_providers(),
-            {"my-a": ["my-chat", "my-reasoner"], "my-b": "鉴权失败：HTTP 401"},
+    @staticmethod
+    def _pick(card, kind, value, provider_id=""):
+        """按下标选中某一项，返回行号；找不到直接让用例失败（而不是静默跳过）。"""
+        for index, choice in enumerate(card.items()):
+            if choice.key == (kind, value, provider_id):
+                card.combo.setCurrentIndex(index)
+                return index
+        raise AssertionError(
+            f"下拉里没有 {kind}/{value}/{provider_id}，现有："
+            f"{[c.label for c in card.items()]}"
         )
+
+    # ---- 结构与排序 ----------------------------------------------------
+
+    def test_two_cards_one_per_capability(self, window, qapp, tmp_path, monkeypatch):
+        """一个窗口两张卡：语音转写 + 语义判断，各管各的。"""
+        from app.core.providers import CAP_ASR, CAP_JUDGE
+
+        dialog, form, _cfg, _started = self._open(window, qapp, tmp_path, monkeypatch)
         try:
-            assert started == [["my-a", "my-b"]], "两家都该探一次"
-            assert form.available_ids() == ["my-a"], "只有连通的进列表"
-            status = form.status_label.text()
-            assert "可用 1 家：甲厂" in status
-            assert "未通过——乙厂：鉴权失败：HTTP 401" in status
+            asr_card, judge_card = form.cards()
+            assert asr_card.capability == CAP_ASR
+            assert judge_card.capability == CAP_JUDGE
+            for card in form.cards():
+                assert card.status_main.text(), "每张卡必须有一句结论"
+                assert card.combo is not None, "每张卡只有一个下拉"
+                # 改版后这两个控件都不该再存在：选模型已经隐含了走哪边
+                assert not hasattr(card, "btn_local")
+                assert not hasattr(card, "provider_combo")
+                assert not hasattr(card, "model_list")
         finally:
             dialog.close()
 
-    def test_hover_exposes_the_model_list(self, window, qapp, tmp_path, monkeypatch):
-        """悬停厂商项（以及收起状态悬停输入框）都能看到该厂商的模型清单。"""
+    def test_local_items_come_before_cloud(self, window, qapp, tmp_path, monkeypatch):
+        """用户指定的核心排序：本地模型在最上面，然后才是云端。"""
+        from app.gui.panes.model_setup_form import KIND_CLOUD, KIND_LOCAL
+
         dialog, form, _cfg, _started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            self._two_providers(),
-            {"my-a": ["my-chat", "my-reasoner"], "my-b": []},
+            self._two_providers(), {"my-a": ["m1", "m2"]},
+            install_whisper=("base",), install_llm=("2B", "Q4_K_M"),
         )
         try:
-            hover = form.provider_combo.itemData(0, Qt.ItemDataRole.ToolTipRole)
-            assert "可用模型（2 个）" in hover
-            assert "my-chat" in hover and "my-reasoner" in hover
-            assert "my-chat" in form.provider_combo.toolTip(), "收起状态悬停也要能看"
-            items = [form.model_combo.itemText(i) for i in range(form.model_combo.count())]
-            assert items == ["my-chat", "my-reasoner"]
-            assert form.model_combo.isEditable(), "清单外的模型名要能直接输入"
+            for card in form.cards():
+                kinds = [c.kind for c in card.items()]
+                first_cloud = next(
+                    (i for i, k in enumerate(kinds) if k == KIND_CLOUD), len(kinds)
+                )
+                last_local = max(
+                    (i for i, k in enumerate(kinds) if k == KIND_LOCAL), default=-1
+                )
+                assert last_local < first_cloud, (
+                    f"{card.capability} 的本地项必须全部排在云端项之前：{kinds}"
+                )
         finally:
             dialog.close()
 
-    def test_hover_truncates_long_lists(self, window, qapp, tmp_path, monkeypatch):
-        many = [f"model-{index:02d}" for index in range(40)]
+    def test_headers_and_notes_are_not_selectable(self, window, qapp, tmp_path, monkeypatch):
+        """分组标题与提示项禁用：点它们不该变成"选了一个模型"。"""
         dialog, form, _cfg, _started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            self._two_providers()[:1], {"my-a": many},
+            self._two_providers(), {"my-a": ["m1"]}, install_whisper=("base",),
         )
         try:
-            hover = form.provider_combo.itemData(0, Qt.ItemDataRole.ToolTipRole)
-            assert "…（共 40 个）" in hover, "上百个模型不能整串铺进 tooltip"
-            assert "model-39" not in hover
+            for card in form.cards():
+                blocked = [
+                    i for i, c in enumerate(card.items()) if not c.selectable
+                ]
+                assert blocked, "至少要有「本地模型」「云端模型」两个分组标题"
+                for index in blocked:
+                    assert not card.combo.model().item(index).isEnabled()
         finally:
             dialog.close()
 
-    def test_capability_switch_changes_candidates_and_refills(
+    def test_providers_without_key_collapse_into_one_note(
         self, window, qapp, tmp_path, monkeypatch
     ):
-        """切能力换候选集，并按新能力回填模型名；已探过的厂商不重复打网络。"""
-        dialog, form, config_file, started = self._open(
+        """没配 Key 的厂商合并成一条提示，不单独成组、也不隐藏。
+
+        16 家全列会毁掉这个下拉（每家可能上百条模型）；但直接隐藏又会被读成
+        "界面坏了"。合并成一条既短、又把原因说清楚。
+        """
+        dialog, form, _cfg, started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            self._two_providers(),
-            {"my-a": ["my-asr", "my-chat"], "my-b": ["ep-b-model"]},
+            self._two_providers(), {"my-a": ["m1"], "my-b": ["m2"]},
         )
         try:
-            from app.core.app_config import AppConfig
-            from app.core.providers import CAP_ASR
-
-            config = AppConfig.load(config_file)
-            config.providers = [
-                dict(self._two_providers()[0], asr_model_name="my-asr"),
-                self._two_providers()[1],
-            ]
-            config.save(config_file)
-            form.refresh()
-            assert form.available_ids() == ["my-a", "my-b"]
-
-            form.set_capability(CAP_ASR)
-            assert form.capability() == CAP_ASR
-            assert form.available_ids() == ["my-a"], "乙厂转写走火山专有协议，没有 /models"
-            assert form.model_combo.currentText() == "my-asr", "按新能力回填模型名"
-            assert len(started) == 1, "已探过的厂商不该重复请求"
+            card = form.cards()[1]
+            headers = [c.label for c in card.items() if c.kind == "header"]
+            assert any("甲厂" in h for h in headers), "有 Key 的厂商要单独成组"
+            assert any("乙厂" in h for h in headers), "有 Key 但没测通的也要成组"
+            assert not any("丙厂" in h for h in headers), "没 Key 的不该成组"
+            notes = [c.label for c in card.items() if c.kind == "note"]
+            assert any("未配置 Key" in n for n in notes), "没 Key 的要合并成一条说明"
+            assert "my-c" not in started, "没 Key 的厂商不该白打一次网络"
         finally:
             dialog.close()
 
-    def test_save_writes_model_name_only(self, window, qapp, tmp_path, monkeypatch):
-        """保存只改模型名：外发授权与"切到云端"仍由「模型管理」把关。"""
+    def test_current_provider_group_is_listed_first(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """当前生效的厂商排最前：让"现在在用什么"一眼可见。"""
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-a": ["m1"], "my-b": ["m2"]},
+            backend_prefs={"judge": "my-b", "asr": "local"},
+        )
+        try:
+            headers = [c.label for c in form.cards()[1].items() if c.kind == "header"]
+            vendors = [h for h in headers if "厂" in h]
+            assert vendors and "乙厂" in vendors[0], f"当前厂商应排最前，实际 {vendors}"
+            assert "当前生效" in vendors[0]
+        finally:
+            dialog.close()
+
+    def test_configured_but_missing_local_model_is_labelled(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """配置指向的本地模型没装：仍要列出来并标注，否则用户不知道"我设的没了"。
+
+        此时结论是「不会执行」而不是「还没选」——配的档位确实跑不起来，
+        这跟"装了没挑"是两回事，混说会让用户以为只要随手点一下就能用。
+        """
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            install_whisper=("tiny",), asr_model_tier="base",
+        )
+        try:
+            card = form.cards()[0]
+            self._pick(card, "local", "base")
+            assert "未安装" in card.combo.currentText()
+            assert "不会执行" in card.status_main.text(), card.status_main.text()
+            assert card.btn_fix.text() == "去下载"
+            # 本机明明有 tiny，也不能因此说"只是没选"——配的 base 才是生效的那个
+            assert "还没选" not in card.status_main.text()
+        finally:
+            dialog.close()
+
+    def test_no_api_key_means_no_request(self, window, qapp, tmp_path, monkeypatch):
+        """一个 Key 都没有时，不该发出任何网络请求。"""
+        dialog, form, _cfg, started = self._open(window, qapp, tmp_path, monkeypatch)
+        try:
+            assert started == [], "没凭据就别去打网络：必然 401，还白等一个超时"
+        finally:
+            dialog.close()
+
+    # ---- 选择即生效 ----------------------------------------------------
+
+    def test_selecting_a_local_model_applies_immediately(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        from app.core.app_config import AppConfig
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch, install_whisper=("tiny", "base"),
+        )
+        try:
+            card = form.cards()[0]
+            self._pick(card, "local", "base")
+            qapp.processEvents()
+            saved = AppConfig.load(config_file)
+            assert saved.asr_model_tier == "base", "选中即写盘，不再需要保存按钮"
+            assert saved.backend_for("asr") == "local"
+            assert "已生效" in form.hint_label.text()
+        finally:
+            dialog.close()
+
+    def test_selecting_a_cloud_model_applies_immediately(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
         from app.core.app_config import AppConfig
 
         dialog, form, config_file, _started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            self._two_providers(),
-            {"my-a": ["my-chat", "my-reasoner"], "my-b": []},
+            self._two_providers(), {"my-a": ["my-chat", "my-reasoner"]},
+            install_whisper=("base",),
         )
         try:
-            assert form.selected_profile_id() == "my-a"
-            form.model_combo.setEditText("my-reasoner")
-            form._on_save()
-
+            card = form.cards()[1]
+            self._pick(card, "cloud", "my-reasoner", "my-a")
+            qapp.processEvents()
             saved = AppConfig.load(config_file)
-            profile = saved.profiles().get("my-a")
-            assert profile.judge_model == "my-reasoner"
-            assert profile.enabled is False, "本页不碰启用开关"
-            assert profile.allow_upload is False, "外发授权只能由用户自己勾"
-            assert saved.backend_for("judge") == "local", "本页不切后端"
-            assert "已保存" in form.effect_label.text()
-            assert "尚未生效" in form.effect_label.text()
+            assert saved.backend_for("judge") == "my-a"
+            assert saved.profiles().get("my-a").judge_model == "my-reasoner"
         finally:
             dialog.close()
 
-    def test_save_without_model_is_refused(self, window, qapp, tmp_path, monkeypatch):
-        import json
+    def test_local_and_cloud_can_be_mixed(self, window, qapp, tmp_path, monkeypatch):
+        """转写走本地、语义判断走云端——两条能力各写各的，互不覆盖。"""
+        from app.core.app_config import AppConfig
 
         dialog, form, config_file, _started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            self._two_providers(),
-            {"my-a": ["my-chat"], "my-b": []},
+            self._two_providers(), {"my-a": ["my-chat", "my-reasoner"]},
+            install_whisper=("base",), asr_model_tier="base",
+        )
+        try:
+            asr_card, judge_card = form.cards()
+            self._pick(asr_card, "local", "base")
+            self._pick(judge_card, "cloud", "my-reasoner", "my-a")
+            qapp.processEvents()
+
+            saved = AppConfig.load(config_file)
+            assert saved.backend_for("asr") == "local", "转写仍走本地"
+            assert saved.backend_for("judge") == "my-a", "语义判断切到云端"
+            assert saved.asr_model_tier == "base", "本地档位不该被云端那侧冲掉"
+        finally:
+            dialog.close()
+
+    def test_repopulating_after_a_fetch_arrives_does_not_write(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """清单回来后重建下拉，不该被当成"用户改主意了"而写盘。
+
+        清空再填充会一路触发 ``currentIndexChanged``；不挡住信号的话，
+        打开窗口的过程本身就会把配置改掉一次——这是回归点。
+        """
+        from app.core.app_config import AppConfig
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-a": []},
+            install_whisper=("base",), asr_model_tier="base",
+            backend_prefs={"asr": "local", "judge": "local"},
         )
         try:
             before = config_file.read_text(encoding="utf-8")
-            form.model_combo.setEditText("")
-            form._on_save()
-            assert "不能为空" in form.hint_label.text()
-            assert config_file.read_text(encoding="utf-8") == before, "拦下就不该落盘"
-            assert json.loads(before), "前置：配置本身是合法 JSON"
+            form._models["my-a"] = ["m1", "m2"]      # 模拟清单到达
+            form._repopulate()
+
+            assert config_file.read_text(encoding="utf-8") == before, "刷新不该落盘"
+            assert AppConfig.load(config_file).asr_model_tier == "base"
+            chosen = form.asr.selected_choice()
+            assert chosen is not None and chosen.value == "base", "当前选中项要保住"
         finally:
             dialog.close()
 
-    def test_effect_line_reports_in_use_model(self, window, qapp, tmp_path, monkeypatch):
+    # ---- 手输模型名 ----------------------------------------------------
+
+    def test_manual_name_accepted_when_only_one_provider_has_a_key(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """清单外的名字（方舟 ep-xxx、自建别名）在归属唯一时照样能用。"""
         from app.core.app_config import AppConfig
 
-        providers = self._two_providers()
-        providers[0].update(
-            {"judge_model": "my-chat", "enabled": True, "allow_upload": True}
-        )
         dialog, form, config_file, _started = self._open(
-            window, qapp, tmp_path, monkeypatch, providers,
-            {"my-a": ["my-chat"], "my-b": []},
-        )
-        try:
-            config = AppConfig.load(config_file)
-            config.backend_prefs = {"judge": "my-a", "asr": "local"}
-            config.save(config_file)
-            form.refresh()
-            assert "已生效" in form.effect_label.text()
-            assert "云端语义判断" in form.effect_label.text()
-        finally:
-            dialog.close()
-
-    def test_no_key_means_zero_requests(self, window, qapp, tmp_path, monkeypatch):
-        """没有一家配 Key 时零请求，并说清下一步怎么做。"""
-        dialog, form, _cfg, started = self._open(
-            window, qapp, tmp_path, monkeypatch, [], {},
-        )
-        try:
-            assert started == [], "没有 Key 不许发请求"
-            assert form.available_ids() == []
-            assert "还没有配好 API Key" in form.status_label.text()
-            assert "DRAMA_<厂商 id>_API_KEY" in form.status_label.text()
-        finally:
-            dialog.close()
-
-    def test_missing_base_url_is_named(self, window, qapp, tmp_path, monkeypatch):
-        """填了 Key 却没填地址：点名说清，也不发请求（打不到目标）。"""
-        dialog, form, _cfg, started = self._open(
             window, qapp, tmp_path, monkeypatch,
-            [
-                {
-                    "id": "my-a",
-                    "label": "甲厂",
-                    "base_url": "",
-                    "api_key": "sk-a",
-                    "judge_protocol": "openai",
-                    "asr_protocol": "openai",
-                }
-            ],
-            {},
+            self._two_providers()[:1], {"my-a": ["model-a"]},
         )
         try:
-            assert started == []
-            assert "填了 Key 但缺接口地址：甲厂" in form.status_label.text()
+            card = form.cards()[1]
+            card.combo.setCurrentIndex(-1)
+            card.combo.lineEdit().setText("ep-mine")
+            card.combo.lineEdit().editingFinished.emit()
+            qapp.processEvents()
+
+            saved = AppConfig.load(config_file)
+            assert saved.profiles().get("my-a").judge_model == "ep-mine"
         finally:
             dialog.close()
+
+    def test_manual_name_refused_when_the_owner_is_ambiguous(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """两家都有 Key、且还没选过任何云端模型 → 拒绝猜，并说清为什么。
+
+        随便挑一家会把模型名写进错误的档案，而且用户很难察觉——下次分析才发现
+        走了错的模型。这里宁可停下来问一句。
+        """
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-a": ["m1"], "my-b": ["m2"]},
+        )
+        try:
+            before = config_file.read_text(encoding="utf-8")
+            card = form.cards()[1]
+            card.combo.setCurrentIndex(-1)
+            card.combo.lineEdit().setText("ep-mine")
+            card.combo.lineEdit().editingFinished.emit()
+            qapp.processEvents()
+
+            assert config_file.read_text(encoding="utf-8") == before, "归属不明就不该落盘"
+            assert "没有归属" in form.hint_label.text()
+        finally:
+            dialog.close()
+
+    def test_manual_name_follows_the_provider_just_picked(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """先选过某家厂商的模型，手输的名字就跟着那家走。"""
+        from app.core.app_config import AppConfig
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-a": ["m1"], "my-b": ["m2"]},
+        )
+        try:
+            card = form.cards()[1]
+            self._pick(card, "cloud", "m2", "my-b")
+            qapp.processEvents()
+            card.combo.setCurrentIndex(-1)
+            card.combo.lineEdit().setText("my-alias")
+            card.combo.lineEdit().editingFinished.emit()
+            qapp.processEvents()
+
+            saved = AppConfig.load(config_file)
+            assert saved.profiles().get("my-b").judge_model == "my-alias"
+            assert saved.backend_for("judge") == "my-b"
+        finally:
+            dialog.close()
+
+    # ---- 状态行 --------------------------------------------------------
+
+    def test_status_leads_with_the_consequence(self, window, qapp, tmp_path, monkeypatch):
+        """本机没装 + 云端没生效 → 结论直接说"这条能力不会执行"。
+
+        改版前那一句话里从头到尾没出现过这个后果，而用户正是靠它判断能不能开工。
+        """
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-b": ["m2"]},
+            backend_prefs={"judge": "my-b", "asr": "local"},
+        )
+        try:
+            judge = form.cards()[1]
+            assert "不会执行" in judge.status_main.text(), judge.status_main.text()
+            assert "乙厂" in judge.status_detail.text()
+            assert judge.btn_fix.text() == "去配置"
+        finally:
+            dialog.close()
+
+    def test_installed_but_unselected_is_not_reported_as_missing(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """装了但没选 ≠ 没装：后者会让人以为自己缺东西，白去下载一遍。"""
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch, install_whisper=("tiny", "base"),
+        )
+        try:
+            asr = form.cards()[0]
+            assert "还没选模型" in asr.status_main.text(), asr.status_main.text()
+            assert "已经装了 2 个" in asr.status_detail.text()
+        finally:
+            dialog.close()
+
+    def test_cloud_that_cannot_run_is_reported_not_hidden(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """选了云端但档案没测通：照写配置，并把差哪一项说清楚。
+
+        这条是这个窗口能安全存在的前提——它替用户做"选云端"的动作，但**不**替
+        用户授权外发；没测通就说没测通，而不是默默按旧的走。
+        """
+        from app.core.app_config import AppConfig
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-b": ["m2"]},
+            install_llm=("2B", "Q4_K_M"), llm_model_key="llm:2B:Q4_K_M",
+        )
+        try:
+            judge = form.cards()[1]
+            self._pick(judge, "cloud", "m2", "my-b")
+            qapp.processEvents()
+
+            saved = AppConfig.load(config_file)
+            assert saved.backend_for("judge") == "my-b", "选择被记下来了"
+            assert saved.profiles().get("my-b").judge_model == "m2"
+            assert "会退回本地" in judge.status_main.text()
+            assert "尚未生效" in judge.status_detail.text()
+            assert judge.btn_fix.text() == "去配置"
+        finally:
+            dialog.close()
+
+    def test_working_cloud_is_reported_as_current(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-a": ["my-chat", "my-reasoner"]},
+            backend_prefs={"judge": "my-a", "asr": "local"},
+        )
+        try:
+            judge = form.cards()[1]
+            assert "正在使用 云端 甲厂 的 my-chat" in judge.status_main.text()
+            assert judge.badge.text() == "云端"
+        finally:
+            dialog.close()
+
+    # ---- 跳转 ----------------------------------------------------------
+
+    def test_fix_buttons_route_to_the_right_window(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """「去配置」跳厂商页签、「去下载」跳本地模型页，都由主窗口接。"""
+        dialog, form, _cfg, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers(), {"my-b": ["m2"]},
+            backend_prefs={"judge": "my-b", "asr": "local"},
+        )
+        opened: list[bool] = []
+
+        def fake_build(**kwargs):
+            opened.append(kwargs.get("providers_tab") is True)
+            return _StubDialog()
+
+        # 必须走 monkeypatch：``window`` 是会话级夹具，直接赋值不会被还原，
+        # 这个替身会漏给后面所有用例（症状是它们拿到一个只会 exec 的假对话框）。
+        monkeypatch.setattr(window, "build_model_dialog", fake_build)
+        try:
+            form.cards()[1].btn_fix.click()          # 去配置
+            qapp.processEvents()
+            assert opened == [True], "应带着 providers_tab=True 打开模型管理"
+
+            opened.clear()
+            form.asr.btn_fix.click()                  # 去下载
+            qapp.processEvents()
+            assert opened == [False], "下载走本地模型页签，不带 providers_tab"
+        finally:
+            dialog.close()
+
+
+class _StubDialog:
+    def exec(self):  # noqa: D102 - 测试替身
+        return 0
+
+    def close(self):  # noqa: D102
+        pass
+
+
+class TestModelInfoPanel:
+    """模型参数面板：上下文窗口 / 思考等级 / 模态，含「自动填充」。"""
+
+    @pytest.fixture
+    def provider_form(self, window, qapp, tmp_path):
+        """与 ``TestProviderDialog`` 同一份夹具：厂商页签的表单 + 临时配置。
+
+        夹具是类内定义的（不污染别的测试类），所以这里复刻一份而不是提到模块级。
+        """
+        from app.core.app_config import AppConfig
+
+        config_file = tmp_path / "config.json"
+        AppConfig().save(config_file)
+        dialog = window.build_model_dialog(config_path=config_file, providers_tab=True)
+        dialog.show()
+        qapp.processEvents()
+        yield dialog.providers, config_file
+        dialog.close()
+
+    @staticmethod
+    def _setup(form, provider_id, model):
+        """选中一家厂商、选中一个模型（不联网：清单直接手填进去）。"""
+        from PySide6.QtCore import Qt
+
+        form.select_profile(provider_id)
+        form.model_table.added.emit(model)
+        form.model_table.list.set_filter("")
+        rows = form.model_table.list.list
+        for index in range(rows.count()):
+            if rows.item(index).data(Qt.ItemDataRole.UserRole) == model:
+                rows.setCurrentRow(index)
+                break
+        else:  # pragma: no cover - 列表里没有就是夹具坏了
+            raise AssertionError(f"模型 {model} 没进列表")
+        assert form.model_table.list.selected() == model
+        return model
+
+    def test_panel_follows_the_selected_model(self, provider_form):
+        form, _ = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        assert "gpt-4o" in form.info_title.text()
+        assert form.info_context.value() == 0, "没配过就是未知"
+        assert form.info_reasoning.currentData() == ""
+        assert not any(box.isChecked() for box in form.info_modalities.values())
+        assert "不截断" in form.info_note.text()
+
+    def test_autofill_fills_what_it_is_sure_about(self, provider_form):
+        form, _ = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.btn_autofill.click()
+        assert form.info_context.value() == 128_000
+        assert form.info_modalities["image"].isChecked()
+        assert form.info_reasoning.currentData() == "", "普通对话模型不该被塞思考等级"
+        assert "自动推断" in form.info_note.text()
+
+    def test_autofill_leaves_unknown_models_blank(self, provider_form):
+        """认不出的**不猜**：猜错窗口会静默截掉台词证据。"""
+        form, _ = provider_form
+        self._setup(form, "deepseek", "厂商内部模型-x9")
+        form.btn_autofill.click()
+        assert form.info_context.value() == 0
+        assert form.info_reasoning.currentData() == ""
+
+    def test_autofill_does_not_overwrite_manual_values(self, provider_form):
+        form, _ = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.info_context.setValue(1_000_000)          # 用户手填
+        form.btn_autofill.click()
+        assert form.info_context.value() == 1_000_000, "手填的优先于知识库"
+        assert form.info_modalities["image"].isChecked(), "没填过的照常补上"
+
+    def test_edits_persist_through_save(self, provider_form):
+        form, config_file = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.info_context.setValue(200_000)
+        form.info_reasoning.setCurrentIndex(form.info_reasoning.findData("high"))
+        form.info_modalities["image"].setChecked(True)
+        form._on_save()
+
+        from app.core.app_config import AppConfig
+
+        saved = AppConfig.load(config_file)
+        info = saved.profiles().get("deepseek").info_for("gpt-4o")
+        assert info.context_window == 200_000
+        assert info.reasoning == "high"
+        assert "image" in info.modalities
+        assert info.source == "manual"
+
+    def test_empty_entries_are_not_written(self, provider_form):
+        """三个字段全空 = 用户什么都没配，不该在配置里留一条空记录。"""
+        form, config_file = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.info_context.setValue(64_000)
+        form.info_context.setValue(0)
+        form._on_save()
+
+        from app.core.app_config import AppConfig
+
+        saved = AppConfig.load(config_file)
+        assert saved.profiles().get("deepseek").model_info == ()
+
+    def test_clear_button_resets_one_model(self, provider_form):
+        form, _ = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.btn_autofill.click()
+        assert form.info_context.value() == 128_000
+        form.btn_clear_info.click()
+        assert form.info_context.value() == 0
+        assert not any(box.isChecked() for box in form.info_modalities.values())
+        assert form._info_of("gpt-4o").is_empty()
+
+    def test_table_row_shows_the_parameters(self, provider_form):
+        form, _ = provider_form
+        self._setup(form, "deepseek", "gpt-4o")
+        form.btn_autofill.click()
+        form.info_reasoning.setCurrentIndex(form.info_reasoning.findData("low"))
+        tag = form._meta_tag("gpt-4o")
+        assert "128k" in tag and "思考·low" in tag and "图像" in tag
+
+    def test_modality_conflict_is_reported_on_assignment(self, provider_form):
+        """把纯文本模型指给转写时要说清，而不是等到分析时报 400。"""
+        form, _ = provider_form
+        self._setup(form, "deepseek", "deepseek-chat")      # 纯文本模型
+        form.btn_autofill.click()
+        form.info_modalities["audio"].setChecked(False)      # 明确只留文本
+        form.model_table.assigned.emit("deepseek-chat", "asr")
+        assert "没有音频" in form.hint_label.text()
+        assert "不能做转写" in form.hint_label.text()
+
+
+class TestAnalysisProgressDisplay:
+    """分析进度：每个阶段一条自己的进度条 + 一条总进度。
+
+    回归：原先中栏只有一条进度条，且只有语音转写会上报进度——别的阶段它停在
+    上一阶段的数值不动（转写被跳过时停在 0%），看起来像"没有进度"。
+    """
+
+    def test_each_stage_has_its_own_bar_and_total_tracks_it(self, window):
+        pane = window.workbench.analysis_pane
+        rows = pane.stage_rows
+        pane._reset_progress()
+        assert len(rows) == len(pane.STAGES) == 6
+
+        pane._on_stage("语音转写")          # 第 2/6 个阶段
+        assert rows[0].bar.value() == 100 and rows[0].status.text() == "已完成"
+        assert rows[1].bar.maximum() == 0, "没有细粒度进度的阶段先显示流动动画"
+        assert pane.total.value() == round(1 / 6 * 100)
+
+        pane._on_progress("转写第 1/2 段", 0.5)
+        assert rows[1].bar.value() == 50, "当前阶段进度条显示自己的比例"
+        assert pane.total.value() == round(1.5 / 6 * 100), (
+            "总进度 =（已完成阶段数 + 当前阶段比例）/ 阶段总数"
+        )
+
+        pane._on_stage("镜头与黑场")
+        assert rows[1].bar.value() == 100, "进入下一阶段时上一阶段应填满"
+        assert rows[2].bar.maximum() == 0, "新阶段重新从流动动画开始"
+        assert pane.total.value() == round(2 / 6 * 100)
+
+    def test_total_progress_mirrors_to_bottom_bar(self, window):
+        pane = window.workbench.analysis_pane
+        pane._reset_progress()
+
+        pane._on_stage("候选点")            # 第 4/6 个阶段，前面 3 个已完成
+        assert window.bottom.progress.value() == round(3 / 6 * 100), (
+            "底栏小进度条镜像的是总进度"
+        )

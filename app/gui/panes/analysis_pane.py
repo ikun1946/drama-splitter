@@ -1,17 +1,25 @@
-"""中栏「分析」pane：当前阶段、进度、最近一条输出。
+"""中栏「分析」pane：阶段清单、每阶段进度、总进度与最近一条输出。
 
 分析日志只有一个落点在右栏检查器的「日志」页签（``log_appended`` 广播出去，
-由工作台接进去）。原先这里还有一份 LogPanel 与七段步骤条，日志两处显示、
-进度也重复——那是"复杂"的主要来源之一。
+由工作台接进去）。
 
-阶段用「阶段 n/7 · 名称」表达即可，不必再画一条 stepper：中栏同一时刻只有
-一件事在发生，进度条已经把"还剩多少"说清楚了。
+进度分两层（取代原先"只有一条进度条"的画法）：
+
+- 每个阶段一条自己的进度条。阶段没有上报细粒度数据时显示**流动动画**
+  （Qt 的 busy 模式），而不是停在 0%——"正在做、剩余时间未知"是诚实的表达；
+- 下方一条总进度，等于 (已完成阶段数 + 当前阶段比例) / 阶段总数，底栏那条
+  小进度条镜像的就是它。
+
+清单里只有分析线程真正会跑的六个阶段：导出不在本页发生（导出对话框里另有
+自己的进度）。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
     QLabel,
     QProgressBar,
     QVBoxLayout,
@@ -32,6 +40,52 @@ from ._common import register_worker
 __all__ = ["AnalysisPane"]
 
 
+class _StageRow:
+    """阶段清单里的一行：名称 / 本阶段进度条 / 状态文字。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.label = QLabel(name)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedWidth(200)
+        self.status = QLabel("等待")
+        self.status.setProperty("role", "muted")
+        self.status.setMinimumWidth(52)
+
+    def mark_pending(self) -> None:
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.status.setText("等待")
+
+    def mark_running(self) -> None:
+        # busy 模式：数值范围 0–0，进度条自己来回流动
+        self.bar.setRange(0, 0)
+        self.status.setText("进行中")
+
+    def mark_progress(self, ratio: float) -> None:
+        if self.bar.maximum() == 0:      # 首次拿到具体比例，从流动切到确定模式
+            self.bar.setRange(0, 100)
+        value = int(round(max(0.0, min(1.0, ratio)) * 100))
+        self.bar.setValue(value)
+        self.status.setText(f"{value}%")
+
+    def mark_done(self) -> None:
+        self.bar.setRange(0, 100)
+        self.bar.setValue(100)
+        self.status.setText("已完成")
+
+    def mark_failed(self) -> None:
+        self.bar.setRange(0, 100)        # 停在失败时的数值，不再假装在跑
+        self.status.setText("失败")
+
+    def mark_cancelled(self) -> None:
+        self.bar.setRange(0, 100)
+        self.status.setText("已取消")
+
+
 class AnalysisPane(QWidget):
     STAGES = [
         "字幕解析",
@@ -40,13 +94,12 @@ class AnalysisPane(QWidget):
         "候选点",
         "整体规划",
         "边界审核",
-        "导出",
     ]
 
     started = Signal()
     stage_changed = Signal(str)
-    progress_changed = Signal(str, float)
-    log_appended = Signal(str, str)      # (文本, 级别)
+    progress_changed = Signal(str, float)   # (最近输出, 总进度 0-1)
+    log_appended = Signal(str, str)         # (文本, 级别)
     finished = Signal()
 
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
@@ -56,15 +109,43 @@ class AnalysisPane(QWidget):
         # 「已请求开始」标记：start() 里发出 started 时线程还没真正跑起来
         # （worker.start() 在其后一行），只看 isRunning() 会让界面停在上一阶段。
         self._active = False
+        # 当前阶段序号与它自己的比例：总进度据此折算
+        self._current = -1
+        self._stage_ratio = 0.0
 
         self.stage_label = QLabel("等待开始")
         self.stage_label.setProperty("role", "title")
         self.stage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setFormat("%p%")
-        self.progress.setMinimumWidth(240)
+        self.stage_rows = [_StageRow(name) for name in self.STAGES]
+
+        table = QGridLayout()
+        table.setHorizontalSpacing(12)
+        table.setVerticalSpacing(6)
+        for row, stage_row in enumerate(self.stage_rows):
+            table.addWidget(stage_row.label, row, 0)
+            table.addWidget(stage_row.bar, row, 1)
+            table.addWidget(stage_row.status, row, 2)
+        table_host = QWidget(self)
+        table_host.setLayout(table)
+
+        table_line = QHBoxLayout()
+        table_line.addStretch(1)
+        table_line.addWidget(table_host)
+        table_line.addStretch(1)
+
+        self.total_label = QLabel("总进度")
+        self.total_label.setProperty("role", "muted")
+        self.total = QProgressBar()
+        self.total.setRange(0, 100)
+        self.total.setFormat("%p%")
+        self.total.setMinimumWidth(240)
+
+        total_line = QHBoxLayout()
+        total_line.addStretch(1)
+        total_line.addWidget(self.total_label)
+        total_line.addWidget(self.total)
+        total_line.addStretch(1)
 
         self.recent = QLabel("分析会依次完成字幕解析、语音转写、镜头检测、候选点、"
                              "整体规划与整集复核。")
@@ -74,10 +155,11 @@ class AnalysisPane(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
-        outer.setSpacing(14)
+        outer.setSpacing(12)
         outer.addStretch(1)
         outer.addWidget(self.stage_label)
-        outer.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addLayout(table_line)
+        outer.addLayout(total_line)
         outer.addWidget(self.recent)
         outer.addStretch(2)
 
@@ -96,7 +178,7 @@ class AnalysisPane(QWidget):
             message.warning(self, "缺少 FFmpeg", "尚未定位到 FFmpeg。")
             return
 
-        self.progress.setValue(0)
+        self._reset_progress()
         self.stage_label.setText("准备中…")
 
         self.worker = AnalysisWorker(
@@ -116,6 +198,13 @@ class AnalysisPane(QWidget):
         self.started.emit()
         self.worker.start()
 
+    def _reset_progress(self) -> None:
+        self._current = -1
+        self._stage_ratio = 0.0
+        for row in self.stage_rows:
+            row.mark_pending()
+        self.total.setValue(0)
+
     def is_active(self) -> bool:
         """分析是否正在进行（含"已请求开始、线程尚未起来"这一瞬间）。"""
         if not self._active:
@@ -127,23 +216,47 @@ class AnalysisPane(QWidget):
             self.worker.cancel()
             self.worker.wait(3000)
         self._active = False
+        if 0 <= self._current < len(self.stage_rows):
+            self.stage_rows[self._current].mark_cancelled()
         self._append("已取消。", "warn")
-        self.progress.setValue(0)
         self.stage_label.setText("已取消")
         self.finished.emit()
 
     # ---- 进度回调 ------------------------------------------------------
 
     def _on_stage(self, name: str) -> None:
-        index = self.STAGES.index(name) if name in self.STAGES else 0
-        self.stage_label.setText(f"阶段 {index + 1}/{len(self.STAGES)} · {name}")
+        index = self.STAGES.index(name) if name in self.STAGES else -1
+        if index >= 0:
+            for row in self.stage_rows[:index]:
+                row.mark_done()
+            for row in self.stage_rows[index + 1:]:
+                row.mark_pending()
+            self.stage_rows[index].mark_running()
+            self._current = index
+            self._stage_ratio = 0.0
+            self.stage_label.setText(f"阶段 {index + 1}/{len(self.STAGES)} · {name}")
+        else:
+            self.stage_label.setText(name)
+        self._sync_total()
         self._append(f"—— {name} ——")
         self.stage_changed.emit(name)
 
     def _on_progress(self, text: str, ratio: float) -> None:
-        self.progress.setValue(int(ratio * 100))
+        ratio = max(0.0, min(1.0, ratio))
+        if 0 <= self._current < len(self.stage_rows):
+            self.stage_rows[self._current].mark_progress(ratio)
+            self._stage_ratio = ratio
         self.recent.setText(text)
-        self.progress_changed.emit(text, ratio)
+        self._sync_total()
+
+    def _sync_total(self) -> None:
+        if self._current < 0:
+            ratio = 0.0
+        else:
+            ratio = (self._current + self._stage_ratio) / len(self.STAGES)
+        ratio = max(0.0, min(1.0, ratio))
+        self.total.setValue(int(round(ratio * 100)))
+        self.progress_changed.emit(self.recent.text(), ratio)
 
     def _on_done(
         self, plan: BoundaryPlan, report, problems, candidates, reviews=None
@@ -156,10 +269,27 @@ class AnalysisPane(QWidget):
             self.state.transcript = worker.transcript
             self._append("转写已保留，导出时将一并生成单集 SRT 字幕。")
 
-        self.progress.setValue(100)
+        for row in self.stage_rows:
+            row.mark_done()
+        self._current = len(self.STAGES) - 1
+        self._stage_ratio = 1.0
+        self.total.setValue(100)
         self.stage_label.setText("分析完成")
         self._active = False
-        self.recent.setText(f"方案 v{plan.version}：{plan.episode_count} 集，见左侧集列表。")
+
+        # 模式C：把自动判定结论提到方案摘要**最前面**。用户最想知道的一句是
+        # "为什么是这么多集、每集多长"，而在日志里它要滚到一半才看得到。
+        decision = getattr(worker, "timing_decision", None) if worker else None
+        if decision is not None and decision.chosen is not None:
+            summary = (
+                f"推荐方案：每集 {float(decision.chosen.target_duration):.1f} 秒 · "
+                f"共 {decision.chosen.episode_count} 集 · {decision.chosen.label}"
+            )
+            self.recent.setText(summary)
+            self._append(f"★ {summary}")
+            self._append(f"  依据：{decision.beat.describe()}")
+        else:
+            self.recent.setText(f"方案 v{plan.version}：{plan.episode_count} 集，见左侧集列表。")
 
         self._append(f"候选点：{candidates.describe()}")
         for note in candidates.limitations:
@@ -203,8 +333,13 @@ class AnalysisPane(QWidget):
         self.finished.emit()
 
     def _on_failed(self, text: str) -> None:
+        worker = self.sender() or self.worker
+        if getattr(worker, "state", "") == "cancelled":
+            # 取消不是失败：不弹警告框、不触发「应用建议」，阶段状态由 cancel() 收尾
+            return
         self._append(f"失败：{text}", "error")
-        self.progress.setValue(0)
+        if 0 <= self._current < len(self.stage_rows):
+            self.stage_rows[self._current].mark_failed()
         self.stage_label.setText("分析失败")
         self._active = False
         self.recent.setText(text)

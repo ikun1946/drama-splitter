@@ -29,11 +29,12 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from ..core.app_config import AppConfig
+from ..core.app_config import AppConfig, app_dir
 from ..core.export import ExportBatchResult, ExportPreset, Exporter
 from ..core.ffmpeg import check_encoders
 from ..core.model_manager import default_whisper_tier, installed_llm_file, spec_by_key
@@ -53,7 +54,6 @@ __all__ = [
     "ModelDownloadWorker",
     "JudgeProbeWorker",
     "ModelListWorker",
-    "ModelScanWorker",
 ]
 
 
@@ -172,6 +172,15 @@ class PlanWorker(BaseWorker):
         self.completed.emit(plan, report, problems)
 
 
+def default_cache_dir() -> Path:
+    """分析缓存的默认落点：exe（或项目根）旁边的 `cache/`。
+
+    刻意不用 `Path(__file__)` 推导——打包后源码位于 `_internal/`，
+    装进 Program Files 时那里是只读的，写缓存会直接 PermissionError。
+    """
+    return app_dir() / "cache"
+
+
 def active_whisper_tier(config: AppConfig | None = None) -> str:
     """本地转写要用的档位：配置里"使用中"的档位，未配置则用默认档位。
 
@@ -231,6 +240,8 @@ class AnalysisWorker(BaseWorker):
         self.subtitle_tracks: list = []
         # 求解失败时的图诊断：界面据此给出「应用建议」（§10.4 的可操作化）
         self.failure_diagnostics: GraphDiagnostics | None = None
+        #: 模式C 的自动判定结果（TimingDecision）；其他模式为 None，供界面展示
+        self.timing_decision = None
 
     # ---- 各阶段 --------------------------------------------------------
 
@@ -248,8 +259,8 @@ class AnalysisWorker(BaseWorker):
         from app.core.shots import detect_all
         from app.core.candidates import build_candidate_set
 
-        project_root = Path(__file__).resolve().parent.parent.parent
-        cache_dir = self._cache_dir or (project_root / "cache")
+        # 缓存默认写在 exe 旁边而不是 `_internal/`（那里装进 Program Files 后只读）
+        cache_dir = self._cache_dir or default_cache_dir()
         store = CacheStore(cache_dir)
         fingerprint = SourceFingerprint.of(self._media.path)
         ffmpeg = str(self._binaries.ffmpeg)
@@ -336,6 +347,8 @@ class AnalysisWorker(BaseWorker):
         self.stage_started.emit("镜头与黑场")
         shots = detect_all(
             self._media.path, ffmpeg, cache=store, fingerprint=fingerprint,
+            duration_seconds=float(self._media.timeline_duration),
+            on_progress=lambda ratio, text: self.stage_progress.emit(text, ratio),
         )
         self.stage_log.emit(shots.describe())
 
@@ -386,8 +399,13 @@ class AnalysisWorker(BaseWorker):
                 "候选保持规则评分，审核状态保持 pending（§ 降级路径）。"
             )
         strategy = self._settings.strategy.value
+        # 语义判断是「整体规划」里唯一的长耗时子步骤（云端后端一次请求数秒），
+        # 因此把它的比例映射到本阶段 5%–85%，求解前再报到 90%（求解本身很快）。
         outcome = judge_candidates(
-            candidates, index, judge, strategy=strategy, budget_requests=24
+            candidates, index, judge, strategy=strategy, budget_requests=24,
+            on_progress=lambda done, total: self.stage_progress.emit(
+                f"语义判断 {done}/{total}", 0.05 + 0.8 * done / max(1, total)
+            ),
         )
         self.stage_log.emit(outcome.describe())
         for note in outcome.notes:
@@ -398,7 +416,14 @@ class AnalysisWorker(BaseWorker):
             return plan_rule_based(self._media, self._settings)[0]
 
         report = check_feasibility(self._settings, self._media.timeline_duration)
-        if not candidates.is_empty and not report.blocking and report.derived is not None:
+        # 模式C（推荐方案）走 ``auto_pending``：目标时长还没有，要等自动判定
+        # 定下集数后才有派生参数。把它排除在外会直接掉进规则等分兜底，
+        # 等于推荐方案从来没生效过。
+        recommend = self._settings.split_mode == SplitMode.RECOMMEND
+        usable = not candidates.is_empty and not report.blocking and (
+            report.derived is not None or (recommend and report.auto_pending)
+        )
+        if usable:
             exact = (
                 self._settings.split_mode == SplitMode.TARGET_EPISODE_COUNT
                 and self._settings.count_policy == CountPolicy.EXACT
@@ -411,12 +436,13 @@ class AnalysisWorker(BaseWorker):
                 )
                 for point in candidates.points
             }
+            self.stage_progress.emit("边界求解", 0.9)
             try:
-                if self._settings.split_mode == SplitMode.RECOMMEND:
-                    # 「推荐方案」：同一份候选、同一套约束下把三种策略各解一遍，
-                    # 取总代价最低者当方案，落选者也写进日志（§20.3 的延伸）。
+                if recommend:
+                    # 「推荐方案」：先按内容粒度自动判定集数与时长，再在选定
+                    # 集数下比较三种策略；落选者全部写进日志（§20.3 的延伸）。
                     plan, solution, problems, notes = self._solve_recommended(
-                        candidates, report, exact, ends_question
+                        candidates, ends_question
                     )
                     if plan is None:
                         return          # 已在 _solve_recommended 里报错
@@ -459,6 +485,7 @@ class AnalysisWorker(BaseWorker):
                 first = report.issues[0] if report.issues else None
                 reason = f"参数无解（{first.message if first else '未知'}），跳过动态规划。"
             self.stage_log.emit(reason)
+            self.stage_progress.emit("规则等分兜底", 0.9)
             try:
                 plan, report, problems = plan_rule_based(self._media, self._settings)
             except PlanningError as exc:
@@ -467,9 +494,13 @@ class AnalysisWorker(BaseWorker):
         # ---- 整集复核（阶段4）--------------------------------------
         from app.core.review import review_plan
 
+        self.stage_started.emit("边界审核")
         reviews = review_plan(
             plan, self._media, index,
             transcript=transcript, blacks=shots.blacks,
+            on_progress=lambda done, total: self.stage_progress.emit(
+                f"整集复核 {done}/{total}", done / max(1, total)
+            ),
         )
         grade_labels = {"pass": "通过", "warn": "留意", "block": "阻断"}
         for review in reviews:
@@ -480,48 +511,72 @@ class AnalysisWorker(BaseWorker):
 
         self.completed.emit(plan, report, problems, candidates, reviews)
 
-    def _solve_recommended(self, candidates, report, exact: bool, ends_question):
-        """「推荐方案」（模式C）：三策略各解一遍，取代价最低者当方案。
+    def _solve_recommended(self, candidates, ends_question):
+        """「推荐方案」（模式C）：自动判定集长与集数，再在该集数下比较三种策略。
 
-        与手选策略的区别只在这里：手选是"你说了算"，推荐是"同一代价函数下
-        数值最优的那个说了算"，且**落选者不隐藏**（各自代价与集数一并写进
-        日志，用户能看出差在哪）。全部无解时返回 None 并已 fail（§4.2）。
+        两段式是刻意的：**搜索阶段只出 ``GraphSolution``**，不重建方案
+        （``BoundaryPlan`` 的转换是最贵的一步，而它只需要做一次）；
+        胜出者才走一次既有的求解入口拿正式方案。
+
+        落选者不隐藏：节拍锚点、比较过的每个 (集数, 策略) 及其分数一并写进日志，
+        用户能看出"为什么是这一集数"。全部无解时返回 None 并已 fail（§4.2）。
         """
-        from app.core.recommend import recommend_plan
+        from app.core.auto_timing import auto_decide_timing
+        from app.core.settings import DerivedParams
+        from app.core.solver import solve_from_candidates
 
-        result = recommend_plan(
+        decision = auto_decide_timing(
             candidates,
             self._media,
-            report.derived,
-            settings_count_exact=exact,
-            target_episode_count=self._settings.target_episode_count
-            or report.allowed_min,
-            allowed_min=report.allowed_min,
-            allowed_max=report.allowed_max,
+            self._settings,
+            self._media.timeline_duration,
             ends_with_question=ends_question,
         )
-        for line in result.describe().splitlines():
+        self.timing_decision = decision
+        for line in decision.describe().splitlines():
             self.stage_log.emit(line)
 
-        chosen = result.chosen
+        chosen = decision.chosen
         if chosen is None:
-            causes = [c.problems[0].message for c in result.comparisons if c.problems]
-            # 三个策略都无解：取第一份带建议的诊断，供界面上的「应用建议」按钮用
-            self.failure_diagnostics = next(
-                (
-                    c.solution.diagnostics
-                    for c in result.comparisons
-                    if c.solution is not None and c.solution.diagnostics.advice
-                ),
-                None,
-            )
+            self.failure_diagnostics = decision.diagnostics
             self.fail(
-                "三种策略都没有可行解。\n"
-                + (causes[0] if causes else "请放宽集长范围后重试。")
+                "推荐方案自动判定失败："
+                + (decision.notes[0] if decision.notes else "没有任何集数可行。")
             )
             return None, None, None, None
-        notes = list(chosen.notes) + list(result.notes) + [f"采用推荐策略：{chosen.label}"]
-        return chosen.plan, chosen.solution, chosen.problems, notes
+
+        # 判定结果回填到设置：随项目快照保存，重开项目仍能看到当时判成了什么。
+        # 单独存在 decided_* 里而不是写回 target_duration_seconds——用户当初
+        # 并没填过那个值，写回去会让下次打开设置时误以为可以照着改。
+        self._settings.decided_episode_count = chosen.episode_count
+        self._settings.decided_target_seconds = chosen.target_duration
+        self._settings.decided_strategy = chosen.strategy
+        self._settings.decided_beat_seconds = decision.beat.anchor_duration
+
+        derived = DerivedParams(
+            target_duration=chosen.target_duration,
+            min_duration=max(
+                Fraction(1), chosen.target_duration * Fraction(1, 2)
+            ),
+            max_duration=chosen.target_duration * Fraction(3, 2),
+            total_seconds=self._media.timeline_duration,
+        )
+        plan, solution, problems, notes = solve_from_candidates(
+            candidates,
+            self._media,
+            derived,
+            settings_count_exact=True,
+            target_episode_count=chosen.episode_count,
+            allowed_min=chosen.episode_count,
+            allowed_max=chosen.episode_count,
+            strategy=chosen.strategy,
+            ends_with_question=ends_question,
+        )
+        notes = list(notes) + [
+            f"采用推荐：{chosen.episode_count} 集 × {float(chosen.target_duration):.1f}s"
+            f"（{chosen.label}）"
+        ]
+        return plan, solution, problems, notes
 
 
 class ExportWorker(BaseWorker):
@@ -692,40 +747,3 @@ class ModelListWorker(BaseWorker):
             self.fail(str(exc))
             return
         self.listed.emit(models)
-
-
-class ModelScanWorker(BaseWorker):
-    """顺序探测**多家**厂商的模型清单（供「选择云端模型」）。
-
-    与 :class:`ModelListWorker` 的区别：那个是"把这一家的清单填进表单"，这个是
-    "先筛出哪几家能用"。因此边探测边汇报——第一家通了界面立刻就能显示，不必等
-    全部扫完；某一家超时也不会拖住其余各家（每家的超时由 `list_models` 自己兜）。
-
-    **只探测能出清单的协议**：调用方先按协议与 Key 过滤好（火山转写的专有协议
-    没有清单接口），被传进来的每一家都应当是可拉 /models 的；万一仍然失败，
-    原因如实经 ``unresolved`` 汇报，界面据此说明这家为什么不在列表里。
-    """
-
-    probed = Signal(str, object)    # profile_id, list[str]
-    unresolved = Signal(str, str)   # profile_id, 不可用原因
-
-    def __init__(self, profiles, parent=None) -> None:
-        super().__init__(parent)
-        self._profiles = list(profiles)
-
-    def work(self) -> None:  # noqa: D102
-        from app.core.cloud import list_models
-
-        for profile in self._profiles:
-            if self.cancelled:
-                self.finish_cancelled()
-                return
-            try:
-                models = list_models(profile)
-            except ProviderError as exc:
-                self.unresolved.emit(profile.id, exc.describe())
-                continue
-            except Exception as exc:  # noqa: BLE001 - 任何异常都算"这家不通"
-                self.unresolved.emit(profile.id, str(exc))
-                continue
-            self.probed.emit(profile.id, models)
