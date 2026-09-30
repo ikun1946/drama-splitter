@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型设置 · 改版原型</title>
+<style>
+  /* 取自 app/gui/theme.py 的 light 令牌与字体栈 —— 原型必须与真界面同源，
+     否则评审时看到的是一张"设计稿"，不是这个产品的界面。 */
+  :root{
+    --primary:#3b6cb8; --primary-hover:#4a7bc6; --primary-pressed:#2f5aa0; --primary-soft:#e8f0fc;
+    --danger:#b3261e; --danger-soft:#fbe6e4;
+    --warn:#9a6700; --warn-soft:#fbf2dd;
+    --success:#2e7d32; --success-soft:#e7f4ea;
+    --bg:#f5f6fa; --bg-alt:#ffffff; --bg-hover:#eef1f7; --bg-selected:#e8f0fc; --bg-log:#fafbfd;
+    --border:#d9dce4; --border-strong:#b8bdc8;
+    --text:#20232a; --text-muted:#5f6368; --text-disabled:#a0a3ac; --text-inverse:#fff;
+    --r-sm:4px; --r-md:8px; --r-lg:12px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Segoe UI','Microsoft YaHei UI','PingFang SC',sans-serif;
+    background:var(--bg); color:var(--text);
+    font-size:14px; line-height:1.55;
+    padding:40px 24px 72px;
+  }
+  .wrap{max-width:980px;margin:0 auto}
+
+  h1{font-size:26px;font-weight:600;letter-spacing:-.01em}
+  .sub{color:var(--text-muted);margin-top:8px;font-size:14px}
+
+  h2{font-size:17px;font-weight:600;margin:44px 0 4px;display:flex;align-items:center;gap:9px}
+  h2 svg{flex:none}
+  .h2note{color:var(--text-muted);font-size:13px;margin-bottom:18px}
+
+  /* ---- 对话框外观：还原 880x720 的真实窗口 ---- */
+  .dlg{
+    width:100%;max-width:880px;background:var(--bg-alt);
+    border:1px solid var(--border);border-radius:var(--r-lg);
+    box-shadow:0 4px 16px -2px rgba(0,0,0,.06),0 2px 8px rgba(0,0,0,.04);
+    overflow:hidden;margin:0 auto;
+  }
+  .dlg-title{
+    display:flex;align-items:center;gap:8px;
+    padding:11px 16px;border-bottom:1px solid var(--border);
+    font-weight:600;font-size:14px;background:var(--bg-alt);
+  }
+  .dlg-title .sp{flex:1}
+  .dlg-title .x{color:var(--text-muted);font-size:16px;line-height:1}
+  .dlg-body{padding:20px 16px;background:var(--bg-alt);display:flex;flex-direction:column;gap:14px}
+  .dlg-foot{
+    border-top:1px solid var(--border);background:var(--bg-log);
+    padding:10px 16px;display:flex;align-items:center;gap:10px;
+    font-size:11px;color:var(--text-muted);
+  }
+  .dlg-foot .sp{flex:1}
+
+  /* ---- 一条能力 ---- */
+  .cap{border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-alt);overflow:hidden}
+  .cap-head{
+    display:flex;align-items:center;gap:10px;
+    padding:10px 14px 0;
+  }
+  .cap-name{font-weight:600;font-size:14px}
+  /* 后端不再是一整行两个大按钮，而是标题右侧的一枚静态徽章：
+     选了哪个模型，后端本来就是它自带的属性，没��再点一次去"切换"。 */
+  .badge{
+    font-size:11px;padding:2px 9px;border-radius:999px;
+    background:var(--primary-soft);color:var(--primary-pressed);font-weight:500;
+  }
+  .badge.warn{background:var(--warn-soft);color:var(--warn)}
+  .cap-hint{font-size:11px;color:var(--text-muted);flex:1;text-align:right}
+
+  .field{display:flex;align-items:center;gap:12px;padding:10px 14px 0}
+  .field>label{width:44px;flex:none;font-size:12px;color:var(--text-muted)}
+
+  /* 下拉本体：唯一需要动手的控件 */
+  .combo{
+    flex:1;display:flex;align-items:center;gap:10px;
+    height:34px;padding:0 12px;
+    border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-alt);
+    font-size:13px;
+  }
+  .combo.focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(59,108,184,.14)}
+  .combo .txt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .combo .txt.empty{color:var(--text-disabled)}
+  .combo .caret{color:var(--text-muted);flex:none}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:none}
+
+  /* 状态：拆成"结论一行 + 动作一行"，不再是一句 90 字的流水账 */
+  .status{padding:9px 14px 12px 70px;display:flex;flex-direction:column;gap:5px}
+  .st{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.5}
+  .st svg{flex:none;margin-top:2px}
+  .st.ok{color:var(--success)}
+  .st.warn{color:var(--warn)}
+  .st.muted{color:var(--text-muted)}
+  .st b{font-weight:600}
+  .act{
+    font:inherit;font-size:12px;color:var(--primary);background:none;border:none;
+    padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:2px;
+  }
+  .act:hover{color:var(--primary-hover)}
+
+  /* ---- 下拉展开态 ---- */
+  .pop{
+    margin:0 14px 0 70px;background:var(--bg-alt);
+    border:1px solid var(--border-strong);border-radius:var(--r-md);
+    box-shadow:0 8px 24px rgba(0,0,0,.13);overflow:hidden;position:relative;
+  }
+  .pop-sep{
+    display:flex;align-items:center;gap:10px;
+    padding:7px 12px 5px;font-size:11px;font-weight:600;letter-spacing:.06em;
+    color:var(--text-muted);text-transform:none;
+  }
+  .pop-sep::after{content:"";flex:1;height:1px;background:var(--border)}
+  .pop-sep.vendor{
+    font-weight:500;letter-spacing:0;text-transform:none;color:var(--text);
+    padding:9px 12px 3px;font-size:12px;
+  }
+  .pop-sep.vendor .tag{font-size:10px;color:var(--success);font-weight:500;margin-left:6px}
+  .opt{
+    display:flex;align-items:center;gap:8px;
+    padding:7px 12px;font-size:13px;cursor:default;
+  }
+  .opt.ind{padding-left:24px;color:var(--text-muted);font-size:12.5px}
+  .opt.sel{background:var(--bg-selected);color:var(--primary-pressed)}
+  .opt .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .opt .sz{font-size:11px;color:var(--text-disabled);flex:none}
+  .pop-note{
+    padding:8px 12px;border-top:1px solid var(--border);background:var(--bg-log);
+    font-size:12px;color:var(--text-muted);
+  }
+
+  /* ---- 底部按钮 ---- */
+  .btn{
+    font:inherit;font-size:12px;padding:6px 14px;border-radius:var(--r-sm);
+    border:1px solid var(--border);background:var(--bg-alt);color:var(--text);cursor:pointer;
+    white-space:nowrap;
+  }
+  .btn:hover{background:var(--bg-hover);border-color:var(--border-strong)}
+  .btn.primary{background:var(--primary);border-color:var(--primary);color:var(--text-inverse);font-weight:600}
+  .btn.primary:hover{background:var(--primary-hover)}
+  .btn.ghost{border-color:transparent;background:none;color:var(--primary)}
+  .btn.ghost:hover{background:var(--bg-hover)}
+
+  /* ---- 改动对照 ---- */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}}
+  .cmp{border:1px solid var(--border);border-radius:var(--r-md);padding:16px 18px;background:var(--bg-alt)}
+  .cmp h3{font-size:13px;font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:7px}
+  .cmp .old h3{color:var(--text-muted)}
+  .cmp .new h3{color:var(--success)}
+  .cmp ul{list-style:none;display:flex;flex-direction:column;gap:7px}
+  .cmp li{font-size:13px;color:var(--text-muted);display:flex;gap:8px;align-items:flex-start;line-height:1.5}
+  .cmp li b{color:var(--text);font-weight:600}
+  .strike{text-decoration:line-through;text-decoration-color:var(--border-strong)}
+
+  .note{
+    margin-top:14px;padding:12px 14px;border-radius:var(--r-md);
+    background:var(--primary-soft);border:1px solid #cddff5;
+    font-size:12.5px;color:var(--primary-pressed);line-height:1.6;
+  }
+  .kicker{
+    font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--text-disabled);
+    text-transform:uppercase;margin-bottom:10px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>模型设置 · 改版原型</h1>
+  <p class="sub">按现有配色与字体还原（880×720 真实尺寸）。共 6 个控件压到 2 个，选云端模型从 5 步变成 1 次点选。</p>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--primary)">
+      <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+    </svg>
+    一、界面本体
+  </h2>
+  <p class="h2note">用的是你截图里的真实状态：本机装了 whisper base、没装语义模型、配置指向 DeepSeek 但档案未启用。</p>
+
+  <div class="dlg">
+    <div class="dlg-title">模型设置<span class="sp"></span><span class="x">✕</span></div>
+    <div class="dlg-body">
+
+      <!-- 语音转写 -->
+      <div class="cap">
+        <div class="cap-head">
+          <span class="cap-name">语音转写</span>
+          <span class="badge">本地</span>
+          <span class="cap-hint">把视频里的声音转成带时间戳的文字</span>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <div class="combo">
+            <span class="dot"></span>
+            <span class="txt">whisper base — 较快，中文准确率一般</span>
+            <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="status">
+          <div class="st ok">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+            <span>正在使用 <b>本地 whisper base</b>，选中即生效。</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 语义判断 -->
+      <div class="cap">
+        <div class="cap-head">
+          <span class="cap-name">语义判断</span>
+          <span class="badge">本地</span>
+          <span class="cap-hint">判断哪里该断开，剧情才连贯</span>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <div class="combo">
+            <span class="txt empty">本机未安装语义模型 — 去「模型管理 → 本地模型」下载</span>
+            <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="status">
+          <!-- 结论先行：这是当前界面完全没说、但最要紧的一句 -->
+          <div class="st warn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+            <span><b>语义判断不会执行。</b>本机没有装模型，云端那份也还没生效。</span>
+          </div>
+          <div class="st muted">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-top:2px"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+            <span>已选云端 <b>深度求索 DeepSeek</b>，差一步：档案未启用。
+              <button class="act">去配置</button></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="dlg-foot">
+      <button class="btn ghost">刷新清单</button>
+      <button class="btn">去配置 Key…</button>
+      <span class="sp"></span>
+      <span>选择后立即生效，下次分析起按此执行</span>
+      <button class="btn">关闭</button>
+    </div>
+  </div>
+
+  <div class="note">
+    对照你截图里最要紧的一处改动：原来那句 <span class="strike">「当前生效：本地。已选云端 深度求索 DeepSeek，但尚未生效——云端语义判断（深度求索 DeepSeek）已选中但档案未启用。点「去配置 Key…」到「模型管理 → 云端厂商」保存并测试连通性。这张卡里选的是本地（未选），保存后才切回去。」</span><br>
+    一句话 96 字、塞了 4 件事，且从头到尾没说过 <b>「这样语义判断根本不会跑」</b>。改版把结论提到第一行，细节退到第二行。
+  </div>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--primary)">
+      <path d="m7 15 5 5 10-10"/>
+    </svg>
+    二、下拉展开的样子
+  </h2>
+  <p class="h2note">本地模型在最上面，然后是云端；云端按厂商分子组，当前生效的厂商排最前。</p>
+
+  <div class="dlg">
+    <div class="dlg-title">模型设置<span class="sp"></span><span class="x">✕</span></div>
+    <div class="dlg-body">
+
+      <div class="cap">
+        <div class="cap-head">
+          <span class="cap-name">语音转写</span>
+          <span class="badge">本地</span>
+          <span class="cap-hint">点框直接输入可筛选上百个云端模型，也能手输清单外的名字</span>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <div class="combo focus">
+            <span class="dot"></span>
+            <span class="txt">whisper base — 较快，中文准确率一般</span>
+            <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+
+        <div class="pop">
+          <div class="pop-sep">本地</div>
+          <div class="opt sel"><span class="dot"></span><span class="t">whisper base — 较快，中文准确率一般</span><span class="sz">142 MB</span></div>
+          <div class="opt"><span class="t">whisper small — 均衡，推荐</span><span class="sz">484 MB</span></div>
+
+          <div class="pop-sep">云端</div>
+          <div class="pop-sep vendor">深度求索 DeepSeek<span class="tag">当前生效</span></div>
+          <div class="opt ind"><span class="t">deepseek-chat</span></div>
+          <div class="opt ind"><span class="t">deepseek-reasoner</span></div>
+
+          <div class="pop-sep vendor">硅基流动 SiliconFlow</div>
+          <div class="opt ind"><span class="t">FunAudioLLM/SenseVoiceSmall</span></div>
+          <div class="opt ind"><span class="t">Qwen/Qwen3-8B</span></div>
+          <div class="opt ind"><span class="t">… 共 247 个</span></div>
+
+          <div class="pop-note">另有 14 家厂商未配置 Key —— <span style="color:var(--primary)">去配置</span></div>
+        </div>
+      </div>
+
+    </div>
+    <div class="dlg-foot">
+      <button class="btn ghost">刷新清单</button>
+      <button class="btn">去配置 Key…</button>
+      <span class="sp"></span>
+      <span>选择后立即生效，下次分析起按此执行</span>
+      <button class="btn">关闭</button>
+    </div>
+  </div>
+
+  <div class="note">
+    厂商内模型多时只列前几条 + 一行「共 247 个」——<b>点框直接输入即可筛选</b>，这是可编辑下拉自带的，不用再摆一个筛选框。
+    方舟的 <code>ep-20260101</code> 这类不在 <code>/models</code> 里的名字也能直接打进去。
+  </div>
+
+  <h2>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--primary)">
+      <path d="M12 2v20M2 12h20"/>
+    </svg>
+    三、改了什么
+  </h2>
+  <p class="h2note">每张卡 6 个控件 → 2 个。选择一个云端模型：5 步 → 1 次点选。</p>
+
+  <div class="grid2">
+    <div class="cmp old">
+      <h3>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        现在的做法
+      </h3>
+      <ul>
+        <li><span><b>两个大按钮</b>占满一整行，只为做二选一</span></li>
+        <li><span>本地下拉 + <b>厂商下拉</b> + <b>刷新按钮</b> + <b>筛选框</b> + <b>模型列表</b> = 6 个控件</span></li>
+        <li><span>选云端模型要 <b>5 步</b>：切云端 → 选厂商 → 刷新 → 筛选 → 点中</span></li>
+        <li><span>空下拉渲染成<b>一个空白矩形</b>，看着像坏了</span></li>
+        <li><span>状态行 <b>96 字</b>一句话，没有小标题</span></li>
+        <li><span>「已生效」与「刚选的」<b>混在一句里</b></span></li>
+        <li><span>改完要记得点<b>保存设置</b></span></li>
+      </ul>
+    </div>
+    <div class="cmp new">
+      <h3>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+        改版后
+      </h3>
+      <ul>
+        <li><span>后端变成标题右侧的<b>一枚静态徽章</b>，不再需要点</span></li>
+        <li><span>只剩<b>一个可搜索下拉</b> + 一行状态</span></li>
+        <li><span><b>1 次点选</b>；筛选和手输都由下拉自己承担</span></li>
+        <li><span>没装模型时占位文字直说<b>「本机未安装」</b>，不是空白框</span></li>
+        <li><span>状态<b>拆成结论 + 详情两行</b>，结论提到第一行</span></li>
+        <li><span>「语义判断不会执行」这类<b>后果直说</b>，不再埋在长句里</span></li>
+        <li><span><b>选中即生效</b>，保存按钮去掉</span></li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
