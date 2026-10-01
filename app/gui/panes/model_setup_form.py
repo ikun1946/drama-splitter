@@ -74,7 +74,7 @@ from ...core.providers import (
     merge_model_choices,
 )
 from ..state import ProjectState
-from ..widgets import Card, NoWheelComboBox, scrollable
+from ..widgets import Card, NoWheelComboBox, SectionHeaderDelegate, scrollable
 from ..workers import ModelListWorker
 from ._common import register_worker
 
@@ -130,6 +130,9 @@ class _CapabilityCard(QWidget):
         super().__init__(parent)
         self.capability = capability
         self._loading = False
+        #: 最近一次**可选项**的下标。分类标题（本地模型 / 云端模型）被选中时
+        #: 回退到这里——见 _on_index_changed。
+        self._last_valid_index: int = -1
 
         # ---- 标题右侧：后端徽章（只读）+ 一句话说明 ----------------------
         header = QWidget(self)
@@ -158,6 +161,9 @@ class _CapabilityCard(QWidget):
 
         self.combo = NoWheelComboBox(self)
         self.combo.setEditable(True)
+        # 分组标题画成弱化的一行——这是"降低误点"，真正的拦截在
+        # _on_index_changed：setEnabled(False) 只管视图层，拦不住索引变化。
+        self.combo.setItemDelegate(SectionHeaderDelegate(self.combo))
         self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.combo.setMaxVisibleItems(20)
         self.combo.lineEdit().setPlaceholderText("点开可筛选，也能直接输入模型名")
@@ -226,6 +232,8 @@ class _CapabilityCard(QWidget):
                 if choice.key == current_key:
                     target = index
                     break
+        # 记下这次重建得到的有效选中项：分类标题被选中时退回这里
+        self._last_valid_index = target
         self.combo.setCurrentIndex(target)
         self.combo.blockSignals(False)
         self._loading = False
@@ -251,6 +259,10 @@ class _CapabilityCard(QWidget):
 
         清单里的项选中后框里显示的就是它的文字；只有当两者不一致时，
         才说明这是用户自己敲进去的名字（方舟 ep-xxx、自建别名等）。
+
+        分组标题（「本地模型」/「云端模型」）与提示行**永远不算手输**：
+        它们不是模型名。放它们过去会报出「本地模型 没有归属：先点去配置 Key」
+        这种用户完全看不懂的错。
         """
         text = (self.combo.lineEdit().text() or "").strip()
         if not text:
@@ -258,6 +270,10 @@ class _CapabilityCard(QWidget):
         index = self.combo.currentIndex()
         if index >= 0 and text == (self.combo.itemText(index) or "").strip():
             return ""
+        for position in range(self.combo.count()):
+            if (text == (self.combo.itemText(position) or "").strip()
+                    and not self._is_selectable_index(position)):
+                return ""
         return text
 
     def set_placeholder(self, text: str) -> None:
@@ -301,7 +317,44 @@ class _CapabilityCard(QWidget):
     def _on_index_changed(self, *_args) -> None:
         if self._loading:
             return
+        # 分类标题（「本地模型」/「云端模型」）只是分组，不是可选项。一旦它成为
+        # 当前项，立刻退回上一次的有效选择。
+        #
+        # 这里的判断**不能交给视图层**的 setEnabled(False)：实测对禁用项调用
+        # setCurrentIndex 照样会成功，那样下拉框会一直显示「本地模型」，而
+        # config.json 里的真实选择一点没变——界面显示与实际配置不一致，
+        # 比"点错了"严重得多。
+        #
+        # 注意 index == -1 **不算**误选：那正是"没从清单里挑、正在手输名字"的
+        # 正常状态（方舟 ep-xxx、自建别名都走这条路）。只有"指着一个具体的
+        # 不可选项"才是误选。
+        index = self.combo.currentIndex()
+        if index >= 0 and not self._is_selectable_index(index):
+            self._revert_to_valid()
+            return
+        if index >= 0:
+            self._last_valid_index = index
         self.choice_picked.emit(self.capability)
+
+    def _is_selectable_index(self, index: int) -> bool:
+        """下拉第 ``index`` 项是不是真能选的（分类标题 / 提示行返回 False）。"""
+        if index < 0:
+            return False
+        data = self.combo.itemData(index, Qt.ItemDataRole.UserRole)
+        return isinstance(data, ModelChoice) and data.selectable
+
+    def _revert_to_valid(self) -> None:
+        """把当前项退回最近一次的可选项；一次都没选过就退回占位提示。"""
+        target = self._last_valid_index
+        if not self._is_selectable_index(target):
+            target = -1
+        self.combo.blockSignals(True)
+        self.combo.setCurrentIndex(target)
+        if target < 0:
+            # 可编辑下拉在 index 为 -1 时**不会**自己清空输入框，标题文字会
+            # 留在框里冒充一个模型名。必须显式清掉，占位提示才会回来。
+            self.combo.lineEdit().clear()
+        self.combo.blockSignals(False)
 
 
 class ModelSetupForm(QWidget):
@@ -411,7 +464,7 @@ class ModelSetupForm(QWidget):
     def _fill(self, card: _CapabilityCard) -> None:
         capability = card.capability
         items = self._local_items(capability)
-        items.append(ModelChoice(KIND_HEADER, "云端模型"))
+        items.append(ModelChoice(KIND_HEADER, "云端模型", selectable=False))
         items.extend(self._cloud_items(capability))
         card.fill(items, self._current_key(capability))
         card.set_placeholder(self._local_empty_hint(capability))
@@ -445,7 +498,7 @@ class ModelSetupForm(QWidget):
                     current,
                 )
             )
-        return [ModelChoice(KIND_HEADER, "本地模型"), *rows]
+        return [ModelChoice(KIND_HEADER, "本地模型", selectable=False), *rows]
 
     def _local_ready(self, capability: str) -> bool:
         """配置指向的本地模型此刻是不是真的能用。"""
@@ -485,7 +538,9 @@ class ModelSetupForm(QWidget):
         items: list[ModelChoice] = []
         for profile in keyed:
             mark = "　当前生效" if profile.id == backend else ""
-            items.append(ModelChoice(KIND_HEADER, f"{profile.label}{mark}"))
+            items.append(
+                ModelChoice(KIND_HEADER, f"{profile.label}{mark}", selectable=False)
+            )
             if profile.id in self._loading_for:
                 items.append(
                     ModelChoice(KIND_NOTE, "　正在拉取模型清单…", selectable=False)
