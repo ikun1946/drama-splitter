@@ -694,6 +694,74 @@ class ModelDownloadWorker(BaseWorker):
         self.finished_with.emit(result)
 
 
+class UpdateCheckWorker(BaseWorker):
+    """查有没有新版本（后台线程）。
+
+    为什么必须后台：``releases/latest`` 走网络，超时上限十几秒；放主线程会让
+    窗口在启动后僵住十几秒。
+
+    启动时的静默检查与菜单里的手动检查共用它，区别只在**结果怎么呈现**——
+    那是调用方的事，这个 worker 只负责把结果老老实实报出去。
+    """
+
+    checked = Signal(object)  # CheckResult
+
+    def __init__(self, current_version: str, parent=None) -> None:
+        super().__init__(parent)
+        self._version = current_version
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.updater import check_for_update
+
+        try:
+            result = check_for_update(self._version)
+        except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
+            from app.core.updater import CheckResult
+
+            result = CheckResult(ok=False, message=f"检查更新时出错：{exc}")
+        if not result.ok:
+            self._last_error = result.message
+            self._state = "failed"
+        self.checked.emit(result)
+
+
+class UpdateDownloadWorker(BaseWorker):
+    """下载更新包（后台线程，可取消，校验 SHA-256）。
+
+    校验不通过时 ``download_asset`` 会把文件删掉再返回失败——这里不重复这个
+    逻辑，只负责把结果转成信号。**绝不把校验失败的路径交出去。**
+    """
+
+    progress = Signal(int, int)  # 已下载字节, 总字节
+    finished_with = Signal(object)  # DownloadOutcome
+
+    def __init__(self, url: str, target, *, digest: str = "", size: int = 0,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._url = url
+        self._target = target
+        self._digest = digest
+        self._size = size
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.updater import DownloadOutcome, download_asset
+
+        try:
+            outcome = download_asset(
+                self._url,
+                self._target,
+                digest=self._digest,
+                size=self._size,
+                cancel_check=lambda: self.cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcome = DownloadOutcome(ok=False, message=f"下载过程异常：{exc}")
+        if not outcome.ok:
+            self._last_error = outcome.message
+            self._state = "cancelled" if outcome.cancelled else "failed"
+        self.finished_with.emit(outcome)
+
+
 class JudgeProbeWorker(BaseWorker):
     """后台探测语义判断后端（云端档案 / 本地推理栈），供模型界面如实显示。
 

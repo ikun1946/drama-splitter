@@ -14,6 +14,7 @@ from .export_dialog import ExportDialog
 from .model_dialog import ModelDialog
 from .model_setup_dialog import ModelSetupDialog
 from .settings_dialog import SettingsDialog
+from .update_dialog import UpdateDialog
 
 __all__ = [
     "DialogShell",
@@ -21,4 +22,5 @@ __all__ = [
     "ModelDialog",
     "ModelSetupDialog",
     "SettingsDialog",
+    "UpdateDialog",
 ]

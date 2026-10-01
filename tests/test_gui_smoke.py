@@ -2949,6 +2949,372 @@ class TestModelSetupDialog:
             dialog.close()
 
 
+    def test_section_headers_in_real_form_are_not_selectable(
+        self, window, qapp, tmp_path, monkeypatch
+    ):
+        """生产代码里造出来的分组标题必须真的不可选。
+
+        回归点就在这里：``ModelChoice`` 的 ``selectable`` 字段默认是 **True**，
+        三个标题构造点只要有一个漏写 ``selectable=False``，它就变回可选项——
+        而 ``fill()`` 里那句 ``setEnabled(False)`` 对它是**死代码**，静默失效，
+        编译和测试都不会报任何东西。
+        """
+        from app.gui.panes.model_setup_form import KIND_HEADER, KIND_NOTE
+
+        dialog, form, config_file, _started = self._open(
+            window, qapp, tmp_path, monkeypatch,
+            self._two_providers()[:1], {"my-a": ["model-a"]},
+        )
+        try:
+            grouped = 0
+            for card in form.cards():
+                for position, choice in enumerate(card.items()):
+                    if choice.kind not in (KIND_HEADER, KIND_NOTE):
+                        continue
+                    grouped += 1
+                    assert not choice.selectable, (
+                        f"{card.capability} 第 {position} 行「{choice.label}」"
+                        "是分组/提示，却没标 selectable=False"
+                    )
+                    assert not card._is_selectable_index(position), (
+                        f"{card.capability} 第 {position} 行「{choice.label}」仍被判为可选"
+                    )
+            assert grouped >= 4, "样本里应至少有本地/云端两个标题与若干提示行"
+        finally:
+            dialog.close()
+
+
+class TestModelSetupSectionHeaders:
+    """下拉里的「本地模型 / 云端模型」是**分组标题**，不是可选项。
+
+    为什么这组用例必须存在
+    ----------------------
+    ``fill()`` 早就对它们调了 ``setEnabled(False)``，看上去"处理过了"——但那
+    只作用于**视图层**。实测对禁用项调用 ``setCurrentIndex`` 照样成功，于是
+    下拉框会一直显示「本地模型」，而 ``config.json`` 里的真实选择一点没变：
+    界面显示与实际配置不一致，比"点错了"严重得多。
+
+    所以判据不是"禁用了吗"，而是**用户看得见的那一行文字，能不能对应一个
+    真实可选的模型**。
+    """
+
+    @staticmethod
+    def _card(qapp):
+        from app.gui.panes.model_setup_form import _CapabilityCard
+
+        card = _CapabilityCard("asr", "语音转写")
+        card.setAttribute(
+            __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.WidgetAttribute.WA_DontShowOnScreen,
+            True,
+        )
+        return card
+
+    @staticmethod
+    def _sample():
+        from app.gui.panes.model_setup_form import (
+            KIND_CLOUD,
+            KIND_HEADER,
+            KIND_LOCAL,
+            KIND_NOTE,
+            ModelChoice,
+        )
+
+        return [
+            ModelChoice(KIND_HEADER, "本地模型", selectable=False),
+            ModelChoice(KIND_LOCAL, "whisper small — 快速", "small"),
+            ModelChoice(KIND_HEADER, "云端模型", selectable=False),
+            ModelChoice(KIND_CLOUD, "doubao-seed-asr", "doubao-seed-asr", "volc"),
+            ModelChoice(KIND_NOTE, "　另有 3 家厂商未配置 Key", selectable=False),
+        ]
+
+    def test_headers_are_not_selectable(self, qapp):
+        card = self._card(qapp)
+        items = self._sample()
+        card.fill(items, ("local", "small", ""))
+
+        from app.gui.panes.model_setup_form import KIND_HEADER, KIND_NOTE
+
+        kinds = [c.kind for c in card.items()]
+        assert KIND_HEADER in kinds and KIND_NOTE in kinds
+        for position, choice in enumerate(card.items()):
+            if choice.kind in (KIND_HEADER, KIND_NOTE):
+                assert not card._is_selectable_index(position), (
+                    f"第 {position} 行「{choice.label}」是分组/提示，不该被当成可选项"
+                )
+
+    def test_fill_never_lands_on_a_header(self, qapp):
+        """配置里没有任何有效选择时，当前项必须是 -1（走占位提示），不能是第 0 行的标题。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), None)
+        assert card.combo.currentIndex() == -1
+
+    def test_forcing_index_onto_header_reverts_to_real_choice(self, qapp):
+        """核心回归：即便索引被强行指到标题，也必须立刻退回真实选择。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), ("local", "small", ""))
+        assert card.combo.currentText() == "whisper small — 快速"
+
+        header_position = next(
+            i for i, c in enumerate(card.items()) if c.label == "本地模型"
+        )
+        # 视图层的 setEnabled(False) 拦不住这一步——这正是缺陷本身
+        card.combo.setCurrentIndex(header_position)
+
+        assert card.combo.currentIndex() != header_position, "仍停在分组标题上"
+        assert card.combo.currentText() == "whisper small — 快速", (
+            "下拉框显示的文字必须仍对应一个真实可选的模型"
+        )
+        choice = card.selected_choice()
+        assert choice is not None and choice.value == "small"
+
+    def test_forcing_index_onto_header_with_no_prior_choice_clears_text(self, qapp):
+        """一次都没选过时退回 -1，且必须显式清掉输入框——否则标题文字留在框里冒充模型名。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), None)
+
+        card.combo.setCurrentIndex(0)
+
+        assert card.combo.currentIndex() == -1
+        assert card.combo.lineEdit().text() == "", "输入框残留了分组标题"
+        assert card.selected_choice() is None
+        assert card.manual_text() == ""
+
+    def test_manual_text_ignores_header_label(self, qapp):
+        """文本框里是分组标题时，不能当成用户手输的模型名。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), ("local", "small", ""))
+        card.combo.lineEdit().setText("本地模型")
+        assert card.manual_text() == "", "分组标题被当成了手输的模型名"
+
+    def test_manual_text_ignores_note_label(self, qapp):
+        card = self._card(qapp)
+        card.fill(self._sample(), ("local", "small", ""))
+        card.combo.lineEdit().setText("另有 3 家厂商未配置 Key")
+        assert card.manual_text() == "", "提示行被当成了手输的模型名"
+
+    def test_manual_text_still_accepts_real_typed_name(self, qapp):
+        """回归：真正的手输名字（方舟 ep-xxx / 自建别名）必须照旧放行。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), ("local", "small", ""))
+        card.combo.lineEdit().setText("ep-20240101-abc")
+        assert card.manual_text() == "ep-20240101-abc"
+
+    def test_choosing_a_real_item_still_works(self, qapp):
+        """回归：正常选中本地档位与云端模型的既有行为不受影响。"""
+        card = self._card(qapp)
+        card.fill(self._sample(), None)
+
+        local_position = next(
+            i for i, c in enumerate(card.items()) if c.label == "whisper small — 快速"
+        )
+        card.combo.setCurrentIndex(local_position)
+        assert card.selected_choice().value == "small"
+
+        cloud_position = next(
+            i for i, c in enumerate(card.items()) if c.label == "doubao-seed-asr"
+        )
+        card.combo.setCurrentIndex(cloud_position)
+        chosen = card.selected_choice()
+        assert chosen is not None and chosen.provider_id == "volc"
+
+
+class TestUpdateDialog:
+    """「检查更新」：手动模式与启动静默模式对失败的处置完全不同。
+
+    两条纪律各有测试盯着：
+    - 手动打开时**任何结果都要显示**，包括断网/限流（用户等着看）；
+    - 启动静默检查时**只有确有新版才弹**，失败一律无声。
+    """
+
+    @staticmethod
+    def _info(version="1.0.1"):
+        from app.core.updater import UpdateInfo
+
+        return UpdateInfo(
+            tag=f"v{version}", version=version,
+            url="https://example.invalid/r", notes="这次修了分集切点",
+            setup_url="https://example.invalid/a-setup.exe",
+            setup_size=100, setup_digest="sha256:" + "a" * 64,
+            zip_url="https://example.invalid/a-win64.zip",
+            zip_size=200, zip_digest="sha256:" + "b" * 64,
+        )
+
+    def _dialog(self, window, qapp):
+        dialog = window.build_update_dialog()
+        dialog.show()
+        qapp.processEvents()
+        return dialog
+
+    def test_menu_has_check_update(self, window):
+        from app.gui.main_window import MainWindow
+
+        labels = []
+        for action in window.menuBar().actions():
+            menu = action.menu()
+            if menu is not None:
+                labels += [a.text() for a in menu.actions()]
+        assert "检查更新…" in labels, f"菜单里没有「检查更新…」：{labels}"
+        assert "update_check" in MainWindow.WORKER_NAMES
+        assert "update_download" in MainWindow.WORKER_NAMES
+
+    def test_dialog_builds_and_shows(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        try:
+            assert dialog.status.text(), "状态行不能是空的"
+            assert dialog.btn_primary.text() == "检查"
+        finally:
+            dialog.close()
+
+    def test_manual_mode_shows_failure(self, window, qapp):
+        """手动打开时失败必须说出来，不能像启动检查那样静默。"""
+        from app.core.updater import CheckResult
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog._on_checked(CheckResult(ok=False, message="连不上 GitHub。"))
+            assert "连不上" in dialog.status.text()
+            assert dialog.btn_primary.isEnabled()
+            assert dialog.btn_primary.text() == "重试"
+        finally:
+            dialog.close()
+
+    def test_up_to_date_says_so(self, window, qapp):
+        from app.core.updater import CheckResult
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog._on_checked(CheckResult(ok=True, message="当前已是最新版本（1.0.0）。"))
+            assert "最新" in dialog.status.text()
+            assert dialog.btn_primary.text() == "再检查一次"
+        finally:
+            dialog.close()
+
+    def test_update_available_offers_download(self, window, qapp, monkeypatch):
+        from app.core.updater import CheckResult
+
+        monkeypatch.setattr(
+            "app.gui.dialogs.update_dialog.UpdateDialog._installed",
+            property(lambda self: True),
+        )
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog._on_checked(CheckResult(ok=True, info=self._info(), message="发现新版"))
+            assert dialog._state == "available"
+            assert dialog.notes.isVisible(), "更新说明应当显示出来"
+            assert "分集切点" in dialog.notes_body.text()
+            assert dialog.btn_primary.text() == "下载并安装"
+        finally:
+            dialog.close()
+
+    def test_primary_button_dispatches_by_state(self, window, qapp, monkeypatch):
+        """回归：下载完成后点主按钮应执行安装，而不是又去检查一次。
+
+        之前靠 ``_downloaded is not None`` 推断状态，结果 ready 态会走错分支。
+        """
+        dialog = self._dialog(window, qapp)
+        try:
+            calls = []
+            monkeypatch.setattr(dialog, "start_check", lambda: calls.append("check"))
+            monkeypatch.setattr(dialog, "_start_download", lambda: calls.append("download"))
+            monkeypatch.setattr(dialog, "_apply_update", lambda: calls.append("apply"))
+
+            dialog._state = "available"
+            dialog._on_primary()
+            dialog._state = "ready"
+            dialog._on_primary()
+            dialog._state = "downloading"
+            dialog._on_primary()  # 下载中：点了应当无反应
+            dialog._state = "up_to_date"
+            dialog._on_primary()
+
+            assert calls == ["download", "apply", "check"], calls
+        finally:
+            dialog.close()
+
+    def test_startup_check_is_silent_on_failure(self, window, qapp, monkeypatch):
+        """启动静默检查：失败不弹窗。"""
+        from app.core.updater import CheckResult
+
+        shown = []
+        monkeypatch.setattr(
+            type(window), "build_update_dialog",
+            lambda self: shown.append(True),
+        )
+        window._on_startup_update_checked(CheckResult(ok=False, message="断网"))
+        assert not shown, "断网不该弹窗"
+
+    def test_startup_check_prompts_when_update_exists(self, window, qapp, monkeypatch):
+        from app.core.updater import CheckResult
+
+        shown = []
+        dialogs = []
+
+        def fake_build(self):
+            shown.append(True)
+            d = object()
+            dialogs.append(d)
+            return d
+
+        monkeypatch.setattr(
+            type(window), "build_update_dialog",
+            lambda self: shown.append(True) or type("D", (), {"show": lambda s: None})(),
+        )
+        monkeypatch.setattr("app.core.app_config.AppConfig.load", classmethod(
+            lambda cls, path=None: type("C", (), {"extra": {}})()
+        ))
+        window._on_startup_update_checked(
+            CheckResult(ok=True, info=self._info(), message="发现新版")
+        )
+        assert shown, "确有新版却没提示"
+
+    def test_startup_check_respects_dismissed_version(self, window, qapp, monkeypatch):
+        from app.core.updater import CheckResult
+
+        shown = []
+        monkeypatch.setattr(
+            type(window), "build_update_dialog",
+            lambda self: shown.append(True) or type("D", (), {"show": lambda s: None})(),
+        )
+        monkeypatch.setattr("app.core.app_config.AppConfig.load", classmethod(
+            lambda cls, path=None: type("C", (), {"extra": {"update_dismissed": "1.0.1"}})()
+        ))
+        window._on_startup_update_checked(
+            CheckResult(ok=True, info=self._info("1.0.1"), message="发现新版")
+        )
+        assert not shown, "用户跳过的版本不该反复提示"
+
+
+    def test_skip_records_version_and_closes(self, window, qapp, monkeypatch):
+        """跳过要落盘到 extra['update_dismissed']，否则下次启动还会弹同一个版本。"""
+        from app.core.updater import CheckResult
+
+        saved = {}
+        monkeypatch.setattr(
+            "app.core.app_config.AppConfig.load",
+            classmethod(lambda cls, path=None: type(
+                "C", (), {"extra": {}, "save": lambda self: saved.setdefault("ok", True)}
+            )()),
+        )
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog._on_checked(CheckResult(ok=True, info=self._info(), message="发现新版"))
+            assert dialog.btn_skip.isVisible(), "有新版时「跳过这一版」该出现"
+            dialog._skip_version()
+            assert saved.get("ok"), "跳过没有落盘"
+        finally:
+            dialog.close()
+
+    def test_skip_hidden_when_no_update(self, window, qapp):
+        from app.core.updater import CheckResult
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog._on_checked(CheckResult(ok=False, message="断网"))
+            assert not dialog.btn_skip.isVisible(), "没有新版就不该给「跳过」"
+        finally:
+            dialog.close()
+
+
 class _StubDialog:
     def exec(self):  # noqa: D102 - 测试替身
         return 0

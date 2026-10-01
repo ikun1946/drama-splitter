@@ -187,6 +187,7 @@ class MainWindow(QMainWindow):
 
         help_menu = bar.addMenu("帮助")
         self._add_action(help_menu, "运行自检…", self._show_self_check)
+        self._add_action(help_menu, "检查更新…", self.open_update_dialog)
         self._add_action(help_menu, "关于", self._show_about)
 
     def _add_action(self, menu, text: str, handler, shortcut: str = "",
@@ -299,6 +300,66 @@ class MainWindow(QMainWindow):
         llm = locate_llm_model()
         lines.append("语义模型：" + (llm.name if llm else "未下载（语义判断降级运行）"))
         message.information(self, "运行自检", "\n".join(lines))
+
+    def build_update_dialog(self):
+        """构建「检查更新」对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
+        from run import VERSION
+
+        from .dialogs import UpdateDialog
+
+        self.update_dialog = UpdateDialog(self, current_version=VERSION)
+        return self.update_dialog
+
+    def open_update_dialog(self) -> None:
+        dialog = self.build_update_dialog()
+        dialog.show()
+        # 手动打开时自动发起一次检查：用户点开就是想看结果，不该再点一次「检查」
+        dialog.start_check()
+
+    def _startup_update_check(self) -> None:
+        """启动后后台静默检查更新。
+
+        两条纪律：
+        1. **只有确有新版才提示**。失败（断网、限流、404）一律静默——启动时弹
+           「检查更新失败」是纯打扰，而且用户什么也做不了。
+        2. **每天最多一次**。GitHub 未鉴权配额是 60 次/小时/IP，用
+           ``extra["update_checked_at"]`` 记日期，别把配额耗在重复启动上。
+        """
+        import datetime
+
+        from .workers import UpdateCheckWorker
+
+        try:
+            from app.core.app_config import AppConfig
+
+            config = AppConfig.load()
+            today = datetime.date.today().isoformat()
+            if str(config.extra.get("update_checked_at") or "") == today:
+                return
+            config.extra["update_checked_at"] = today
+            config.save()
+        except Exception:  # noqa: BLE001 - 配置读写失败不该挡住启动
+            pass
+
+        from run import VERSION
+
+        worker = UpdateCheckWorker(VERSION, parent=self)
+        worker.checked.connect(lambda r: self._on_startup_update_checked(r))
+        self.register_worker("update_check", worker)
+        worker.start()
+
+    def _on_startup_update_checked(self, result) -> None:
+        if not result.ok or not result.has_update:
+            return
+        from app.core.app_config import AppConfig
+
+        try:
+            dismissed = str(AppConfig.load().extra.get("update_dismissed") or "")
+        except Exception:  # noqa: BLE001
+            dismissed = ""
+        if dismissed and result.info is not None and result.info.version == dismissed:
+            return  # 用户跳过了这一版
+        self.build_update_dialog().show()
 
     def _show_about(self) -> None:
         from run import VERSION
@@ -476,6 +537,7 @@ class MainWindow(QMainWindow):
 
     WORKER_NAMES = (
         "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
+        "update_check", "update_download",
     )
 
     #: 允许"一类多实例"的任务前缀。模型设置页会同时给多家厂商拉 ``/models``，
