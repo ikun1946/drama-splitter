@@ -177,6 +177,14 @@ def _ui_smoke() -> int:
         print(f"    结论：{card.status_main.text()}")
     setup_dialog.close()
 
+    # 「检查更新」对话框：网络检查要手动触发，这里只验证能构造、能显示
+    update_dialog = window.build_update_dialog()
+    update_dialog.show()
+    app.processEvents()
+    print(f"「检查更新」对话框：可构造、可显示（{update_dialog.width()}×{update_dialog.height()}）"
+          f"  状态={update_dialog.status.text()[:28]}")
+    update_dialog.close()
+
     # 模型管理：一个对话框两个页签（本地模型 / 云端厂商），两页都验一遍
     model_dialog = window.build_model_dialog()
     model_dialog.show()
@@ -251,6 +259,12 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AI 短剧智能分集器")
 
+    # 窗口图标必须在**第一个窗口出现前**设好，否则任务栏先显示默认图标再跳变。
+    # 打包时的 --icon 只写 exe 的 PE 资源，Qt 主窗口是另一个窗口，得单独给。
+    from app.gui.branding import apply_app_icon
+
+    apply_app_icon(app)
+
     try:
         from app.gui.main_window import MainWindow
     except Exception:  # noqa: BLE001
@@ -289,6 +303,17 @@ def main() -> int:
         )
 
     window.show()
+
+    # 启动后静默检查更新。延后 2 秒是刻意的：避开启动高峰，也让主窗口先出画面。
+    # 这一步**只有确有新版才会弹窗**，断网/限流一律静默（见
+    # MainWindow._startup_update_check 的说明）。
+    try:
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(2000, window._startup_update_check)
+    except Exception:  # noqa: BLE001 - 更新检查是可选便利，失败不该影响启动
+        pass
+
     return app.exec()
 
 

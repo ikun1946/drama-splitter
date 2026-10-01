@@ -26,12 +26,19 @@ PyInstaller 的静态分析照样会把它们整包拖进来（ctranslate2 + onn
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: 应用图标。既写进 exe 的 PE 资源，也作为数据文件带进产物——两件事都得做：
+#: PE 资源决定资源管理器 / 快捷方式看到的图标，数据文件是给运行时
+#: ``QApplication.setWindowIcon`` 用的（详见 app/gui/branding.py 的说明）。
+#: 缺失时跳过而不是报错：没有图标的产物仍可用，只是难看。
+ICON = ROOT / "assets" / "icon.ico"
 
 # 延迟导入的重型可选依赖：打包时排除，包体从数百 MB 降到几十 MB
 EXCLUDES = [
@@ -88,6 +95,13 @@ def main() -> int:
         "--specpath",
         str(spec.parent),
     ]
+    if ICON.is_file():
+        # Windows 专用：--icon 只在 win32 上被接受，别的平台加了会报错。
+        if sys.platform == "win32":
+            command += ["--icon", str(ICON)]
+        # 目标写成 "assets"（无点号）——PyInstaller 的分隔符是平台相关的，
+        # 冒号在 Windows 上才对；这里用相对 dest，落到 _internal/assets/。
+        command += ["--add-data", f"{ICON}{os.pathsep}assets"]
     for module in EXCLUDES:
         command += ["--exclude-module", module]
     command.append(str(ROOT / "run.py"))

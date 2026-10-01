@@ -55,7 +55,7 @@ CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
 OutputBaseFilename=drama-splitter-1.0.0-setup
-SetupIconFile=
+SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
