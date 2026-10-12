@@ -26,6 +26,8 @@ P0 阻断 / P1 需处理 / P2 建议，与方案 §二十六 一致。条目按�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import message
 from .empty_state import EmptyState
 from .log_panel import LogPanel
 
@@ -233,11 +236,17 @@ class Inspector(QFrame):
 
         # 页 2：日志
         self._log = LogPanel()
+        log_page = QWidget()
+        log_wrap = QVBoxLayout(log_page)
+        log_wrap.setContentsMargins(0, 0, 0, 0)
+        log_wrap.setSpacing(0)
+        log_wrap.addWidget(self._build_log_toolbar())
+        log_wrap.addWidget(self._log, 1)
 
         self._pages = QStackedWidget()
         self._pages.addWidget(problem_page)
         self._pages.addWidget(advice_page)
-        self._pages.addWidget(self._log)
+        self._pages.addWidget(log_page)
 
         # ---- 装配 ----
         outer = QVBoxLayout(self)
@@ -344,6 +353,72 @@ class Inspector(QFrame):
 
     def log_text(self) -> str:
         return self._log.toPlainText()
+
+    # ---- 日志工具条 ----------------------------------------------------
+
+    def _build_log_toolbar(self) -> QWidget:
+        """日志页顶部的小工具条：导出与清空。
+
+        为什么要有：分析日志是排障的第一手证据，但原先只能靠"全选复制"——
+        长日志在只读面板里选不全，用户想把它发出来问都难。这里给一个明确的
+        落盘入口（另存为 .txt/.log），并留一个清空按钮给"重跑前眼不见为净"。
+        """
+        self.btn_export_log = QPushButton("导出日志…")
+        self.btn_export_log.setProperty("role", "mini")
+        self.btn_export_log.setToolTip("把当前日志另存为文本文件（便于反馈问题）")
+        self.btn_export_log.clicked.connect(self.export_log)
+
+        self.btn_clear_log = QPushButton("清空")
+        self.btn_clear_log.setProperty("role", "mini")
+        self.btn_clear_log.setToolTip("清空当前日志（不影响已导出的文件）")
+        self.btn_clear_log.clicked.connect(self.clear_log)
+
+        holder = QFrame()
+        holder.setProperty("role", "log-toolbar")
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(6)
+        row.addWidget(self.btn_export_log)
+        row.addWidget(self.btn_clear_log)
+        row.addStretch(1)
+        return holder
+
+    def export_log(self, path: str | None = None) -> str | None:
+        """把日志写到文件；返回落盘路径（用户取消时返回 None）。
+
+        ``path`` 可用于测试/自动化直接指定落点，跳过文件对话框——与项目里
+        其它"可覆写决策点"同一条约定（离屏环境不弹模态框）。
+        """
+        text = self._log.toPlainText()
+        if not text.strip():
+            message.information(self, "没有日志", "当前还没有可导出的日志。")
+            return None
+
+        if path is None:
+            from PySide6.QtWidgets import QFileDialog
+
+            suggested = f"drama-splitter-日志-{datetime.now():%Y%m%d-%H%M%S}.txt"
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, "导出日志", suggested, "文本文件 (*.txt);;日志文件 (*.log);;所有文件 (*)"
+            )
+            if not chosen:
+                return None
+            path = chosen
+
+        target = Path(path)
+        header = (
+            f"AI 短剧智能分集器 日志\n"
+            f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
+            f"共 {self._log.count()} 条\n"
+            + "-" * 40 + "\n"
+        )
+        try:
+            target.write_text(header + text + "\n", encoding="utf-8")
+        except OSError as exc:
+            message.warning(self, "导出失败", f"无法写入 {target}：{exc}")
+            return None
+        message.information(self, "日志已导出", f"已写入：\n{target}")
+        return str(target)
 
     # ---- 内部 ----------------------------------------------------------
 

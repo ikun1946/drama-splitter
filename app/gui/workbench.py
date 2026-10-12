@@ -76,6 +76,9 @@ class Workbench(QWidget):
         # 上一次被阻止的操作留下的问题（例如非法拖拽切点）。它会一直挂在
         # 检查器里直到出现一次成功操作——用户需要看到"为什么没生效"。
         self._action_issues: list[InspectorIssue] = []
+        #: 转写缺对白的警告（整片层面，不属于某一集）。分析开始时清空，
+        #: 由 analysis_pane.dialogue_warning 填上——它随每次分析重建，不退场。
+        self._dialogue_issues: list[InspectorIssue] = []
 
         self.import_pane = ImportPane(state, self)
         self.review_pane = ReviewPane(state, self)
@@ -127,10 +130,12 @@ class Workbench(QWidget):
         self.empty_view.drop_zone.file_dropped.connect(self.import_pane.probe)
 
         # 分析：开始/结束/阶段变化都要重判阶段；日志与进度广播给右栏与中栏
-        self.analysis_pane.started.connect(lambda: self.refresh(inspector_tab=2))
+        self.analysis_pane.started.connect(self._on_analysis_started)
         self.analysis_pane.finished.connect(lambda: self.refresh())
         self.analysis_pane.stage_changed.connect(lambda *_: self.refresh())
         self.analysis_pane.log_appended.connect(self.inspector.append_log)
+        # 转写没产出对白时的可行动警告 → 检查器里立一条常驻问题
+        self.analysis_pane.dialogue_warning.connect(self._on_dialogue_warning)
 
         # 左栏：选集、切点操作、锁定、确认
         self.review_pane.episode_selected.connect(self._on_episode_selected)
@@ -222,8 +227,66 @@ class Workbench(QWidget):
                     )
                 )
 
+        issues.extend(self._dialogue_issues)
         issues.extend(self._action_issues)
         self.inspector.set_issues(issues)
+
+    def _on_analysis_started(self) -> None:
+        """新一次分析开始：清掉上一轮的转写诊断问题，别让旧警告留在右栏。"""
+        self._dialogue_issues = []
+        self.refresh(inspector_tab=2)
+
+    def can_reparse(self) -> tuple[bool, str]:
+        """能否「重新解析」：有源片、且当前没有分析在跑。"""
+        if self.state.media is None:
+            return False, "尚未导入源视频。"
+        if self.analysis_pane.is_active():
+            return False, "分析正在进行，请先等它结束或取消。"
+        return True, ""
+
+    def reparse(self) -> bool:
+        """丢掉分析结果、按当前设置重跑一遍（保留源视频）。
+
+        为什么需要它：分析完成后，用户常常改了分集设置、补下了模型、或换了
+        音轨——原先只能「更换视频」重新导入，连源片都要重新探测一遍，很别扭。
+        这里只清分析产物（方案链 / 候选 / 转写 / 复核 / 导出记录），源片与
+        设置原样保留，随后照常走 ``analysis_pane.start()``。
+
+        返回 False 表示当前不能重跑（无源片或分析中），由调用方提示。
+        """
+        ok, reason = self.can_reparse()
+        if not ok:
+            self.hint_changed.emit(reason)
+            return False
+        self.state.clear_analysis_results()
+        self.selected_episode = 1
+        # 时间轴与左栏都盯着方案，方案没了要回到"待分析"的形态
+        self.stage_view.set_project(None)
+        self.review_pane.refresh()
+        self.refresh_inspector()
+        self._dialogue_issues = []
+        self.refresh()
+        self.analysis_pane.start()
+        return True
+
+    def _on_dialogue_warning(self, title: str, detail: str) -> None:
+        """转写没产出对白：在检查器里立一条 P1 常驻问题（含下一步）。
+
+        等级定 P1 而非 P0：分集仍能用静音与外挂字幕完成，不阻断导出；
+        但它**必须**在界面上说出来，否则用户会一直以为自己下的模型没生效。
+        """
+        self._dialogue_issues = [
+            InspectorIssue(
+                title=title,
+                detail=detail,
+                priority="P1",
+                hint="详见右栏日志，或从菜单「帮助 → 环境自检」查看运行环境",
+                key="dialogue:diagnosis",
+            )
+        ]
+        self.refresh_inspector()
+        self.inspector.set_tab(0)
+        self.hint_changed.emit(title)
 
     @staticmethod
     def _episode_end_ms(plan, episode: int | None) -> int | None:

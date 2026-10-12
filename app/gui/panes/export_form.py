@@ -35,6 +35,7 @@ from ..widgets import (
     LabeledField,
     NoWheelComboBox,
     NoWheelSpinBox,
+    scrollable,
 )
 from ..widgets import message
 from ..workers import (
@@ -190,12 +191,21 @@ class ExportForm(QWidget):
         btn_row.addWidget(self.btn_retry)
         btn_row.addWidget(self.btn_start)
 
+        # 正文（预设 / 输出 / 队列）整体可纵向滚动：小屏笔记本上，三张卡片的最小
+        # 高度之和会超过屏幕，原先靠布局最小尺寸把窗口顶得比屏幕还高、还拖不小。
+        # 装进滚动容器后，窗口能压到屏幕内，内容不够放时出滚动条，按钮行固定在底部。
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(preset_card)
+        body_layout.addWidget(output_card)
+        body_layout.addWidget(queue_card, 1)
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
-        outer.addWidget(preset_card)
-        outer.addWidget(output_card)
-        outer.addWidget(queue_card, 1)
+        outer.addWidget(scrollable(body), 1)
         outer.addWidget(self.progress)
         outer.addLayout(btn_row)
 

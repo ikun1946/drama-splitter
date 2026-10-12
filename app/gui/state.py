@@ -154,3 +154,20 @@ class ProjectState:
         self.plans.clear()
         self.plan_cursor = 0
         self.exported.clear()
+
+    def clear_analysis_results(self) -> None:
+        """清掉一次分析的产物，让源片回到"就绪、待分析"——但**保留源视频**。
+
+        与 ``reset_media`` 的区别：那个会连媒体一起清掉（等于重新导入）。这里
+        只丢分析结果，用于"同一个片子换个设置/补上模型再跑一遍"。
+
+        保留 ``settings``（用户刚调的参数要留着）与 ``output_root``（导出目录）。
+        ``exported`` 一并清空：旧方案没了，指向它的成片记录也不再成立——这与
+        ``_retire_stale_versions`` 同一条道理，删文件仍由用户自己决定。
+        """
+        self.plans.clear()
+        self.plan_cursor = 0
+        self.candidates = None
+        self.transcript = None
+        self.episode_reviews = None
+        self.exported.clear()

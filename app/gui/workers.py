@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -192,6 +193,84 @@ def active_whisper_tier(config: AppConfig | None = None) -> str:
     return config.asr_model_tier or default_whisper_tier()
 
 
+# 转写没产出对白的原因（``AnalysisWorker.dialogue_diagnosis`` 的取值）。
+# 「没有对白」有三种完全不同的处境，界面必须分开说——否则用户看着"无对白信息"
+# 一头雾水：自己明明下了模型、片子明明有对白。
+DIALOGUE_OK = ""                       # 转写正常（可能确实无对白，另有说明）
+DIALOGUE_NO_ENGINE = "no_engine"       # 装了模型但版本不含转写引擎（打包版常见）
+DIALOGUE_NO_MODEL = "no_model"         # 有引擎但没下模型
+DIALOGUE_FAILED = "failed"             # 引擎与模型都在，转写本身出错
+DIALOGUE_EMPTY_AUDIO = "empty_audio"   # 无音轨
+
+
+def classify_dialogue_failure(message: str) -> str:
+    """把转写失败信息归类成 ``DIALOGUE_*``，供界面给出对症的下一步。
+
+    判据取自 ``app.core.asr`` 实际抛出的文案（那里是唯一的错误来源）：
+    - "未安装 faster-whisper" → 引擎缺失（打包版刻意不含，需源码版）
+    - "未找到模型" → 模型没下
+    两者都在具体实现里写成固定措辞，这里按关键词匹配；匹配不到归为一般失败。
+    """
+    text = message or ""
+    if "faster-whisper" in text or "faster_whisper" in text:
+        return DIALOGUE_NO_ENGINE
+    if "未找到模型" in text:
+        return DIALOGUE_NO_MODEL
+    return DIALOGUE_FAILED
+
+
+def dialogue_failure_advice(kind: str, model_tier: str = "") -> tuple[str, str]:
+    """``DIALOGUE_*`` → (给用户看的一句话标题, 可行动的详细说明)。
+
+    这是"界面不撒谎"的落点：缺引擎就说缺引擎、别引导用户再下一次模型
+    （那解决不了问题）。返回空串表示这一类问题不需要额外提示。
+    """
+    if kind == DIALOGUE_NO_ENGINE:
+        return (
+            "本版本不含语音转写引擎",
+            "当前运行的是打包版，因体积原因不含 faster-whisper。"
+            "下载再多模型也用不了转写——请改用源码版运行"
+            "（pip install -r requirements.txt），或把它当作只做静音/字幕分集的工具。",
+        )
+    if kind == DIALOGUE_NO_MODEL:
+        tier = model_tier or "small"
+        return (
+            f"未下载转写模型（whisper-{tier}）",
+            f"转写引擎已就绪，但缺少 whisper-{tier} 模型文件。"
+            "打开「工具 → 模型管理」下载后可重跑分析。",
+        )
+    if kind == DIALOGUE_FAILED:
+        return (
+            "语音转写未能完成",
+            "转写引擎与模型都在，但转写过程出错了（详见右栏日志）。"
+            "分集已按静音与外挂字幕照常完成；修正后可用「重新解析」重跑。",
+        )
+    if kind == DIALOGUE_EMPTY_AUDIO:
+        return (
+            "源视频没有音轨",
+            "该文件不含音频轨道，无法做语音转写。"
+            "分集按画面黑场与外挂字幕进行；如预期应有对白，请检查源文件。",
+        )
+    return ("", "")
+
+
+def describe_dialogue_failure(kind: str, model_tier: str, raw: str) -> str:
+    """给日志用的**详细**转写失败说明：原因分类 + 该怎么做 + 原始报错。
+
+    原先只打一句 ``跳过语音转写：<异常文本>``——用户看到的是引擎的实现细节
+    （如 "No module named 'faster_whisper'"），既不知道这意味着什么，也不知道
+    下一步。这里分三层：分类结论（人话）→ 可行的下一步 → 原始报错（供排障）。
+    """
+    title, advice = dialogue_failure_advice(kind, model_tier)
+    if not title:
+        title, advice = "转写失败", "原因见后附原始报错。"
+    parts = [f"{title}。{advice}"]
+    raw = (raw or "").strip().splitlines()[0] if (raw or "").strip() else ""
+    if raw:
+        parts.append(f"原始报错：{raw[:200]}")
+    return " ".join(parts)
+
+
 def configured_ollama_model(config: AppConfig | None = None) -> str | None:
     """配置里"使用中的本地语义模型"对应的 Ollama 名字；未指定返回 None。
 
@@ -239,12 +318,35 @@ class AnalysisWorker(BaseWorker):
         # 中间产出：取消或失败时也保留已算出的部分，供调用方按需取用
         self.transcript = None
         self.subtitle_tracks: list = []
+        #: 转写为什么没产出对白——给界面用的可行动诊断，取值见 ``DIALOGUE_*``。
+        #: 空字符串表示"没出问题"。这是"无对白信息"这类含糊警告的唯一解释来源：
+        #: 缺引擎 / 缺模型 / 素材真没对白 是三种完全不同的处境，必须分开说。
+        self.dialogue_diagnosis = ""
+        #: 诊断里的档位名（"未下载模型"这类提示要指名道姓，否则用户不知道下哪个）
+        self.dialogue_model_tier = ""
+        # 阶段计时：记下上一阶段的名称与起点，由 _begin_stage 补一条耗时日志
+        self._stage_name = ""
+        self._stage_t0: float | None = None
+        self._work_t0: float | None = None
         # 求解失败时的图诊断：界面据此给出「应用建议」（§10.4 的可操作化）
         self.failure_diagnostics: GraphDiagnostics | None = None
         #: 模式C 的自动判定结果（TimingDecision）；其他模式为 None，供界面展示
         self.timing_decision = None
 
     # ---- 各阶段 --------------------------------------------------------
+
+    def _begin_stage(self, name: str) -> None:
+        """进入一个阶段：先给上一阶段补一条**耗时**日志，再宣告本阶段开始。
+
+        为什么记耗时：用户报"卡住了"时，最有用的第一手信息是"卡在哪个阶段、
+        花了多久"。原先日志只有阶段名，没有时间，事后完全看不出是哪一步慢。
+        """
+        if self._stage_name and self._stage_t0 is not None:
+            elapsed = time.perf_counter() - self._stage_t0
+            self.stage_log.emit(f"（上一阶段「{self._stage_name}」耗时 {elapsed:.1f} 秒）")
+        self._stage_name = name
+        self._stage_t0 = time.perf_counter()
+        self.stage_started.emit(name)
 
     def describe_error(self, exc: BaseException) -> str:
         return f"分析失败：{exc}"
@@ -268,11 +370,22 @@ class AnalysisWorker(BaseWorker):
         # 厂商档案与后端偏好：转写与语义判断共用这一份（模型对话框写的是同一个文件）
         config = self._config if self._config is not None else AppConfig.load()
 
+        # 全程计时起点（收尾时打一行总耗时，便于判断"整趟慢在哪"）
+        self._work_t0 = time.perf_counter()
+        media = self._media
+        dur = float(media.timeline_duration) if media.timeline_duration else 0.0
+        audio_count = len(media.audio_tracks)
+        fps = float(media.video.nominal_fps) if media.video else 0.0
+        self.stage_log.emit(
+            f"开始分析：时长 {dur:.2f} 秒 · {fps:.3f}fps · "
+            f"{audio_count} 条音轨 · 文件 {Path(media.path).name}"
+        )
+
         transcript = None
         subtitle_tracks = []
 
         # ---- 字幕 --------------------------------------------------
-        self.stage_started.emit("字幕解析")
+        self._begin_stage("字幕解析")
         sidecars = subs.find_sidecar_subtitles(self._media.path)
         for sidecar in sidecars:
             track = subs.load_subtitle_file(sidecar)
@@ -282,8 +395,12 @@ class AnalysisWorker(BaseWorker):
             self.stage_log.emit("未找到同名外挂字幕（SRT/VTT/ASS）。")
 
         # ---- 语音转写 ----------------------------------------------
-        self.stage_started.emit("语音转写")
+        self._begin_stage("语音转写")
         settings = AsrSettings(model_tier=active_whisper_tier(config))
+        self.dialogue_model_tier = settings.model_tier
+        # 无音轨的源片注定转写不出东西：先认出来，别让用户以为"没对白"是引擎问题
+        if not self._media.audio_tracks:
+            self.dialogue_diagnosis = DIALOGUE_EMPTY_AUDIO
         self.stage_log.emit(
             f"本地转写档位：whisper-{settings.model_tier}（可在 工具 → 模型管理 中切换）"
         )
@@ -329,9 +446,17 @@ class AnalysisWorker(BaseWorker):
                         ffmpeg=ffmpeg,
                     )
                 except (RuntimeError, ImportError) as exc2:
-                    self.stage_log.emit(f"跳过语音转写：{exc2}")
+                    self.dialogue_diagnosis = classify_dialogue_failure(str(exc2))
+                    self.stage_log.emit(
+                        "跳过语音转写（本地回退也失败）："
+                        f"{describe_dialogue_failure(self.dialogue_diagnosis, settings.model_tier, str(exc2))}"
+                    )
             else:
-                self.stage_log.emit(f"跳过语音转写：{exc}")
+                self.dialogue_diagnosis = classify_dialogue_failure(str(exc))
+                self.stage_log.emit(
+                    "跳过语音转写："
+                    f"{describe_dialogue_failure(self.dialogue_diagnosis, settings.model_tier, str(exc))}"
+                )
         else:
             if hit:
                 self.stage_log.emit("转写命中缓存。")
@@ -341,6 +466,15 @@ class AnalysisWorker(BaseWorker):
                 self.stage_log.emit(engine.egress_line(transcript))
             for issue in transcript.issues:
                 self.stage_log.emit(f"  风险 {issue.code}：{issue.message}")
+            # 转写"成功"但一句对白都没有：要么素材真没对白，要么引擎跑空。
+            # 有音轨却零句对白值得单独说一句，免得又被读成"转写坏了"。
+            if not transcript.sentences:
+                if not self._media.audio_tracks:
+                    self.dialogue_diagnosis = DIALOGUE_EMPTY_AUDIO
+                else:
+                    self.stage_log.emit(
+                        "转写完成但未识别到任何对白——该片段可能确实无人声。"
+                    )
         # 转写在被取消后也要可见：main_window 靠它决定导出时是否生成 SRT
         self.transcript = transcript
         self.subtitle_tracks = subtitle_tracks
@@ -350,7 +484,7 @@ class AnalysisWorker(BaseWorker):
             return
 
         # ---- 镜头与黑场 --------------------------------------------
-        self.stage_started.emit("镜头与黑场")
+        self._begin_stage("镜头与黑场")
         shots = detect_all(
             self._media.path, ffmpeg, cache=store, fingerprint=fingerprint,
             duration_seconds=float(self._media.timeline_duration),
@@ -359,7 +493,7 @@ class AnalysisWorker(BaseWorker):
         self.stage_log.emit(shots.describe())
 
         # ---- 候选点 ------------------------------------------------
-        self.stage_started.emit("候选点")
+        self._begin_stage("候选点")
         duration = self._media.timeline_duration
         snap = self._media.snap_to_frame
         candidates = build_candidate_set(
@@ -380,7 +514,7 @@ class AnalysisWorker(BaseWorker):
             self.stage_log.emit(f"  {issue.code}：{issue.message}")
 
         # ---- 整体规划 ----------------------------------------------
-        self.stage_started.emit("整体规划")
+        self._begin_stage("整体规划")
         from app.core.planner import PlanningError, plan_rule_based
         from app.core.semantic import EventIndex, judge_candidates, select_judge
         from app.core.settings import CountPolicy, SplitMode, check_feasibility
@@ -500,7 +634,7 @@ class AnalysisWorker(BaseWorker):
         # ---- 整集复核（阶段4）--------------------------------------
         from app.core.review import review_plan
 
-        self.stage_started.emit("边界审核")
+        self._begin_stage("边界审核")
         reviews = review_plan(
             plan, self._media, index,
             transcript=transcript, blacks=shots.blacks,
@@ -514,6 +648,15 @@ class AnalysisWorker(BaseWorker):
             self.stage_log.emit(
                 f"  第{review.episode:02d}集复核[{grade_labels[review.grade]}]：{detail}"
             )
+
+        # 收尾：补上最后一段的耗时，并给出全程总耗时——排障时"哪步慢"一眼可读
+        if self._stage_t0 is not None:
+            self.stage_log.emit(
+                f"（上一阶段「{self._stage_name}」耗时 "
+                f"{time.perf_counter() - self._stage_t0:.1f} 秒）"
+            )
+        if self._work_t0 is not None:
+            self.stage_log.emit(f"分析全程耗时 {time.perf_counter() - self._work_t0:.1f} 秒。")
 
         self.completed.emit(plan, report, problems, candidates, reviews)
 

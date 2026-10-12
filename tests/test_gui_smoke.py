@@ -214,6 +214,61 @@ class TestPlayback:
         assert playing_position > 0.4, f"播放位置应推进，实际 {playing_position:.3f}s"
         assert max(positions) > playing_position - 0.2, "位置回调应覆盖播放过程"
 
+    def test_position_tracks_wall_clock_not_frame_count(self, qapp, binaries, assets):
+        """回归：播放越久、音画越不同步。
+
+        旧实现每个 tick ``_position += 1/fps``，把画面时间绑死在"渲染成功的帧数"
+        上。40ms 间隔恰好卡在 Windows 定时器分辨率边缘，实测每 40ms 漏一次触发，
+        帧率掉到 18fps；而音频走 ffplay 实时钟，两者之差就是累计丢帧量——20 秒
+        漂了近 2 秒。
+
+        这里断言的判据不是"喂了多少帧"，而是**位置是否跟着墙钟走**：播放 1.5 秒
+        后位置必须落在墙钟经过时间附近（允许 0.35s 的起播与调度误差）。
+        """
+        import time
+
+        from PySide6.QtCore import QTimer
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source(assets["cfr"], size=(320, 180))
+        player.set_fps(Fraction(25))
+        player.set_audio_enabled(False)
+        player.set_range(0.0, 30.0)          # 段够长，不至于中途自然播完
+        player.play()
+
+        # 等起表（第一帧到手才起钟）
+        deadline = time.perf_counter() + 2.0
+        while player._clock_start is None and time.perf_counter() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert player._clock_start is not None, "第一帧始终没到手，无法起表"
+
+        t0 = time.perf_counter()
+        QTimer.singleShot(1500, qapp.quit)
+        qapp.exec()
+        wall = time.perf_counter() - t0
+        measured = player.position - player._clock_origin
+        player.stop()
+
+        drift = measured - wall
+        assert abs(drift) < 0.35, (
+            f"位置应跟墙钟走：墙钟经过 {wall:.3f}s，画面时钟推进 {measured:.3f}s，"
+            f"漂移 {drift:+.3f}s（旧实现会随播放时长线性累积）"
+        )
+
+    def test_timer_polls_finer_than_one_frame(self, qapp):
+        """定时器间隔必须比帧时长细，否则 40ms 撞上系统定时器网格会漏触发。"""
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_fps(Fraction(25))         # 帧时长 40ms
+        assert player._interval_ms() < 40, (
+            "轮询间隔必须细于帧时长；用帧时长当间隔会让 Windows 定时器每拍漏一次"
+        )
+
+
 
 class TestPreviewAudio:
     """回归：预览播放以前完全没有声音。
@@ -3762,3 +3817,201 @@ class TestAnalysisSurvivesMissingAsrModule:
         # 必须是 RuntimeError（workers 接得住），不能是 ImportError 冒泡出去
         assert not isinstance(caught.value, ImportError)
         assert "faster-whisper" in str(caught.value)
+
+
+class TestDialogueDiagnosis:
+    """转写没产出对白时，界面要说得清"为什么"——而不是含糊一句"无对白信息"。
+
+    起因：用户装了打包版、下载了模型，却看到"无对白信息，无法做句级复核"，
+    完全不知道问题出在哪（打包版根本不带转写引擎，模型下了也用不上）。
+    这组用例把"三种不同处境要分开说"钉死。
+    """
+
+    def test_classifies_missing_engine(self):
+        from app.gui.workers import DIALOGUE_NO_ENGINE, classify_dialogue_failure
+
+        assert classify_dialogue_failure(
+            "未安装 faster-whisper，无法做语音转写。打包版不含该依赖（体积原因）"
+        ) == DIALOGUE_NO_ENGINE
+        assert classify_dialogue_failure(
+            "No module named 'faster_whisper'"
+        ) == DIALOGUE_NO_ENGINE
+
+    def test_classifies_missing_model(self):
+        from app.gui.workers import DIALOGUE_NO_MODEL, classify_dialogue_failure
+
+        assert classify_dialogue_failure(
+            "未找到模型 small。尚未下载任何模型。请先运行：..."
+        ) == DIALOGUE_NO_MODEL
+
+    def test_missing_engine_advice_points_at_source_build_not_download(self):
+        """缺引擎时**不能**引导用户去下模型——那解决不了问题。"""
+        from app.gui.workers import DIALOGUE_NO_ENGINE, dialogue_failure_advice
+
+        title, detail = dialogue_failure_advice(DIALOGUE_NO_ENGINE)
+        assert "引擎" in title
+        assert "源码版" in detail, "应引导改用源码版，而不是再下模型"
+        assert "下载" not in detail or "用不了" in detail
+
+    def test_detailed_log_line_includes_cause_and_raw_error(self):
+        from app.gui.workers import (
+            DIALOGUE_NO_ENGINE,
+            describe_dialogue_failure,
+        )
+
+        line = describe_dialogue_failure(
+            DIALOGUE_NO_ENGINE, "small", "No module named 'faster_whisper'"
+        )
+        assert "引擎" in line, "要有分类结论（人话）"
+        assert "源码版" in line, "要有下一步"
+        assert "No module named" in line, "要带上原始报错（排障用）"
+
+    def test_pane_surfaces_warning_on_diagnosis(self, window):
+        """分析结束、worker 带诊断时，中栏标题与信号都要反映出来。"""
+        from types import SimpleNamespace
+
+        pane = window.workbench.analysis_pane
+        seen: list = []
+        pane.dialogue_warning.connect(lambda t, d: seen.append((t, d)))
+        worker = SimpleNamespace(dialogue_diagnosis="no_engine", dialogue_model_tier="small")
+        pane._report_dialogue_diagnosis(worker)
+        assert seen, "应发出 dialogue_warning 信号"
+        assert "引擎" in pane.stage_label.text()
+        window.workbench._dialogue_issues = []     # 清理，免得影响后续用例
+
+    def test_no_warning_when_transcript_ok(self, window):
+        from types import SimpleNamespace
+
+        pane = window.workbench.analysis_pane
+        seen: list = []
+        pane.dialogue_warning.connect(lambda t, d: seen.append((t, d)))
+        pane._report_dialogue_diagnosis(SimpleNamespace(dialogue_diagnosis=""))
+        assert not seen, "转写正常时不该弹警告"
+
+
+class TestReparse:
+    """「重新解析」：改了设置 / 补了模型后重跑，不必重新导入源片。
+
+    起因：分析完成后想重跑却没有任何入口——只能「更换视频」把源片重新探测一遍。
+    """
+
+    def test_clear_analysis_results_keeps_media(self):
+        from app.core.plan import BoundaryPlan
+        from app.core.timebase import TimeBase
+        from fractions import Fraction
+
+        from app.gui.state import ProjectState
+
+        state = ProjectState()
+        state.media = object()          # 占位即可，本用例只关心清不清
+        tb = TimeBase(1, 25)
+        T = Fraction(120)
+        plan = BoundaryPlan.from_seconds([T * i / 4 for i in range(5)], tb, tb.seconds_to_ticks(T))
+        state.add_plan(plan)
+        state.candidates = object()
+        state.transcript = object()
+        state.episode_reviews = [object()]
+        state.exported = {1: (__import__("pathlib").Path("a.mp4"), 1)}
+
+        state.clear_analysis_results()
+
+        assert state.media is not None, "重新解析要保留源视频"
+        assert state.plans == [] and state.candidates is None
+        assert state.transcript is None and state.episode_reviews is None
+        assert state.exported == {}, "旧方案的导出记录不再成立，要清掉"
+
+    def test_can_reparse_requires_media_and_no_running_analysis(self, window):
+        pane = window.workbench.analysis_pane
+        saved_media = window.state.media
+        saved_active = pane._active
+        saved_worker = pane.worker
+        try:
+            window.state.media = None
+            ok, reason = window.workbench.can_reparse()
+            assert not ok and "源视频" in reason
+
+            window.state.media = saved_media if saved_media is not None else object()
+            pane._active = False
+            ok, _ = window.workbench.can_reparse()
+            assert ok
+
+            # is_active() 要求 _active 为真**且** worker 非空（"已请求开始、
+            # 线程尚未起来"那一瞬间也算在跑）
+            pane._active = True
+            pane.worker = object()
+            ok, reason = window.workbench.can_reparse()
+            assert not ok and "分析" in reason
+        finally:
+            window.state.media = saved_media
+            pane._active = saved_active
+            pane.worker = saved_worker
+
+    def test_app_bar_exposes_reparse_button(self, window):
+        """顶栏要有可见入口（用户找不到的功能等于不存在）。"""
+        assert hasattr(window.app_bar, "btn_reparse")
+        assert hasattr(window, "action_reparse"), "菜单里也要有一份（含快捷键）"
+
+
+class TestLogExport:
+    """日志导出：排障第一手证据要能一键落盘（原先只能全选复制，长日志选不全）。"""
+
+    def test_export_writes_header_and_body(self, window, tmp_path, monkeypatch):
+        from app.gui.widgets import message
+
+        monkeypatch.setattr(message, "information", lambda *a, **k: None)
+        insp = window.workbench.inspector
+        insp.clear_log()
+        insp.append_log("第一条", "info")
+        insp.append_log("第二条", "warn")
+
+        target = tmp_path / "log.txt"
+        out = insp.export_log(str(target))
+        assert out == str(target)
+        text = target.read_text(encoding="utf-8")
+        assert "日志" in text and "共 2 条" in text
+        assert "第一条" in text and "第二条" in text
+
+    def test_export_empty_log_is_refused(self, window, monkeypatch):
+        from app.gui.widgets import message
+
+        calls: list = []
+        monkeypatch.setattr(message, "information", lambda *a, **k: calls.append(a))
+        insp = window.workbench.inspector
+        insp.clear_log()
+        assert insp.export_log("whatever.txt") is None
+        assert calls, "空日志应给出提示，而不是写出一个空文件"
+
+    def test_log_toolbar_buttons_exist(self, window):
+        insp = window.workbench.inspector
+        assert hasattr(insp, "btn_export_log") and hasattr(insp, "btn_clear_log")
+
+
+class TestExportDialogFitsScreen:
+    """导出窗口要放得进屏幕、也要能拖小。
+
+    起因：960x720 的固定尺寸在小屏笔记本上顶出屏幕，底部按钮点不到，又因为
+    最小尺寸卡死而拖不小。
+    """
+
+    def test_size_is_clamped_to_screen(self, qapp, window):
+        from PySide6.QtWidgets import QApplication
+
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            pytest.skip("无屏幕信息")
+        avail = screen.availableGeometry()
+        dlg = window.build_export_dialog()
+        dlg.show()
+        qapp.processEvents()
+        assert dlg.width() <= avail.width(), "宽度不该超出屏幕"
+        assert dlg.height() <= avail.height(), "高度不该超出屏幕"
+        dlg.close()
+
+    def test_window_can_be_resized_smaller_than_default(self, qapp, window):
+        dlg = window.build_export_dialog()
+        assert dlg.minimumHeight() < dlg.height() or dlg.minimumWidth() < dlg.width(), (
+            "最小尺寸必须小于默认尺寸，否则用户拖不小"
+        )
+        assert dlg.isSizeGripEnabled(), "要给出可拖拽的尺寸把手"
+        dlg.close()
+

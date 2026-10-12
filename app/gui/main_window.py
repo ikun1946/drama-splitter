@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
 
         self.app_bar = AppBar()
         self.app_bar.change_source_clicked.connect(self._on_change_source)
+        self.app_bar.reparse_clicked.connect(self._on_reparse)
 
         self.workbench = Workbench(self.state)
         self.bottom = BottomBar()
@@ -137,6 +138,14 @@ class MainWindow(QMainWindow):
             self.app_bar.set_source(Path(media.path).name, str(media.path))
         else:
             self.app_bar.set_source(None)
+        # 「重新解析」只在有源片、且当前没在分析时出现（分析中该动作无意义）
+        self.app_bar.set_reparse_enabled(
+            media is not None and stage is not Stage.ANALYZING
+        )
+        if hasattr(self, "action_reparse"):
+            self.action_reparse.setEnabled(
+                media is not None and stage is not Stage.ANALYZING
+            )
 
         if hasattr(self, "action_dark"):
             self.action_dark.setChecked(current_mode() == "dark")
@@ -170,6 +179,9 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, "另存为…", lambda: self.save_project(None))
         file_menu.addSeparator()
         self._add_action(file_menu, "更换源视频…", self._on_change_source)
+        self.action_reparse = self._add_action(
+            file_menu, "重新解析", self._on_reparse, "F5"
+        )
         file_menu.addSeparator()
         self._add_action(file_menu, "退出", self.close)
 
@@ -418,6 +430,22 @@ class MainWindow(QMainWindow):
             self.bottom.set_hint("后台任务进行中，等它结束或取消后再更换视频。")
             return
         self.workbench.import_pane.choose_file()
+
+    def _on_reparse(self) -> None:
+        """顶栏「重新解析」/ 菜单项：清掉分析结果、按当前设置重跑（保留源片）。
+
+        改了分集参数、补下了模型、或换了音轨之后，用户需要重跑——原先只能
+        「更换视频」把源片重新导入一遍。这里给出直达入口。
+        """
+        if self.is_busy():
+            self.bottom.set_hint("后台任务进行中，等它结束或取消后再重新解析。")
+            return
+        ok, reason = self.workbench.can_reparse()
+        if not ok:
+            self.bottom.set_hint(reason)
+            return
+        self.bottom.set_hint("")
+        self.workbench.reparse()
 
     def _on_theme_toggled(self) -> None:
         next_mode = "dark" if current_mode() == "light" else "light"

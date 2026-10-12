@@ -851,6 +851,12 @@ QFrame[role="inspector-tabs"] {{
     border-bottom: 1px solid {BORDER};
 }}
 
+QFrame[role="log-toolbar"] {{
+    background: {BG_ALT};
+    border: none;
+    border-bottom: 1px solid {BORDER};
+}}
+
 QPushButton[role="inspector-tab"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     background: transparent;

@@ -38,7 +38,7 @@ from ...core.settings import (
 from ..state import ProjectState
 from ..theme import current_mode, qcolor
 from ..widgets import CapsuleProgressBar, message
-from ..workers import AnalysisWorker
+from ..workers import AnalysisWorker, dialogue_failure_advice
 from ._common import register_worker
 
 __all__ = ["AnalysisPane"]
@@ -223,6 +223,9 @@ class AnalysisPane(QWidget):
     stage_changed = Signal(str)
     progress_changed = Signal(str, float)   # (最近输出, 总进度 0-1)
     log_appended = Signal(str, str)         # (文本, 级别)
+    #: 转写没产出对白时的可行动警告（标题, 详细说明）。工作台据此在检查器
+    #: 里立一条问题，让"为什么没对白"不再只躺在日志里。
+    dialogue_warning = Signal(str, str)
     finished = Signal()
 
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
@@ -419,6 +422,12 @@ class AnalysisPane(QWidget):
         else:
             self.recent.setText(f"方案 v{plan.version}：{plan.episode_count} 集，见左侧集列表。")
 
+        # 转写没产出对白时，把**原因与下一步**提到最显眼的地方。
+        # 这是"界面不撒谎"的落点：缺引擎、缺模型、素材没音轨是三种完全不同的
+        # 处境，含糊地报一句"无对白信息"会让下了模型的用户彻底懵——他不知道
+        # 自己下的模型根本用不上。诊断由 worker 给出（见 workers.dialogue_*）。
+        self._report_dialogue_diagnosis(worker)
+
         self._append(f"候选点：{candidates.describe()}")
         for note in candidates.limitations:
             self._append(f"  限流：{note}")
@@ -488,6 +497,26 @@ class AnalysisPane(QWidget):
                 return
         message.warning(self, "无法完成分析", text)
         self.finished.emit()
+
+    def _report_dialogue_diagnosis(self, worker) -> None:
+        """把"为什么没有对白"讲清楚，并给出能做的下一步。
+
+        ``worker.dialogue_diagnosis`` 是空串表示转写正常。非空时：
+        - 在阶段标题正下方挂一句醒目结论（recent 那里会被方案摘要占据；
+          stage_label 是用户不移动视线就在的位置）；
+        - 同步写一条日志（右栏可回查）；
+        - 广播 ``dialogue_warning``（工作台据此在检查器里立一条可行动问题）。
+        """
+        if worker is None:
+            return
+        kind = getattr(worker, "dialogue_diagnosis", "") or ""
+        tier = getattr(worker, "dialogue_model_tier", "") or ""
+        title, detail = dialogue_failure_advice(kind, tier)
+        if not title:
+            return
+        self.stage_label.setText(f"分析完成 · {title}")
+        self._append(f"⚠ {title}：{detail}", "warn")
+        self.dialogue_warning.emit(title, detail)
 
     def _failure_advice(self) -> list[SettingAdvice]:
         """刚失败的那次求解留下的、可一键应用的建议；没有时返回空表。"""

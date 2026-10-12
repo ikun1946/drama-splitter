@@ -25,9 +25,10 @@ _MAX_TITLE_CHARS = 36
 
 
 class AppBar(QFrame):
-    """顶栏：源文件名（未导入时是应用名）+ 保存状态 + 更换视频。"""
+    """顶栏：源文件名（未导入时是应用名）+ 保存状态 + 更换视频 + 重新解析。"""
 
     change_source_clicked = Signal()
+    reparse_clicked = Signal()
 
     def __init__(self, title: str = _APP_TITLE, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +46,17 @@ class AppBar(QFrame):
         self.save_label = QLabel("")
         self.save_label.setProperty("role", "status-text")
 
+        # 重新解析：改了设置 / 补下模型后重跑，不必重新导入源片。
+        # 只在已有源片且当前没在分析时可用（由主窗口按阶段置灰）。
+        self.btn_reparse = QPushButton("重新解析")
+        self.btn_reparse.setProperty("role", "ghost")
+        self.btn_reparse.setToolTip(
+            "按当前设置重跑一次分析（保留源视频）。改了分集参数或补下模型后用得上。"
+        )
+        self.btn_reparse.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reparse.clicked.connect(self.reparse_clicked)
+        self.btn_reparse.setVisible(False)
+
         self.btn_change_source = QPushButton("更换视频")
         self.btn_change_source.setProperty("role", "ghost")
         self.btn_change_source.setToolTip("重新选择源视频（也可直接把文件拖进窗口）")
@@ -57,9 +69,15 @@ class AppBar(QFrame):
         layout.addWidget(self.title_label)
         layout.addStretch(1)
         layout.addWidget(self.save_label)
+        layout.addWidget(self.btn_reparse)
         layout.addWidget(self.btn_change_source)
 
     # ---- 状态 ----------------------------------------------------------
+
+    def set_reparse_enabled(self, enabled: bool) -> None:
+        """有无源片决定「重新解析」是否出现（未导入时隐藏，别给空入口）。"""
+        self.btn_reparse.setVisible(enabled)
+        self.btn_reparse.setEnabled(enabled)
 
     def set_source(self, filename: str | None, path: str | None = None) -> None:
         """导入后标题让位给源文件名；清空（None）则回到应用标题。

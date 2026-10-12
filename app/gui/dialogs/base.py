@@ -36,6 +36,10 @@ __all__ = ["DialogShell"]
 class DialogShell(QDialog):
     """标题栏 + 内容区 + 底部按钮行。"""
 
+    #: 最小尺寸的下限。内容控件自身的最小宽度之和约 700，再小就会被压扁。
+    MIN_WIDTH = 720
+    MIN_HEIGHT = 520
+
     def __init__(
         self,
         title: str,
@@ -46,9 +50,14 @@ class DialogShell(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(width, height)
-        # 三栏版式下的对话框最小尺寸：内容控件自身的最小宽度之和约 700
-        self.setMinimumSize(720, 520)
+        # 按屏幕可用区收缩：小屏笔记本（1366x768）上，960x720 的请求高度会超过
+        # 工作区，窗口底部按钮点不到、又因为固定最小尺寸而拖不动。这里把请求尺寸
+        # 与最小尺寸都压到屏幕能容纳的范围内——宁可内容滚动，也不让窗口"顶出屏幕"。
+        max_w, max_h = self._screen_limits()
+        min_w = min(self.MIN_WIDTH, max_w)
+        min_h = min(self.MIN_HEIGHT, max_h)
+        self.setMinimumSize(min_w, min_h)
+        self.resize(min(width, max_w), min(height, max_h))
         self.setSizeGripEnabled(True)
 
         self._outer = QVBoxLayout(self)
@@ -65,6 +74,22 @@ class DialogShell(QDialog):
         self._footer.setContentsMargins(16, 10, 16, 12)
         self._footer.setSpacing(8)
         self._footer.addWidget(self.footer_hint, 1)
+
+    @staticmethod
+    def _screen_limits() -> tuple[int, int]:
+        """当前屏幕可用区的 (宽, 高)，留一点边距避免贴着任务栏/边缘。
+
+        拿不到屏幕时（离屏测试、无 GUI 会话）退回一个保守的常用分辨率，
+        不让对话框因取不到屏幕而变得不可用。
+        """
+        from PySide6.QtWidgets import QApplication
+
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return (1366, 720)
+        avail = screen.availableGeometry()
+        # 留 40px 纵向余量给标题栏／任务栏，别让窗口顶到屏幕边缘
+        return (max(640, avail.width() - 40), max(480, avail.height() - 60))
 
     # ---- 装配 ----------------------------------------------------------
 

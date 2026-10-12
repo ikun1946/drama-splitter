@@ -277,6 +277,26 @@ class StreamPlayer(QObject):
         self._audio_track: int | None = None
         self._audio_enabled = True
 
+        # 画面时钟：跟墙钟走，不跟"送达的帧数"走。
+        #
+        # 早先的写法是每个 tick ``self._position += 1/fps``。那等于把画面时间
+        # 绑在"解码并渲染成功的帧数"上：一旦某帧渲染超过一个帧时长，Qt 定时器
+        # 会把错过的 tick 合并掉，而位置只前进一帧——**每丢一帧就永久落后 40ms，
+        # 再也追不回来**。音频走的是 ffplay 的实时钟（准的），两者之差就是累计
+        # 丢帧量，实测每分钟漂 ~3 秒，正是"越放越不同步"。
+        #
+        # 改成 ``clock_origin + (now - clock_start)``：位置恒等于真实经过的时间，
+        # 解码跟不上时就**丢帧追赶**（弃掉过期的中间帧），宁可掉帧也不漂移——
+        # 掉帧只影响流畅度，漂移则会毁掉音画同步。
+        self._clock_origin = 0.0
+        self._clock_start: float | None = None   # None = 本段尚未起表（等第一帧到手）
+        # 已经**显示过**的帧序号（相对本段起点）。定时器是细粒度轮询，一帧时长内
+        # 会触发好几次；这个值是"这一 tick 是否该换新帧"的判据。
+        self._last_index = -1
+        # 已经**从解码队列取走**的帧序号。取走第 i 帧后它等于 i，于是队列里下一
+        # 帧的序号是 _last_taken_index + 1——丢帧追赶时据此算该丢几帧。
+        self._last_taken_index = -1
+
         self._timer = QTimer(self)
         # 帧率定时必须用精确定时器，否则播放节奏会随系统负载漂移
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -340,6 +360,7 @@ class StreamPlayer(QObject):
         self._start_reader(self._position)
         self._timer.start(self._interval_ms())
         self._start_audio()
+
 
     def pause(self) -> None:
         self._set_playing(False)
@@ -448,7 +469,17 @@ class StreamPlayer(QObject):
     # ---- 内部 ----------------------------------------------------------
 
     def _interval_ms(self) -> int:
-        return max(8, int(round(1000.0 / float(self._fps))))
+        """定时器轮询间隔，**不是**帧时长。
+
+        为什么不用帧时长当间隔：Windows 的定时器默认分辨率是 ~15.6ms，40ms 的
+        间隔会让触发起伏被系统网格量化，实测**每个 40ms 间隔都会漏掉一次触发**，
+        帧率从 25 掉到 18——而早先"每 tick 出一帧"的写法会把漏掉的触发直接变成
+        永久性掉帧。改成 10ms 细粒度轮询后，一帧时长（40ms）内会触发约 4 次，
+        该出哪一帧完全由 ``_on_tick`` 里的墙钟决定，多出来的触发直接早退。
+        实测：40ms → 18 fps，20ms → 25 fps，10ms → 36 fps。
+        """
+        return 10
+
 
     def _frame_size(self) -> tuple[int, int]:
         """每帧原始字节对应的输出尺寸（``set_source`` 已知源分辨率时直接用）。"""
@@ -505,6 +536,14 @@ class StreamPlayer(QObject):
         self._stop_flag.clear()
         with self._lock:
             self._queue.clear()
+        # 本段起点就是 start_seconds；但**先不起表**——ffmpeg 进程从启动到吐出
+        # 第一帧有实打实的开销（1080p 上可达数百毫秒），若在启动那一刻就计时，
+        # 第一帧到手时已"欠"了几百毫秒，会立刻触发丢帧追赶、开局就跳。
+        # 改成第一帧真正到手时才起表（见 _on_tick），位置从起点干净地开始。
+        self._clock_origin = max(0.0, start_seconds)
+        self._clock_start = None
+        self._last_index = -1
+        self._last_taken_index = -1
         self._proc = subprocess.Popen(
             self._build_stream_command(start_seconds),
             stdout=subprocess.PIPE,
@@ -549,8 +588,61 @@ class StreamPlayer(QObject):
 
     def _on_tick(self) -> None:
         size = self._frame_size()
+        frame_duration = 1.0 / float(self._fps)
+
+        # 尚未起表（本段第一帧还没到手）：这一 tick 只探队首，别推进位置。
+        # 起表时刻就是"第一帧该显示的瞬间"，位置自此从起点匀速前进。
+        if self._clock_start is None:
+            with self._lock:
+                ready = len(self._queue) > 0
+            if not ready:
+                if self._reader is not None and not self._reader.is_alive():
+                    self._set_playing(False)
+                    self._timer.stop()
+                    self.playback_finished.emit()
+                return
+            self._clock_start = time.perf_counter()
+
+        # 位置由墙钟决定，而不是"取了几帧"。clock_origin 是本段起点，加上真实
+        # 经过的时间就是此刻应处的位置——解码慢了也是这个值，不会被拖住。
+        elapsed = time.perf_counter() - self._clock_start
+        self._position = self._clock_origin + elapsed
+
+        # 这一段播完了就给个小余量收尾（余量是为了别把正好落在 end 上的最后一帧切掉）
+        if self._end is not None and self._position >= self._end + frame_duration * 0.5:
+            with self._lock:
+                self._queue.clear()
+            self._set_playing(False)
+            self._timer.stop()
+            self._stop_reader()
+            self.playback_finished.emit()
+            return
+
+        # 本帧应显示的序号（从段起点算起）。定时器是细粒度轮询，一帧时长内可能
+        # 触发多次；只在确实该换到新的一帧时才出图，否则直接早退（省掉重复的
+        # QImage 构造与信号投递）。
+        target_index = int(elapsed / frame_duration)
+        if target_index <= self._last_index:
+            return
+        self._last_index = target_index
+
         with self._lock:
-            chunk = self._queue.popleft() if self._queue else None
+            queued = len(self._queue)
+            if queued == 0:
+                chunk = None
+            else:
+                # 队列里下一帧的序号是 _last_taken_index + 1。要取到 target_index，
+                # 需要先丢掉排在它前面的 (target_index - 1 - _last_taken_index) 帧
+                # —— 那些都已过期（解码跟不上时），丢了才追得回墙钟。
+                drop = target_index - self._last_taken_index - 1
+                if drop > 0:
+                    drop = min(drop, queued - 1)     # 至少留一帧（就是目标帧）
+                    for _ in range(drop):
+                        self._queue.popleft()
+                    self._last_taken_index += drop
+                chunk = self._queue.popleft() if self._queue else None
+            if chunk is not None:
+                self._last_taken_index += 1
 
         if chunk is None:
             # 预解码队列空：若解码线程已结束，说明本段播完
@@ -573,15 +665,6 @@ class StreamPlayer(QObject):
             size[0] * 3,
             QImage.Format.Format_RGB888,
         ).copy()
-
-        frame_duration = 1.0 / float(self._fps)
-        self._position += frame_duration
-        if self._end is not None and self._position > self._end + frame_duration:
-            self._set_playing(False)
-            self._timer.stop()
-            self._stop_reader()
-            self.playback_finished.emit()
-            return
 
         self.frame_ready.emit(image)
         self.position_changed.emit(self._position)
