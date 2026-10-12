@@ -151,6 +151,253 @@ begin
             or PATHHasFFmpeg(GetEnv('PATH'));
 end;
 
+// ===========================================================================
+// 卸载时的可选清理
+// ===========================================================================
+//
+// 为什么需要它：安装程序只登记了随包分发的文件，卸载器照单删除，但程序运行时
+// 自己在 exe 同级生成的三样东西不在那份清单里——config.json、cache/、models/。
+// 不显式处理的话，卸载完安装目录会留着一个空壳（目录非空，连 {app} 都删不掉），
+// 模型动辄几个 GB 更是白占空间。
+//
+// 三样东西的价值差别很大，所以**默认状态不同**，不是一刀切：
+//   cache/      分析缓存，纯可重建 → 默认勾选（删了没有任何损失）
+//   models/     下载的模型，动辄数 GB 且受限于网速 → 默认不勾（删了要重下）
+//   config.json 设置与云端 API Key       → 默认不勾（删了要重新配置）
+// 破坏性操作不给"默认全选"，宁可让用户少清理一次，也不要让人误删几个 GB。
+//
+// 静默卸载（/VERYSILENT，自动化部署走这条）一律**不删**任何数据——无人值守时
+// 不该销毁数据。要清理得用命令行开关显式声明：
+//     unins000.exe /VERYSILENT /DELCACHE /DELMODELS /DELCONFIG
+// 开关与界面复选框走同一组变量，两条路径的行为不会分叉。
+
+var
+  DelModels: Boolean;
+  DelCache: Boolean;
+  DelConfig: Boolean;
+
+// 递归求目录字节数。Inno 的 TFindRec 没有 Size 字段，只有 SizeLow/SizeHigh
+// 两个 32 位分量，必须自己拼回 64 位——单个模型文件超过 4 GB 是常态，
+// 只用 SizeLow 会把体积报成错的（甚至"负"的）。
+function DirSizeBytes(const Dir: String): Int64;
+var
+  FindRec: TFindRec;
+  Sub: String;
+begin
+  Result := 0;
+  if not FindFirst(Dir + '\*', FindRec) then
+    Exit;
+  try
+    repeat
+      if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+      begin
+        Sub := Dir + '\' + FindRec.Name;
+        if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          Result := Result + DirSizeBytes(Sub)
+        else
+          Result := Result + (Int64(FindRec.SizeHigh) * 4294967296) + FindRec.SizeLow;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function FormatBytes(Value: Int64): String;
+begin
+  if Value >= 1073741824 then
+    Result := Format('%.1f GB', [Value / 1073741824.0])
+  else if Value >= 1048576 then
+    Result := Format('%.0f MB', [Value / 1048576.0])
+  else if Value >= 1024 then
+    Result := Format('%.0f KB', [Value / 1024.0])
+  else
+    Result := IntToStr(Value) + ' B';
+end;
+
+// Inno 没有「命令行里有没有某个开关」的现成函数（CmdLineParamExists 在 6.7
+// 里并不存在），只有 GetCmdTail 返回整条命令行尾部，所以这里自己扫一遍。
+// 大小写不敏感，与 Windows 命令行惯例一致。
+function CmdLineHasSwitch(const Name: String): Boolean;
+var
+  Tail, UpperName: String;
+begin
+  Tail := UpperCase(GetCmdTail);
+  UpperName := UpperCase(Name);
+  Result := Pos(UpperName, Tail) > 0;
+end;
+
+function DataCachePath: String;
+begin
+  Result := ExpandConstant('{app}') + '\cache';
+end;
+
+function DataModelsPath: String;
+begin
+  Result := ExpandConstant('{app}') + '\models';
+end;
+
+function DataConfigPath: String;
+begin
+  Result := ExpandConstant('{app}') + '\config.json';
+end;
+
+// 三样里有没有哪样真的存在。都没有就别弹窗打扰用户。
+function HasDeletableData: Boolean;
+begin
+  Result := DirExists(DataCachePath)
+            or DirExists(DataModelsPath)
+            or FileExists(DataConfigPath);
+end;
+
+// 交互式卸载的清理选项框。点「取消」返回 False，由调用方中止整个卸载——
+// 半途退出卸载会让人以为"卸载了其实没卸"，不如整件事重来。
+function AskWhatToDelete(): Boolean;
+var
+  Form: TSetupForm;
+  Intro, Note, Verdict: TNewStaticText;
+  CBModels, CBCache, CBConfig: TNewCheckBox;
+  DeleteButton, CancelButton: TNewButton;
+  Y: Integer;
+begin
+  Result := True;
+  Form := CreateCustomForm(ScaleX(530), ScaleY(330), False, False);
+  try
+    Form.Caption := '卸载 AI 短剧智能分集器';
+
+    Intro := TNewStaticText.Create(Form);
+    Intro.Parent := Form;
+    Intro.Left := ScaleX(18);
+    Intro.Top := ScaleY(16);
+    Intro.Caption := '程序即将卸载。以下数据由程序在运行中生成，是否一并删除？';
+
+    Y := ScaleY(48);
+
+    CBCache := TNewCheckBox.Create(Form);
+    CBCache.Parent := Form;
+    CBCache.Left := ScaleX(18);
+    CBCache.Top := Y;
+    CBCache.Width := Form.ClientWidth - ScaleX(36);
+    CBCache.Caption := '分析缓存（' + FormatBytes(DirSizeBytes(DataCachePath))
+                       + '）——删了下次重新分析即可重建';
+    CBCache.Checked := True;   // 可重建，默认删
+
+    Y := Y + ScaleY(46);
+
+    CBModels := TNewCheckBox.Create(Form);
+    CBModels.Parent := Form;
+    CBModels.Left := ScaleX(18);
+    CBModels.Top := Y;
+    CBModels.Width := Form.ClientWidth - ScaleX(36);
+    CBModels.Caption := '下载的模型（' + FormatBytes(DirSizeBytes(DataModelsPath))
+                        + '）——默认保留，删了要重新下载';
+    CBModels.Checked := False;
+
+    Y := Y + ScaleY(46);
+
+    CBConfig := TNewCheckBox.Create(Form);
+    CBConfig.Parent := Form;
+    CBConfig.Left := ScaleX(18);
+    CBConfig.Top := Y;
+    CBConfig.Width := Form.ClientWidth - ScaleX(36);
+    CBConfig.Caption := '应用配置 config.json（含界面设置与云端 API Key）——默认保留';
+    CBConfig.Checked := False;
+
+    Y := Y + ScaleY(52);
+
+    Note := TNewStaticText.Create(Form);
+    Note.Parent := Form;
+    Note.Left := ScaleX(18);
+    Note.Top := Y;
+    Note.Width := Form.ClientWidth - ScaleX(36);
+    Note.WordWrap := True;
+    Note.AutoSize := False;
+    Note.Height := ScaleY(48);
+    Note.Caption := '项目文件（*.drama-project）与导出的视频都保存在你自己选择的位置，'
+                    + '不在安装目录内，卸载不会删除它们。'
+                    + '模型若被改到安装目录之外，也不会被删除。';
+
+    Verdict := TNewStaticText.Create(Form);
+    Verdict.Parent := Form;
+    Verdict.Left := ScaleX(18);
+    Verdict.Top := Form.ClientHeight - ScaleY(54);
+    Verdict.Caption := '勾选的数据删除后不可恢复。';
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := '取消';
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+    CancelButton.Width := ScaleX(88);
+    CancelButton.Height := ScaleY(26);
+    CancelButton.Left := Form.ClientWidth - ScaleX(18 + 88);
+    CancelButton.Top := Form.ClientHeight - ScaleY(26 + 16);
+
+    DeleteButton := TNewButton.Create(Form);
+    DeleteButton.Parent := Form;
+    DeleteButton.Caption := '继续卸载';
+    DeleteButton.ModalResult := mrOk;
+    DeleteButton.Default := True;
+    DeleteButton.Width := ScaleX(88);
+    DeleteButton.Height := ScaleY(26);
+    DeleteButton.Left := CancelButton.Left - ScaleX(88 + 8);
+    DeleteButton.Top := CancelButton.Top;
+
+    Form.ActiveControl := DeleteButton;
+
+    if Form.ShowModal() <> mrOk then
+    begin
+      Result := False;
+      Exit;
+    end;
+
+    DelCache := CBCache.Checked;
+    DelModels := CBModels.Checked;
+    DelConfig := CBConfig.Checked;
+  finally
+    Form.Free();
+  end;
+end;
+
+// 卸载开始时决定删什么。静默模式只看命令行开关（默认全不删）；交互模式弹选项框。
+function InitializeUninstall(): Boolean;
+begin
+  DelCache := False;
+  DelModels := False;
+  DelConfig := False;
+  Result := True;
+
+  if UninstallSilent() then
+  begin
+    // 无人值守不删数据。要清理得显式给开关。
+    DelCache := CmdLineHasSwitch('/DELCACHE');
+    DelModels := CmdLineHasSwitch('/DELMODELS');
+    DelConfig := CmdLineHasSwitch('/DELCONFIG');
+    Exit;
+  end;
+
+  if not HasDeletableData() then
+    Exit;   // 没有可清理的东西，不打扰
+
+  Result := AskWhatToDelete();
+end;
+
+// 在 usUninstall（文件删除**之前**）动手：这样被清掉的目录不再占用 {app}，
+// 卸载器随后能把随包文件删净、并把空掉的 {app} 一并移除。放在 usPostUninstall
+// 会晚一步——那时 {app} 已因非空被判为"留着"，反而留下一个空目录。
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    if DelCache and DirExists(DataCachePath) then
+      DelTree(DataCachePath, True, True, True);
+    if DelModels and DirExists(DataModelsPath) then
+      DelTree(DataModelsPath, True, True, True);
+    if DelConfig and FileExists(DataConfigPath) then
+      DeleteFile(DataConfigPath);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then

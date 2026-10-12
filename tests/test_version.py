@@ -146,6 +146,46 @@ def test_installer_verifies_main_exe_under_app_dir():
 
 
 # ---------------------------------------------------------------------------
+# 卸载时的可选数据清理
+#
+# 程序运行时在 exe 同级生成 config.json / cache/ / models/，这些不在安装器
+# 的文件清单里，不显式处理就会在卸载后留下垃圾（models 动辄数 GB）。
+# 交互卸载给一个带三个复选框的窗口；静默卸载只看命令行开关。
+# ---------------------------------------------------------------------------
+
+
+def test_installer_offers_uninstall_cleanup():
+    text = installer_iss_code()
+    assert "InitializeUninstall" in text, "installer.iss 没有卸载入口 InitializeUninstall"
+    assert "CurUninstallStepChanged" in text, "installer.iss 没有 CurUninstallStepChanged"
+    assert "CreateCustomForm" in text, "卸载时没有自定义选项窗口"
+    for label in ("TNewCheckBox", "DelCache", "DelModels", "DelConfig"):
+        assert label in text, f"installer.iss 缺少 {label}"
+
+
+def test_uninstall_cleanup_targets_the_three_data_items():
+    """三样数据各删各的，且都用 {app} 作根——不碰安装目录外的东西。"""
+    text = installer_iss_code()
+    assert "DataCachePath" in text and "DataModelsPath" in text and "DataConfigPath" in text
+    # 三个删除动作都要在 CurUninstallStepChanged 里，且都以 DelXxx 变量为条件
+    for guard in ("if DelCache", "if DelModels", "if DelConfig"):
+        assert guard in text, f"installer.iss 缺少删除条件 {guard}"
+    assert "DelTree" in text and "DeleteFile(DataConfigPath)" in text
+
+
+def test_silent_uninstall_does_not_delete_data_without_switches():
+    """静默卸载默认不删任何数据；清理必须由命令行开关显式声明。
+
+    这是安全底线：无人值守（CI、批量部署）跑一次卸载不该销毁用户数据。
+    三条开关名一并固定下来，避免日后被改名或加默认值。
+    """
+    text = installer_iss_code()
+    assert "UninstallSilent()" in text, "卸载入口没有区分静默模式"
+    for switch in ("/DELCACHE", "/DELMODELS", "/DELCONFIG"):
+        assert switch in text, f"installer.iss 缺少静默清理开关 {switch}"
+
+
+# ---------------------------------------------------------------------------
 # 打包态路径：用户可写的东西必须落在 exe 旁边，不能写进安装目录
 #
 # PyInstaller 的 onedir 产物把 Python 运行时与全部模块放在 exe 同级的
