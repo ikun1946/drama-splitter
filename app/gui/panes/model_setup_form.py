@@ -293,7 +293,7 @@ class _CapabilityCard(QWidget):
         detail: str = "",
         fix: tuple[str, str] | None = None,
     ) -> None:
-        """结论 + 细节。``fix`` = (按钮文案, "providers" | "download")。"""
+        """结论 + 细节。``fix`` = (按钮文案, "providers" | "download" | "envcheck")。"""
         self.status_main.setText(main)
         self.status_main.setProperty("tone", tone)
         self.status_main.style().unpolish(self.status_main)
@@ -364,6 +364,8 @@ class ModelSetupForm(QWidget):
     configure_providers_requested = Signal()
     #: 用户要下载本地模型 —— 打开「模型管理 → 本地模型」
     download_models_requested = Signal()
+    #: 用户要看运行环境（缺转写引擎时唯一有效的下一步：改用源码版）
+    env_check_requested = Signal()
 
     def __init__(
         self,
@@ -501,14 +503,43 @@ class ModelSetupForm(QWidget):
         return [ModelChoice(KIND_HEADER, "本地模型", selectable=False), *rows]
 
     def _local_ready(self, capability: str) -> bool:
-        """配置指向的本地模型此刻是不是真的能用。"""
+        """配置指向的本地模型此刻是不是真的能用。
+
+        语音转写这一档**必须同时**满足两件事：模型文件在，且转写引擎
+        （faster-whisper）可用。只看模型是不够的——打包版有意不含
+        faster-whisper（体积），此时模型下得再齐，转写一次也跑不了。
+        原先只查模型，于是界面给下了模型、却跑不了转写的用户打一句绿色的
+        "正在使用 本地 whisper small"，与分析页/环境自检的口径自相矛盾。
+        """
         value = str(getattr(self._config, _LOCAL_FIELD[capability], "") or "")
         if not value:
+            return False
+        if capability == CAP_ASR and not self._asr_engine_available():
             return False
         root = self._config.resolved_models_dir()
         if capability == CAP_ASR:
             return value in set(installed_whisper_tiers(root))
         return any(spec.key == value for spec in installed_llm_specs(root))
+
+    def _asr_engine_available(self) -> bool:
+        """转写引擎（faster-whisper）此刻是否可导入。
+
+        复用环境自检的 ``_module_available``（用 find_spec 探测，不真正加载
+        模块顶层）。做成实例方法是为了测试能打桩——测试机通常没装
+        faster-whisper，不打桩就永远测不到"引擎可用"这条分支。
+        """
+        from ...core.env_check import _module_available
+
+        return _module_available("faster_whisper")
+
+    def _asr_model_present(self) -> bool:
+        """语音转写的**模型文件**是否就位（不看引擎）。用于区分两种失败。"""
+        value = str(getattr(self._config, "asr_model_tier", "") or "")
+        if not value:
+            return False
+        root = self._config.resolved_models_dir()
+        return value in set(installed_whisper_tiers(root))
+
 
     def _local_count(self, capability: str) -> int:
         """本机真正装了几个本地模型（"未安装"的补项不计入）。"""
@@ -606,6 +637,25 @@ class ModelSetupForm(QWidget):
             model = str(getattr(cloud, _MODEL_FIELD[capability], "") or "")
             card.set_badge("云端")
             card.set_status(f"正在使用 云端 {cloud.label} 的 {model}。")
+            return
+
+        # 语音转写专有的一种处境：**模型下好了，但这一版没有转写引擎**。
+        # 必须单独说，且要早于下面的通用"未就绪"分支——否则用户会看到
+        # "本机没有安装可用的模型，去下载"，而去下载根本解决不了缺引擎的问题
+        # （他已经下过了）。这与环境自检在缺 faster-whisper 时收起模型下载
+        # 按钮是同一条道理。
+        if capability == CAP_ASR and self._asr_model_present() and not self._asr_engine_available():
+            card.set_badge("本地", warn=True)
+            card.set_status(
+                f"{label}不会执行：本版本不含转写引擎。",
+                tone="warn",
+                detail=(
+                    "模型已就绪，但当前运行的是打包版，因体积原因不含 "
+                    "faster-whisper。下载再多模型也用不了转写——请改用源码版运行"
+                    "（pip install -r requirements.txt）。"
+                ),
+                fix=("去自检", "envcheck"),
+            )
             return
 
         if not self._local_ready(capability):
@@ -739,6 +789,11 @@ class ModelSetupForm(QWidget):
     def _on_fix_requested(self, capability: str, action: str) -> None:
         if action == "download":
             self.download_models_requested.emit()
+        elif action == "envcheck":
+            # 缺转写引擎时，唯一有效的下一步是看环境自检（那里会说明该改用
+            # 源码版）。**刻意不落到 providers**：把"缺引擎"的人引到厂商配置
+            # 页，等于让他白忙一场。
+            self.env_check_requested.emit()
         else:
             self.configure_providers_requested.emit()
 

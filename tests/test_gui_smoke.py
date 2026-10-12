@@ -3039,6 +3039,92 @@ class TestModelSetupDialog:
             dialog.close()
 
 
+class TestAsrEngineMissingStatus:
+    """语音转写：模型下了、但这一版没有转写引擎时，界面**必须直说**。
+
+    起因：打包版因体积原因不含 faster-whisper，但「下载模型」照常可用。用户
+    下完 484MB 的模型，卡片却打着绿色的"正在使用 本地 whisper small"——因为
+    旧判据只看模型文件在不在。结果转写一次也跑不了，与分析页"无对白信息"、
+    环境自检"未安装 faster-whisper"三处口径互相打架，且这一处是错的。
+
+    修法：语音转写的"本地就绪"要**同时**要求引擎可用；模型在、引擎缺时给出
+    单独的结论，并把修复按钮指向环境自检（而非"去下载"，那解决不了问题）。
+    """
+
+    def _form(self, window, tmp_path, monkeypatch, *, engine: bool):
+        from app.gui.panes.model_setup_form import ModelSetupForm
+
+        models_root = tmp_path / "models"
+        models_root.mkdir(exist_ok=True)
+        _install_whisper(models_root, "small")
+        config_file = tmp_path / "config.json"
+        from app.core.app_config import AppConfig
+
+        config = AppConfig.load(config_file)
+        config.models_dir = str(models_root)
+        config.asr_model_tier = "small"
+        config.save(config_file)
+
+        form = ModelSetupForm(window.state, None, config_path=config_file)
+        # 打桩引擎探测：测试机通常没装 faster-whisper，不打桩就测不到"可用"分支
+        monkeypatch.setattr(form, "_asr_engine_available", lambda: engine)
+        return form
+
+    def test_model_present_but_engine_missing_is_reported(self, window, tmp_path, monkeypatch):
+        from app.gui.panes.model_setup_form import CAP_ASR
+
+        form = self._form(window, tmp_path, monkeypatch, engine=False)
+        assert form._asr_model_present(), "前提：模型文件确实装好了"
+        assert not form._local_ready(CAP_ASR), "缺引擎时不该判为就绪"
+
+        card = form._cards[CAP_ASR]
+        form._refresh_status(card)
+        assert "引擎" in card.status_main.text(), (
+            f"应指出缺引擎，实际是「{card.status_main.text()}」"
+        )
+        assert "不使用" in card.status_main.text() or "不会执行" in card.status_main.text()
+
+    def test_missing_engine_offers_envcheck_not_download(self, window, tmp_path, monkeypatch):
+        """修复按钮必须指向环境自检——去下载解决不了缺引擎。"""
+        from app.gui.panes.model_setup_form import CAP_ASR
+
+        form = self._form(window, tmp_path, monkeypatch, engine=False)
+        card = form._cards[CAP_ASR]
+        form._refresh_status(card)
+        assert card._fix_action == "envcheck", (
+            f"缺引擎时的动作应是 envcheck（去自检），实际 {card._fix_action!r}"
+        )
+
+        seen: list = []
+        form.env_check_requested.connect(lambda: seen.append(True))
+        form._on_fix_requested(CAP_ASR, "envcheck")
+        assert seen, "点「去自检」应发出 env_check_requested"
+
+    def test_engine_present_reports_in_use(self, window, tmp_path, monkeypatch):
+        """引擎与模型都在 → 恢复成"正在使用"，不误报。"""
+        from app.gui.panes.model_setup_form import CAP_ASR
+
+        form = self._form(window, tmp_path, monkeypatch, engine=True)
+        assert form._local_ready(CAP_ASR)
+        card = form._cards[CAP_ASR]
+        form._refresh_status(card)
+        assert "正在使用" in card.status_main.text()
+
+    def test_envcheck_action_does_not_fall_through_to_providers(
+        self, window, tmp_path, monkeypatch
+    ):
+        """未知动作曾一律落到"去配置厂商"——缺引擎的人会被引去填 API Key。"""
+        from app.gui.panes.model_setup_form import CAP_ASR
+
+        form = self._form(window, tmp_path, monkeypatch, engine=False)
+        to_env: list = []
+        to_providers: list = []
+        form.env_check_requested.connect(lambda: to_env.append(True))
+        form.configure_providers_requested.connect(lambda: to_providers.append(True))
+        form._on_fix_requested(CAP_ASR, "envcheck")
+        assert to_env and not to_providers, "envcheck 不该落到 providers 分支"
+
+
 class TestModelSetupSectionHeaders:
     """下拉里的「本地模型 / 云端模型」是**分组标题**，不是可选项。
 

@@ -243,6 +243,11 @@ class MainWindow(QMainWindow):
         self.model_setup_dialog.form.download_models_requested.connect(
             self._open_local_models_tab
         )
+        # 「去自检」跳到「环境自检」：模型下好了却没有转写引擎（打包版的体积
+        # 取舍）时，唯一有效的下一步是去看运行环境——那边会说明该改用源码版。
+        self.model_setup_dialog.form.env_check_requested.connect(
+            self._open_env_check_from_setup
+        )
         return self.model_setup_dialog
 
     def open_model_setup_dialog(self, *, config_path=None) -> None:
@@ -263,6 +268,12 @@ class MainWindow(QMainWindow):
         if self.model_setup_dialog is not None:
             self.model_setup_dialog.close()
         self.build_model_dialog().exec()
+
+    def _open_env_check_from_setup(self) -> None:
+        """从「模型设置」跳到「环境自检」（缺转写引擎时的正确去向）。"""
+        if self.model_setup_dialog is not None:
+            self.model_setup_dialog.close()
+        self.open_env_check_dialog()
 
     def build_export_dialog(self) -> ExportDialog:
         dialog = ExportDialog(self.state, self)
