@@ -19,13 +19,26 @@ ISCC.exe 的安装位置不固定：本机 winget 装到了
 from __future__ import annotations
 
 import os
+import re
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve().parent / "installer.iss"
 PACKAGE_DIR = ROOT / "dist" / "drama-splitter"
+
+
+def app_version() -> str:
+    """从 run.py 读版本号——它是唯一的权威来源。
+
+    不从 ``run`` 模块导入，是因为 run.py 的模块级代码会往 ``sys.path`` 里塞
+    仓库根目录；构建脚本在仓库外跑时那样副作用更小。正则读一行足够。
+    """
+    text = (ROOT / "run.py").read_text(encoding="utf-8")
+    match = re.search(r'^VERSION\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if match is None:
+        raise SystemExit("无法从 run.py 读到 VERSION。")
+    return match.group(1)
 
 
 def find_iscc() -> Path | None:
@@ -56,6 +69,21 @@ def find_iscc() -> Path | None:
 
 
 def main() -> int:
+    version = app_version()
+
+    # 编译前先对一次版本号：installer.iss 的 AppVersion / OutputBaseFilename 是
+    # 手写副本，很容易忘了跟 run.py 一起改。改错的话装出来的程序「关于」里显示
+    # 的版本与安装包文件名对不上，更新检查还会把用户困在旧版本上。
+    # 放在产物检查之前：这条不需要 dist\ 就能判断，越早报越省事。
+    script_text = SCRIPT.read_text(encoding="utf-8")
+    declared = re.search(r"^AppVersion=(\S+)", script_text, re.MULTILINE)
+    if declared is None or declared.group(1) != version:
+        found = declared.group(1) if declared else "(缺失)"
+        print(f"installer.iss 的 AppVersion={found} 与 run.py 的 VERSION={version} 不一致。")
+        print("请把 installer.iss 里四处版本号一起改成 run.py 的值：")
+        print("  AppVersion / AppVerName / VersionInfoVersion / OutputBaseFilename")
+        return 1
+
     if not PACKAGE_DIR.is_dir():
         print("未找到打包产物 dist/drama-splitter/。")
         print("请先运行：python tools/build_package.py")
@@ -75,7 +103,7 @@ def main() -> int:
         print("编译失败。")
         return proc.returncode
 
-    setup = ROOT / "dist" / "drama-splitter-1.0.0-setup.exe"
+    setup = ROOT / "dist" / f"drama-splitter-{version}-setup.exe"
     print()
     if not setup.is_file():
         print(f"编译结束但未找到产物：{setup}")

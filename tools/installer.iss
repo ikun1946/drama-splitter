@@ -29,13 +29,13 @@
 [Setup]
 AppId={{8F3C2A17-6D94-4E2B-9C51-7A0D3E68B412}
 AppName=AI 短剧智能分集器
-AppVersion=1.0.0
-AppVerName=AI 短剧智能分集器 1.0.0
+AppVersion=1.0.1
+AppVerName=AI 短剧智能分集器 1.0.1
 AppPublisher=ikun1946
 AppPublisherURL=https://github.com/ikun1946/drama-splitter
 AppSupportURL=https://github.com/ikun1946/drama-splitter/issues
 AppUpdatesURL=https://github.com/ikun1946/drama-splitter/releases
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.0.1.0
 VersionInfoDescription=AI 短剧智能分集器 安装程序
 
 ; 按用户安装，免管理员
@@ -54,7 +54,7 @@ CloseApplications=yes
 CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
-OutputBaseFilename=drama-splitter-1.0.0-setup
+OutputBaseFilename=drama-splitter-1.0.1-setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -160,6 +160,23 @@ begin
     // 走的正是静默模式。ssPostInstall 只在安装阶段触发，卸载不会走到这里。
     if WizardSilent then
       Exit;
+
+    // 先确认主程序确实落地了——这才是运行期**能**验、也该验的事。
+    //
+    // 不要试图在 InitializeSetup 里检查源码目录里的 dist\：安装包的全部文件
+    // 来自 [Files] 段，路径在编译期就解析好并打进 setup.exe 内部了，运行时是
+    // 自包含的。{src} 指的是"正在运行的安装程序自己所在的目录"，它随用户把
+    // setup.exe 放在哪里而变——用户从 Downloads 双击时，{src}\..\dist\... 必然
+    // 不存在，于是安装被误判为"缺产物"而中止。编译期该做的检查由
+    // tools/build_installer.py 负责（跑 ISCC 之前就查）。
+    if not FileExists(ExpandConstant('{app}\drama-splitter.exe')) then
+    begin
+      MsgBox('安装似乎未完成：未找到主程序 drama-splitter.exe。' + #13#10 + #13#10 +
+             '请重新运行安装程序；若反复出现，请到项目主页反馈。',
+             mbError, MB_OK);
+      Exit;
+    end;
+
     if FFmpegAvailable then
     begin
       // 只在缺模型时提一句：模型能自己下，不算阻塞。
@@ -170,17 +187,5 @@ begin
       MsgBox('需要 FFmpeg' + #13#10 + #13#10 + FFmpegHint + #13#10 + #13#10 + ModelHint,
              mbInformation, MB_OK);
     end;
-  end;
-end;
-
-function InitializeSetup(): Boolean;
-begin
-  Result := True;
-  // 产物不在就别让人装出一个空壳：报明确原因并中止。
-  if not FileExists(ExpandConstant('{src}\..\dist\drama-splitter\drama-splitter.exe')) then
-  begin
-    MsgBox('未找到打包产物 dist\drama-splitter\。' + #13#10 + #13#10 +
-           '请先运行：python tools\build_package.py', mbError, MB_OK);
-    Result := False;
   end;
 end;

@@ -43,6 +43,109 @@ def test_version_is_semver_like():
 
 
 # ---------------------------------------------------------------------------
+# 安装脚本的版本号：installer.iss 里的四处是手写副本，没有测试就一定会漂
+#
+# 与 pyproject 那份同理——改了 run.py 却忘了改安装脚本，装出来的程序「关于」
+# 里显示的版本会和安装包文件名对不上，更新检查也会把用户困在旧版本。
+# ---------------------------------------------------------------------------
+
+
+def installer_iss_text() -> str:
+    return (ROOT / "tools" / "installer.iss").read_text(encoding="utf-8")
+
+
+def installer_iss_code() -> str:
+    """剥掉注释后的安装脚本。
+
+    注释里会**解释**为什么不许用 ``{src}`` / ``InitializeSetup``（那正是修复
+    记录），所以断言必须只看代码。Inno 的段内注释是 ``;``，``[Code]`` 段里
+    另有 ``//``，两种都剥。
+    """
+    lines = []
+    for line in installer_iss_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(";") or stripped.startswith("//"):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def test_installer_app_version_matches_run_py():
+    import run
+
+    match = re.search(r"^AppVersion=(\S+)", installer_iss_text(), re.MULTILINE)
+    assert match is not None, "installer.iss 里没有 AppVersion"
+    assert match.group(1) == run.VERSION, (
+        f"installer.iss AppVersion={match.group(1)!r} 与 run.py VERSION={run.VERSION!r} 不一致"
+    )
+
+
+def test_installer_ver_name_embeds_version():
+    import run
+
+    match = re.search(r"^AppVerName=(.+)$", installer_iss_text(), re.MULTILINE)
+    assert match is not None, "installer.iss 里没有 AppVerName"
+    assert run.VERSION in match.group(1), (
+        f"AppVerName={match.group(1)!r} 里没有当前版本号 {run.VERSION}"
+    )
+
+
+def test_installer_version_info_matches_run_py():
+    import run
+
+    match = re.search(r"^VersionInfoVersion=(\S+)", installer_iss_text(), re.MULTILINE)
+    assert match is not None, "installer.iss 里没有 VersionInfoVersion"
+    assert match.group(1) == f"{run.VERSION}.0", (
+        f"VersionInfoVersion={match.group(1)!r} 应为 {run.VERSION}.0"
+    )
+
+
+def test_installer_output_filename_matches_run_py():
+    import run
+
+    match = re.search(r"^OutputBaseFilename=(\S+)", installer_iss_text(), re.MULTILINE)
+    assert match is not None, "installer.iss 里没有 OutputBaseFilename"
+    assert match.group(1) == f"drama-splitter-{run.VERSION}-setup", (
+        f"OutputBaseFilename={match.group(1)!r} 与版本号 {run.VERSION} 不一致"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 安装脚本不得用 {src} 拼仓库内路径：这正是 v1.0.0 装不上的根因
+#
+# {src} 指「正在运行的安装程序自己所在的目录」，随用户把它放在哪而变。
+# 安装包的文件来自 [Files] 段的编译期路径，运行时是自包含的；从 Downloads
+# 双击时 {src}\..\dist\... 必然不存在。v1.0.0 因此在 InitializeSetup 里
+# 误判「未找到打包产物」并中止，所有真实用户都装不上（而开发者从 dist\
+# 里跑时恰好通过，测试没抓到）。
+# ---------------------------------------------------------------------------
+
+
+def test_installer_does_not_probe_repo_paths_via_src():
+    text = installer_iss_code()
+    assert "{src}" not in text, (
+        "installer.iss 里出现了 {src}——它指向用户放安装包的目录，"
+        "不能用来找仓库内的 dist\\ 产物。编译期检查交给 tools/build_installer.py。"
+    )
+
+
+def test_installer_has_no_initialize_setup():
+    """InitializeSetup 曾在运行期误判产物缺失导致安装中止；不要把它加回来。"""
+    text = installer_iss_code()
+    assert "InitializeSetup" not in text, (
+        "installer.iss 又出现了 InitializeSetup——若要用它做检查，"
+        "必须确保判据在用户机器上成立（见本条测试的说明）。"
+    )
+
+
+def test_installer_verifies_main_exe_under_app_dir():
+    """安装后应确认主程序落在 {app} 下——这是运行期唯一能验、也该验的事。"""
+    assert "{app}\\drama-splitter.exe" in installer_iss_code(), (
+        "installer.iss 没有在 {app} 下确认 drama-splitter.exe 是否落地"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 打包态路径：用户可写的东西必须落在 exe 旁边，不能写进安装目录
 #
 # PyInstaller 的 onedir 产物把 Python 运行时与全部模块放在 exe 同级的

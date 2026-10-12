@@ -20,10 +20,15 @@ if str(ROOT) not in sys.path:
 
 # 应用版本号。
 #
-# 与 pyproject.toml 的 [project].version 保持一致：两处都是打包相关的元数据
-# 入口（一处给 Python 打包工具读，一处给运行时自检打印）。改版本时两处都要改
-# ——历史上它们漂移到了 1.0.0 / 0.1.0。
-VERSION = "1.0.0"
+# 这个常量是运行时的唯一来源：run.py 打印它、界面「关于」显示它、启动时的更新
+# 检查拿它跟远端比。打包链路上的另外几处是**必须同步的副本**，改版本时要一起改，
+# 否则会漂移：
+#   - pyproject.toml 的 [project].version
+#   - tools/installer.iss 的 AppVersion / AppVerName / VersionInfoVersion /
+#     OutputBaseFilename
+# 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
+# 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
+VERSION = "1.0.1"
 
 
 def _print_version() -> int:
