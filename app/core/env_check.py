@@ -1,0 +1,420 @@
+"""本地运行环境自检：逐项判断"能不能干活"，并把可修复项标出来。
+
+为什么单独成模块
+----------------
+判定逻辑要与界面解耦：这份检测既给 GUI 的「环境自检」对话框用，也能被
+命令行（``run.py --self-check``）与测试直接调用。**本模块不 import PySide6**，
+纯逻辑，可在无界面环境里单测——分层与 ``ffmpeg.py`` / ``model_manager.py`` 一致。
+
+诚实边界（重要，别让界面撒谎）
+------------------------------
+自检能查出问题，但**只有模型文件能在应用内一键下载修复**（走
+``model_manager.download_model``，用的是 curl，不依赖 pip）。其余一律只能
+"检测 + 给指引"：
+
+- **FFmpeg**：没有任何下载逻辑，只能让用户去装、或设 DRAMA_FFMPEG_DIR；
+- **Python 包**（faster-whisper / scenedetect / zhconv / pysubs2 …）：打包版
+  不含 pip，装不了。这不是"忘了做"，是打包策略（体积）的必然结果。
+
+所以 `EnvCheckItem.fix` 的 kind 必须如实区分：``download_model`` 才是应用内
+可执行的修复，其余是 ``open_url`` / ``navigate`` / ``none``（纯告知）。
+测试里把这条钉死了（见 tests/test_env_check.py）——尤其"缺 faster-whisper
+时不得给出下载修复"，因为下载模型**解决不了**缺包的问题。
+
+模型文件与转写引擎必须分成两项
+------------------------------
+打包版必然缺 faster-whisper，即便模型文件"就绪"，转写也照样不可用。把二者
+合成一项会让用户以为"下了模型就能转写"，那是误导。这里分成 ``asr_engine``
+与 ``whisper_model`` 两条独立结论。
+"""
+
+from __future__ import annotations
+
+import importlib
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+__all__ = [
+    "LEVEL_OK",
+    "LEVEL_WARN",
+    "LEVEL_BLOCK",
+    "EnvFix",
+    "EnvCheckItem",
+    "EnvReport",
+    "check_environment",
+]
+
+#: 三档严重度：ok 正常；warn 缺的是可选能力（功能降级但能干活）；
+#: block 缺的是必需品（干不了活）。
+LEVEL_OK = "ok"
+LEVEL_WARN = "warn"
+LEVEL_BLOCK = "block"
+
+_ORDER = {LEVEL_OK: 0, LEVEL_WARN: 1, LEVEL_BLOCK: 2}
+
+#: 修复动作的种类。**只有 download_model 是应用内能真正执行的**。
+FIX_DOWNLOAD = "download_model"   # payload = 模型 key（spec_by_key 能解析）
+FIX_OPEN_URL = "open_url"         # payload = 要打开的网址
+FIX_NAVIGATE = "navigate"         # payload = 目标对话框标识（如 "models"）
+FIX_NONE = "none"
+
+
+@dataclass(frozen=True)
+class EnvFix:
+    """一条可执行的补救动作。
+
+    ``kind`` 决定界面怎么处理，也决定"这条到底能不能在应用内修好"：只有
+    :data:`FIX_DOWNLOAD` 会真的启动下载，其余都是引导。
+    """
+
+    kind: str
+    label: str          # 按钮文案，如 "下载 whisper-small"
+    payload: str = ""   # 模型 key / URL / 目标页标识
+
+
+@dataclass(frozen=True)
+class EnvCheckItem:
+    """一项环境结论。"""
+
+    key: str            # 稳定标识，测试与跳转靠它
+    label: str          # 中文名
+    level: str          # LEVEL_*
+    summary: str        # 一句话结论
+    detail: str = ""    # 细节（路径、版本、缺什么）
+    fix: EnvFix | None = None
+    required: bool = True   # 是否阻断性（决定整体可用性）
+
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "level": self.level,
+            "summary": self.summary,
+            "detail": self.detail,
+            "fix": (
+                {"kind": self.fix.kind, "label": self.fix.label, "payload": self.fix.payload}
+                if self.fix is not None
+                else None
+            ),
+            "required": self.required,
+        }
+
+
+@dataclass(frozen=True)
+class EnvReport:
+    """一次自检的完整结果。"""
+
+    items: tuple[EnvCheckItem, ...] = field(default_factory=tuple)
+
+    @property
+    def level(self) -> str:
+        """整体严重度：取所有项里最严重的那一档。"""
+        worst = LEVEL_OK
+        for item in self.items:
+            if _ORDER[item.level] > _ORDER[worst]:
+                worst = item.level
+        return worst
+
+    @property
+    def usable(self) -> bool:
+        """能否正常干活：没有任何 required 项处于 block。"""
+        return not any(i.required and i.level == LEVEL_BLOCK for i in self.items)
+
+    def by_key(self, key: str) -> EnvCheckItem | None:
+        return next((i for i in self.items if i.key == key), None)
+
+
+# ---------------------------------------------------------------------------
+# 单项检测
+# ---------------------------------------------------------------------------
+
+
+def _module_available(name: str) -> bool:
+    """试探某个包能否导入。用 importlib.util.find_spec，不真正执行模块顶层代码。
+
+    为什么不用 ``import name``：cv2 / llama_cpp 这类模块顶层可能很重，检测阶段
+    不该把它们真的加载起来。find_spec 只查能否找到，代价小得多。
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def _check_ffmpeg() -> EnvCheckItem:
+    from .ffmpeg import FfmpegNotFound, check_encoders, locate_ffmpeg
+
+    try:
+        binaries = locate_ffmpeg()
+        check_encoders(binaries)
+    except FfmpegNotFound as exc:
+        return EnvCheckItem(
+            key="ffmpeg",
+            label="FFmpeg 工具链",
+            level=LEVEL_BLOCK,
+            summary="未找到 ffmpeg / ffprobe，导入与导出都不可用",
+            detail=str(exc),
+            fix=EnvFix(
+                kind=FIX_OPEN_URL,
+                label="打开下载页",
+                payload="https://www.gyan.dev/ffmpeg/builds/",
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - 自检不该因单项失败而中断
+        return EnvCheckItem(
+            key="ffmpeg",
+            label="FFmpeg 工具链",
+            level=LEVEL_BLOCK,
+            summary="FFmpeg 调用失败",
+            detail=str(exc),
+            fix=EnvFix(kind=FIX_NONE, label=""),
+        )
+
+    detail = f"{binaries.ffmpeg}"
+    fix = None
+    if not binaries.has_libx264 or not binaries.has_aac:
+        missing = [n for n, ok in (("libx264", binaries.has_libx264),
+                                   ("aac", binaries.has_aac)) if not ok]
+        # 编码器缺失不阻断运行（能分析、能预览），但导出会失败——算 warn。
+        return EnvCheckItem(
+            key="ffmpeg",
+            label="FFmpeg 工具链",
+            level=LEVEL_WARN,
+            summary=f"缺少编码器：{'、'.join(missing)}，精确导出不可用",
+            detail=detail,
+            fix=EnvFix(
+                kind=FIX_OPEN_URL,
+                label="打开下载页",
+                payload="https://www.gyan.dev/ffmpeg/builds/",
+            ),
+        )
+    return EnvCheckItem(
+        key="ffmpeg", label="FFmpeg 工具链", level=LEVEL_OK,
+        summary=f"就绪{'（' + binaries.version + '）' if binaries.version else ''}",
+        detail=detail,
+    )
+
+
+def _check_ffplay() -> EnvCheckItem:
+    """ffplay 只用于预览出声，缺失不算问题（画面照常播）。"""
+    from .ffmpeg import FfmpegNotFound, locate_ffmpeg
+
+    try:
+        binaries = locate_ffmpeg()
+    except FfmpegNotFound:
+        return EnvCheckItem(
+            key="ffplay", label="预览声音（ffplay）", level=LEVEL_WARN, required=False,
+            summary="FFmpeg 未就位，无法判断 ffplay",
+        )
+    if binaries.ffplay is None:
+        return EnvCheckItem(
+            key="ffplay", label="预览声音（ffplay）", level=LEVEL_WARN, required=False,
+            summary="未找到 ffplay，预览将没有声音（画面不受影响）",
+            detail="精简版 FFmpeg 构建可能不含 ffplay；完整构建自带。",
+        )
+    return EnvCheckItem(
+        key="ffplay", label="预览声音（ffplay）", level=LEVEL_OK, required=False,
+        summary="就绪",
+    )
+
+
+def _check_asr_engine() -> EnvCheckItem:
+    """语音转写引擎（faster-whisper）。
+
+    **这条与 ``whisper_model`` 必须分开**：打包版有意不含 faster-whisper，
+    此时即便模型文件都在，转写也不可用。给用户的动作只能是"改用源码版/装
+    依赖"，**绝不能**给"下载模型"——那解决不了缺包。
+    """
+    if _module_available("faster_whisper"):
+        return EnvCheckItem(
+            key="asr_engine", label="语音转写引擎（faster-whisper）",
+            level=LEVEL_OK, summary="就绪",
+        )
+    return EnvCheckItem(
+        key="asr_engine", label="语音转写引擎（faster-whisper）",
+        level=LEVEL_BLOCK,
+        summary="未安装 faster-whisper，无法做语音转写",
+        detail=(
+            "打包版因体积原因不含该依赖。装好模型也解决不了这一项——"
+            "需要改用源码版（pip install -r requirements.txt）运行。"
+        ),
+        fix=EnvFix(kind=FIX_NONE, label=""),
+    )
+
+
+def _check_whisper_model(
+    models_root: Path | None, tier: str | None, *, engine_ok: bool = True
+) -> EnvCheckItem:
+    """转写模型文件。
+
+    ``engine_ok`` 是转写引擎（faster-whisper）的可用性。引擎装不上时，即便模型
+    下载齐了也用不了——所以此时**不给出下载按钮**，而是如实说明"先解决引擎问题"。
+    否则用户点完"下载"、等几个 GB 下完，发现还是用不了，那是最糟的体验。
+    """
+    from .asr import locate_model
+    from .model_manager import default_whisper_tier
+
+    tier = tier or default_whisper_tier()
+    info = locate_model(tier)
+    key = f"whisper:{tier}"
+    if info is not None:
+        return EnvCheckItem(
+            key="whisper_model", label=f"转写模型（whisper-{tier}）",
+            level=LEVEL_OK, summary=f"就绪 {info.describe()}",
+            detail=str(info.path),
+        )
+    if not engine_ok:
+        # 引擎缺失：模型能下，但下了也没用。如实说清楚，不给下载按钮。
+        return EnvCheckItem(
+            key="whisper_model", label=f"转写模型（whisper-{tier}）",
+            level=LEVEL_BLOCK,
+            summary="未下载（且转写引擎未安装，下载后仍不可用）",
+            detail="请先解决上面的「语音转写引擎」问题，再下载模型——否则白下几个 GB。",
+            fix=EnvFix(kind=FIX_NONE, label=""),
+        )
+    # 引擎就绪、只是缺模型：这是**唯一**可一键修复的场景。
+    return EnvCheckItem(
+        key="whisper_model", label=f"转写模型（whisper-{tier}）",
+        level=LEVEL_BLOCK,
+        summary=f"未下载（whisper-{tier}）",
+        detail="可在应用内下载，无需联网配置。",
+        fix=EnvFix(kind=FIX_DOWNLOAD, label=f"下载 whisper-{tier}", payload=key),
+    )
+
+
+def _check_llm_model() -> EnvCheckItem:
+    from .semantic import locate_llm_model
+
+    llm = locate_llm_model()
+    if llm is not None:
+        return EnvCheckItem(
+            key="llm_model", label="语义模型（本地）", level=LEVEL_OK, required=False,
+            summary=f"就绪 {llm.name}", detail=str(llm),
+        )
+    return EnvCheckItem(
+        key="llm_model", label="语义模型（本地）", level=LEVEL_WARN, required=False,
+        summary="未下载，语义判断将降级（可用规则与静音分集）",
+        fix=EnvFix(
+            kind=FIX_DOWNLOAD, label="下载语义模型", payload="llm:2B:Q4_K_M",
+        ),
+    )
+
+
+def _check_llm_stack() -> EnvCheckItem:
+    """本地语义推理栈（llama.cpp / Ollama）。缺失只降级，不阻断。"""
+    from .semantic import _import_llama
+
+    if _import_llama() is not None:
+        return EnvCheckItem(
+            key="llm_stack", label="本地语义推理栈", level=LEVEL_OK, required=False,
+            summary="就绪（llama.cpp）",
+        )
+    return EnvCheckItem(
+        key="llm_stack", label="本地语义推理栈", level=LEVEL_WARN, required=False,
+        summary="未安装 llama-cpp-python，本地语义判断不可用",
+        detail="可改用云端语义，或在源码版安装 llama-cpp-python。",
+        fix=EnvFix(kind=FIX_NONE, label=""),
+    )
+
+
+def _check_optional_packages() -> list[EnvCheckItem]:
+    """可选能力依赖：缺失只降级，逐项如实说明。"""
+    items: list[EnvCheckItem] = []
+    specs = (
+        ("scenedetect", "镜头检测（scenedetect）",
+         "未安装 scenedetect，镜头切换检测跳过（仍可凭对白与静音分集）"),
+        ("zhconv", "繁简转换（zhconv）",
+         "未安装 zhconv，无法保证字幕输出为简体中文"),
+        ("pysubs2", "ASS/SSA 字幕（pysubs2）",
+         "未安装 pysubs2，ASS/SSA 复杂样式字幕无法解析"),
+    )
+    for module, label, warn in specs:
+        ok = _module_available(module)
+        items.append(
+            EnvCheckItem(
+                key=module, label=label,
+                level=LEVEL_OK if ok else LEVEL_WARN, required=False,
+                summary="就绪" if ok else warn,
+                fix=None if ok else EnvFix(kind=FIX_NONE, label=""),
+            )
+        )
+    return items
+
+
+def _check_models_dir(models_root: Path | None) -> EnvCheckItem:
+    """检查模型目录可用性——**不创建目录**。
+
+    刻意不用 ``model_manager.validate_models_root``：那个函数会 ``mkdir`` 出
+    目录来试写。检测不该有副作用——用户只是打开"环境自检"看一眼，不该在
+    exe 旁边凭空多一个空的 ``models/``。所以这里自己做一个只读判定：
+
+    - 目录已存在：在里面试写一个探针再删（瞬时、且在既有目录内）；
+    - 目录不存在：退到最近的既有祖先，看它可不可写（``os.access``）。
+      缺失本身不算问题——首次下载模型时程序会自己建。
+    """
+    from .app_config import default_models_root
+
+    root = models_root or default_models_root()
+    root = Path(root)
+
+    if root.exists():
+        probe = root / ".write_probe"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            return EnvCheckItem(
+                key="models_dir", label="模型目录", level=LEVEL_BLOCK,
+                summary=f"目录不可写：{exc}", detail=str(root),
+                fix=EnvFix(kind=FIX_NAVIGATE, label="打开模型管理", payload="models"),
+            )
+        return EnvCheckItem(
+            key="models_dir", label="模型目录", level=LEVEL_OK,
+            summary="可写", detail=str(root),
+        )
+
+    # 目录还没建：检查最近的既有祖先是否可写
+    ancestor = root.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if ancestor.exists() and os.access(ancestor, os.W_OK):
+        return EnvCheckItem(
+            key="models_dir", label="模型目录", level=LEVEL_OK,
+            summary="尚未创建，首次下载时自动建立", detail=str(root),
+        )
+    return EnvCheckItem(
+        key="models_dir", label="模型目录", level=LEVEL_BLOCK,
+        summary=f"上级目录不可写：{ancestor}", detail=str(root),
+        fix=EnvFix(kind=FIX_NAVIGATE, label="打开模型管理", payload="models"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 汇总
+# ---------------------------------------------------------------------------
+
+
+def check_environment(
+    *, models_root: str | Path | None = None, tier: str | None = None
+) -> EnvReport:
+    """跑一遍完整自检，返回带结论与修复建议的报告。
+
+    本函数**只读**：不下载、不安装、不改任何文件。修复动作由调用方（GUI）
+    在用户确认后另行执行——检测与修复必须分开，否则打开对话框就会偷偷下载。
+    """
+    root = Path(models_root) if models_root else None
+    engine = _check_asr_engine()
+    items: list[EnvCheckItem] = [
+        _check_ffmpeg(),
+        _check_ffplay(),
+        engine,
+        _check_whisper_model(root, tier, engine_ok=engine.level != LEVEL_BLOCK),
+        _check_llm_model(),
+        _check_llm_stack(),
+        *_check_optional_packages(),
+        _check_models_dir(root),
+    ]
+    return EnvReport(items=tuple(items))

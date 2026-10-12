@@ -19,7 +19,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ...core.timebase import format_timecode
-from ..frame_source import DecodeError, FrameDecoder, StreamPlayer
+from ..frame_source import DecodeError, FrameDecoder, FrameScrubber, StreamPlayer
 from ..state import ProjectState
 from . import message
 from .media_preview import MediaPreview
@@ -37,6 +37,7 @@ class StageView(QWidget):
         super().__init__(parent)
         self.state = state
         self.decoder = FrameDecoder()
+        self.scrubber = FrameScrubber(self.decoder)
         self.player = StreamPlayer()
         self.position = Fraction(0)
         self.current_episode = 1
@@ -74,8 +75,13 @@ class StageView(QWidget):
         self.player.playing_changed.connect(self.preview.set_playing)
         self.player.playback_finished.connect(self._on_playback_finished)
         self.player.error.connect(lambda text: message.warning(self, "播放失败", text))
+        # 拖动取帧走后台线程：同步取一帧要 ~168ms，拖时间轴时会把 GUI 线程
+        # 拖死（事件队列积压，"一拖就卡"）。这里只更新画面，播放头由拖动手势
+        # 自己画（timeline 拖动中忽略外部 set_playhead）。
+        self.scrubber.frame_ready.connect(self._on_scrub_frame)
 
         self.timeline.seek_requested.connect(self.goto)
+        self.timeline.scrub_requested.connect(self._on_scrub)
         self.timeline.episode_activated.connect(self._on_timeline_episode)
         self.timeline.boundary_move_requested.connect(self.boundary_move_requested)
 
@@ -89,6 +95,7 @@ class StageView(QWidget):
         if media is None:
             self._bound_media = None
             self.player.stop()          # 换源为空时也要停掉旧片子的播放
+            self.scrubber.stop()        # 后台取帧线程也要停，否则它还在读旧文件
             self.preview.clear("尚未选择源文件")
             self.timeline.set_project(None, None, {}, None)
             return
@@ -99,6 +106,9 @@ class StageView(QWidget):
             self._bound_media = media
             self._set_position(Fraction(0))
         video = media.video
+        # 换源时停掉后台取帧线程：它持有旧 decoder，继续跑会读到旧文件。
+        # 紧接着的 goto() 会用新源做一次同步取帧，画面不会空着。
+        self.scrubber.stop()
         # 把已探测到的分辨率交给解码器：否则第一次取帧会在 GUI 线程里同步跑
         # 一次 ffprobe（大文件上可见卡顿）
         self.decoder.set_source(
@@ -152,6 +162,9 @@ class StageView(QWidget):
         media = self.state.media
         if media is None:
             return
+        # 落定前先丢弃拖动期间未完成的异步请求，否则它解完的旧帧会在这一帧
+        # 之后才到，把精确落定的画面盖回拖动位置（表现为"松手后闪一下又跳回去"）。
+        self.scrubber.cancel()
         target = Fraction(seconds).limit_denominator(1_000_000)
         target = max(Fraction(0), min(target, media.timeline_duration))
         _, snapped = media.snap_to_frame(target)
@@ -165,6 +178,29 @@ class StageView(QWidget):
         if image is not None:
             self.preview.set_frame_info(frame_index=media.frame_index_at(snapped))
             self.preview.set_image(image)
+
+    def _on_scrub(self, seconds: float) -> None:
+        """拖动时间轴中的高频回调（30Hz）：只请求后台取帧，绝不阻塞。
+
+        这里**不**调 ``_set_position``：拖动手势由 TimelineRuler 自己画播放头，
+        而 ``position_changed`` 会驱动左栏卡片重排文字，30Hz 重排纯属浪费。
+        位置状态在松手（``goto``）时一次性落定。
+        """
+        media = self.state.media
+        if media is None:
+            return
+        self.scrubber.request(seconds)
+
+    def _on_scrub_frame(self, image, seconds: float) -> None:
+        """后台解出的拖动帧：只更新画面与 HUD，不动播放头。"""
+        media = self.state.media
+        if media is None:
+            return
+        self.preview.set_frame_info(frame_index=media.frame_index_at(Fraction(seconds)))
+        self.preview.set_image(image)
+        self.preview.timecode.setText(
+            f"{format_timecode(Fraction(seconds))}　（{seconds:.3f}s）"
+        )
 
     def step_frames(self, delta: int) -> None:
         media = self.state.media
@@ -208,6 +244,7 @@ class StageView(QWidget):
         成片连看走的是另一条路（成片是单音轨导出，见 ``_play_next_stitch``）。
         """
         media = self.state.media
+        self.scrubber.cancel()   # 起播后画面由 StreamPlayer 接管，拖动请求作废
         self.player.set_audio_track(self.state.audio_stream_index)
         self.player.set_audio_enabled(bool(media.audio_tracks) if media else False)
         self.player.play()

@@ -54,6 +54,7 @@ __all__ = [
     "ModelDownloadWorker",
     "JudgeProbeWorker",
     "ModelListWorker",
+    "EnvCheckWorker",
 ]
 
 
@@ -304,7 +305,12 @@ class AnalysisWorker(BaseWorker):
                 cancel_check=lambda: self.cancelled,
                 ffmpeg=ffmpeg,
             )
-        except RuntimeError as exc:
+        except (RuntimeError, ImportError) as exc:
+            # ImportError 也要接：转写引擎缺依赖（打包版不含 faster-whisper）
+            # 抛的是 ModuleNotFoundError，它是 ImportError 子类而**不是**
+            # RuntimeError。漏在这里会让"跳过转写"的降级变成致命的"分析失败"。
+            # asr.AsrEngine.ensure_model 已把 import 错误转成 RuntimeError，
+            # 这里是第二道保险——别的引擎实现未必都做了那层包装。
             if getattr(engine, "is_cloud", False) and config.fallback_to_local:
                 # §7：块级失败一律整体回退本地重跑，不做"半云端半本地"的拼接——
                 # 混合来源的时间码难以核实，宁可贵一点重跑。失败原因要带上"第几段"。
@@ -322,7 +328,7 @@ class AnalysisWorker(BaseWorker):
                         cancel_check=lambda: self.cancelled,
                         ffmpeg=ffmpeg,
                     )
-                except RuntimeError as exc2:
+                except (RuntimeError, ImportError) as exc2:
                     self.stage_log.emit(f"跳过语音转写：{exc2}")
             else:
                 self.stage_log.emit(f"跳过语音转写：{exc}")
@@ -815,3 +821,42 @@ class ModelListWorker(BaseWorker):
             self.fail(str(exc))
             return
         self.listed.emit(models)
+
+
+class EnvCheckWorker(BaseWorker):
+    """跑一遍本地环境自检（后台线程）。
+
+    为什么必须后台：检测里含 ``ffmpeg -version`` / ``-encoders``（可达数十秒），
+    以及若干包的 ``find_spec``；放主线程会让对话框一打开就僵住。
+
+    ``check_environment`` 本就不抛异常（逐项失败各自降级成一条结论），这里的
+    ``except`` 只是兜底——真出意外时给一份"检测失败"的结果，而不是让对话框
+    永远停在"检测中…"。
+    """
+
+    checked = Signal(object)  # EnvReport
+
+    def __init__(self, *, models_root=None, tier: str | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._models_root = models_root
+        self._tier = tier
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.env_check import EnvReport, check_environment
+
+        try:
+            report = check_environment(models_root=self._models_root, tier=self._tier)
+        except Exception as exc:  # noqa: BLE001 - 自检失败也要给界面一个可读结果
+            from app.core.env_check import EnvCheckItem
+
+            report = EnvReport(
+                items=(
+                    EnvCheckItem(
+                        key="selfcheck",
+                        label="环境自检",
+                        level="block",
+                        summary=f"自检本身出错：{exc}",
+                    ),
+                )
+            )
+        self.checked.emit(report)

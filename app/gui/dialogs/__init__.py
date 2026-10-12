@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from .base import DialogShell
+from .env_check_dialog import EnvCheckDialog
 from .export_dialog import ExportDialog
 from .model_dialog import ModelDialog
 from .model_setup_dialog import ModelSetupDialog
@@ -18,6 +19,7 @@ from .update_dialog import UpdateDialog
 
 __all__ = [
     "DialogShell",
+    "EnvCheckDialog",
     "ExportDialog",
     "ModelDialog",
     "ModelSetupDialog",

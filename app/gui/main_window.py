@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         self.action_dark.setChecked(current_mode() == "dark")
 
         help_menu = bar.addMenu("帮助")
-        self._add_action(help_menu, "运行自检…", self._show_self_check)
+        self._add_action(help_menu, "环境自检…", self.open_env_check_dialog)
         self._add_action(help_menu, "检查更新…", self.open_update_dialog)
         self._add_action(help_menu, "关于", self._show_about)
 
@@ -278,28 +278,66 @@ class MainWindow(QMainWindow):
             self.workbench.stage_view.goto(Fraction(ms, 1000))
         self.workbench.inspector.set_tab(0)
 
-    def _show_self_check(self) -> None:
-        """帮助菜单：把运行前提汇总成一段文字（run.py --self-check 的摘要）。"""
-        lines: list[str] = []
+    def build_env_check_dialog(self) -> "EnvCheckDialog":
+        """构建「环境自检」对话框（不 exec，供测试 / 冒烟 / 截图使用）。
+
+        构造时不发起检测——测试可先 `dialog.apply_report(...)` 注入结果，
+        无界面环境下也能量到界面。真正检测走 `open_env_check_dialog`。
+        """
+        from .dialogs import EnvCheckDialog
+
+        self.env_check_dialog = EnvCheckDialog(self)
+        self.env_check_dialog.recheck_requested.connect(self._start_env_check)
+        self.env_check_dialog.download_requested.connect(self._on_env_fix_download)
+        self.env_check_dialog.open_url_requested.connect(self._on_env_fix_open_url)
+        self.env_check_dialog.navigate_requested.connect(self._on_env_fix_navigate)
+        return self.env_check_dialog
+
+    def open_env_check_dialog(self) -> None:
+        dialog = self.build_env_check_dialog()
+        dialog.show()
+        self._start_env_check()
+
+    def _start_env_check(self) -> None:
+        """后台跑一遍自检（含 ffmpeg 探测，可达数十秒，不能占主线程）。"""
+        from .workers import EnvCheckWorker
+
+        worker = EnvCheckWorker(parent=self)
+        worker.checked.connect(self._on_env_report)
+        self.register_worker("env_check", worker)
+        worker.start()
+
+    def _on_env_report(self, report) -> None:
+        dialog = getattr(self, "env_check_dialog", None)
+        if dialog is not None:
+            dialog.apply_report(report)
+
+    def _on_env_fix_download(self, model_key: str) -> None:
+        """「下载模型」类修复：复用模型管理对话框的现成下载链路。
+
+        不自己造下载流程——``model_manager.download_model`` 已处理断点续传、
+        大小校验与取消，模型管理页也已接好进度与日志。这里只负责把用户送到
+        那一页并说明下一步。
+        """
+        dialog = self.build_model_dialog()
+        dialog.show()
+        self.bottom.set_hint(
+            f"请在「本地模型」里下载 {model_key}（已为你打开模型管理）。"
+        )
+
+    def _on_env_fix_open_url(self, url: str) -> None:
+        import webbrowser
+
         try:
-            from ..core.ffmpeg import check_encoders, locate_ffmpeg
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 - 打不开浏览器不该炸界面
+            from .widgets import message
 
-            binaries = locate_ffmpeg()
-            check_encoders(binaries)
-            lines.append(f"FFmpeg：{binaries.ffmpeg}")
-            lines.append(f"FFprobe：{binaries.ffprobe}")
-            lines.append(f"编码器：{'、'.join(sorted(binaries.encoders))}")
-        except Exception as exc:  # noqa: BLE001 - 自检不该因单项失败而中断
-            lines.append(f"FFmpeg：不可用（{exc}）")
+            message.warning(self, "打不开", f"请手动访问：\n{url}")
 
-        from ..core.asr import locate_model
-        from ..core.semantic import locate_llm_model
-
-        whisper = locate_model("small")
-        lines.append("转写模型：" + (whisper.describe() if whisper else "未下载"))
-        llm = locate_llm_model()
-        lines.append("语义模型：" + (llm.name if llm else "未下载（语义判断降级运行）"))
-        message.information(self, "运行自检", "\n".join(lines))
+    def _on_env_fix_navigate(self, target: str) -> None:
+        if target == "models":
+            self.build_model_dialog().show()
 
     def build_update_dialog(self):
         """构建「检查更新」对话框（不 exec，供测试 / 冒烟 / 截图使用）。"""
@@ -537,7 +575,7 @@ class MainWindow(QMainWindow):
 
     WORKER_NAMES = (
         "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
-        "update_check", "update_download",
+        "update_check", "update_download", "env_check",
     )
 
     #: 允许"一类多实例"的任务前缀。模型设置页会同时给多家厂商拉 ``/models``，

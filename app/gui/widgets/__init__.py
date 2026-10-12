@@ -30,6 +30,7 @@ from .media_preview import MediaPreview
 from .model_list import ModelList
 from .model_table import ModelTable
 from .no_wheel import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
+from .progress_bar import CapsuleProgressBar
 from .scroll_area import h_scrollable, scrollable
 from .section_delegate import SectionHeaderDelegate
 from .stage_view import StageView
@@ -40,6 +41,7 @@ __all__ = [
     "AppBar",
     "BottomBar",
     "Card",
+    "CapsuleProgressBar",
     "DropZone",
     "ElidingItemDelegate",
     "EmptyState",

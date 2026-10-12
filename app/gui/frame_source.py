@@ -27,7 +27,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QImage
 
-__all__ = ["FrameDecoder", "StreamPlayer", "DecodeError"]
+__all__ = ["FrameDecoder", "FrameScrubber", "StreamPlayer", "DecodeError"]
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -145,6 +145,89 @@ class FrameDecoder:
     def close(self) -> None:
         self._path = None
         self._size = (0, 0)
+
+
+class FrameScrubber(QObject):
+    """异步单帧取帧：拖动/步进时不阻塞 GUI 线程。
+
+    为什么需要它
+    ------------
+    ``FrameDecoder.frame_at()`` 每次都要新起一个 ffmpeg 进程并定位解码一个
+    GOP。实测 1080p 上约 168 ms，其中进程启动只占 ~28 ms，其余全花在定位与
+    解码。拖动时间轴时 ``TimelineRuler`` 以 30 Hz 发 seek 信号，若每次都同步
+    取帧，GUI 线程每秒只能处理 6 次，事件队列持续积压——表现就是"一拖就卡死"。
+
+    这里把取帧挪到后台线程，并**只保留最新请求**：拖动过程中间那些位置用户
+    根本来不及看，解出来也是白解。帧带秒数一起发出，接收方据此丢弃过期帧
+    （解码期间来了新请求时，旧帧不发）。
+
+    精度取向与 ``StreamPlayer`` 一致：仍然用精确 ``-ss`` 定位，保证"看到的就是
+    该时刻应有的帧"。松手后调用方走同步的 ``FrameDecoder.frame_at()`` 落定，
+    二者用的是同一条命令，不会出现"拖动到 A、松手跳到 B"的偏差。
+    """
+
+    frame_ready = Signal(QImage, float)   # (帧, 该帧对应的秒数)
+
+    IDLE_POLL = 0.01   # 线程空转轮询间隔（没活干时）
+
+    def __init__(self, decoder: "FrameDecoder", parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._decoder = decoder
+        self._lock = threading.Lock()
+        self._pending: float | None = None
+        self._pending_id = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def request(self, seconds: float) -> None:
+        """请求解某一秒的帧。高频调用安全——中间请求会被合并掉。"""
+        with self._lock:
+            self._pending = float(seconds)
+            self._pending_id += 1
+        self._ensure_thread()
+
+    def cancel(self) -> None:
+        """丢弃尚未开始的待解请求（松手时调用，避免旧帧盖住精确定位的结果）。"""
+        with self._lock:
+            self._pending = None
+            self._pending_id += 1
+
+    def stop(self) -> None:
+        """停掉后台线程（换源、关闭时调用）。"""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        with self._lock:
+            self._pending = None
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                target = self._pending
+                req_id = self._pending_id
+                self._pending = None
+            if target is None:
+                time.sleep(self.IDLE_POLL)
+                continue
+            try:
+                image = self._decoder.frame_at(target)
+            except Exception:  # noqa: BLE001 - 后台线程里任何异常都不该杀死循环
+                image = None
+            if self._stop.is_set():
+                return
+            # 解码期间又来了新请求 → 这一帧已经过期，丢掉不画，免得画一下又跳走
+            with self._lock:
+                superseded = self._pending_id != req_id
+            if image is not None and not superseded:
+                self.frame_ready.emit(image, target)
 
 
 class StreamPlayer(QObject):

@@ -451,7 +451,18 @@ class AsrEngine:
                 f"请先运行：python tools/fetch_whisper_model.py {self.settings.model_tier}"
             )
         if self._model is None or self._loaded_tier != info.tier:
-            from faster_whisper import WhisperModel
+            # 延迟导入并**转成领域错误**：打包版有意不含 faster-whisper（体积），
+            # 此时 import 抛的是 ModuleNotFoundError（ImportError 子类，**不是**
+            # RuntimeError）。调用方（workers.AnalysisWorker）按 RuntimeError 做
+            # "跳过转写继续分集"的降级，若让它原样冒泡就会变成致命的"分析失败"。
+            # 转写失败不该拖垮整个分析——对白、静音、外挂字幕照样能分集。
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as exc:
+                raise RuntimeError(
+                    "未安装 faster-whisper，无法做语音转写。"
+                    "打包版不含该依赖（体积原因）；如需本地转写请改用源码版运行。"
+                ) from exc
 
             self._model = WhisperModel(
                 str(info.path),

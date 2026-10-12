@@ -5,8 +5,9 @@
 
 进度分两层（取代原先"只有一条进度条"的画法）：
 
-- 每个阶段一条自己的进度条。阶段没有上报细粒度数据时显示**流动动画**
-  （Qt 的 busy 模式），而不是停在 0%——"正在做、剩余时间未知"是诚实的表达；
+- 每个阶段一条自己的胶囊进度条。阶段没有上报细粒度数据时显示**流动高光**
+  （见 ``CapsuleProgressBar``），而不是停在 0%——"正在做、剩余时间未知"是
+  诚实的表达；
 - 下方一条总进度，等于 (已完成阶段数 + 当前阶段比例) / 阶段总数，底栏那条
   小进度条镜像的就是它。
 
@@ -16,12 +17,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from enum import Enum
+
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
@@ -33,57 +36,177 @@ from ...core.settings import (
     apply_setting_advice,
 )
 from ..state import ProjectState
-from ..widgets import message
+from ..theme import current_mode, qcolor
+from ..widgets import CapsuleProgressBar, message
 from ..workers import AnalysisWorker
 from ._common import register_worker
 
 __all__ = ["AnalysisPane"]
 
 
+class StageState(Enum):
+    """阶段状态。颜色、点形、状态文字全由它派生，避免三处各写一套。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+#: 状态 → 填充色调（胶囊条）
+_TONE = {
+    StageState.PENDING: "muted",
+    StageState.RUNNING: "normal",
+    StageState.DONE: "done",
+    StageState.FAILED: "failed",
+    StageState.CANCELLED: "muted",
+}
+
+#: 状态 → 状态文字
+_STATUS_TEXT = {
+    StageState.PENDING: "等待",
+    StageState.RUNNING: "进行中",
+    StageState.DONE: "已完成",
+    StageState.FAILED: "失败",
+    StageState.CANCELLED: "已取消",
+}
+
+#: 状态 → 前置圆点颜色令牌（沿用全站状态色）
+_DOT_KEY = {
+    StageState.PENDING: "NEUTRAL",
+    StageState.RUNNING: "PRIMARY",
+    StageState.DONE: "SUCCESS",
+    StageState.FAILED: "DANGER",
+    StageState.CANCELLED: "NEUTRAL",
+}
+
+_DOT_D = 8
+
+
+class _StageDot(QWidget):
+    """阶段清单最左侧的状态圆点——一眼看出哪几步过了、哪步在跑。
+
+    逐帧画没必要：颜色只随阶段状态变，所以画进一张缓存 pixmap，状态或主题
+    变了才重建（判据做成 ``_static_key``，与时间轴同一套做法）。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._state = StageState.PENDING
+        self._static: QPixmap | None = None
+        self._static_key: tuple | None = None
+        self.setFixedSize(_DOT_D + 6, _DOT_D + 6)
+
+    def set_state(self, state: StageState) -> None:
+        if state is self._state:
+            return
+        self._state = state
+        self.update()
+
+    def state(self) -> StageState:
+        return self._state
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        key = (self._state, current_mode(), self.width(), self.height())
+        if self._static is None or key != self._static_key:
+            self._static = self._rebuild(key)
+            self._static_key = key
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._static)
+        painter.end()
+
+    def _rebuild(self, key: tuple) -> QPixmap:
+        state, mode, w, h = key
+        dpr = self.devicePixelRatioF()
+        pixmap = QPixmap(int(w * dpr), int(h * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        tone = QColor(qcolor(mode, _DOT_KEY[state]))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if state is StageState.DONE:
+            # 实心：已完成的事不必再抢注意力，但颜色仍是成功色
+            painter.setBrush(tone)
+            painter.drawEllipse(_centered_rect(w, h, _DOT_D))
+        elif state in (StageState.RUNNING, StageState.FAILED):
+            # 当前阶段：实心圆 + 一圈半透明外环，比别的点更"亮"
+            halo = QColor(tone)
+            halo.setAlpha(70)
+            painter.setBrush(halo)
+            painter.drawEllipse(_centered_rect(w, h, _DOT_D + 4))
+            painter.setBrush(tone)
+            painter.drawEllipse(_centered_rect(w, h, _DOT_D))
+        else:
+            # 等待 / 取消：空心环（弱化）
+            ring = QPen(QColor(qcolor(mode, "BORDER_STRONG")))
+            ring.setWidthF(1.4)
+            painter.setPen(ring)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(_centered_rect(w, h, _DOT_D - 1))
+        painter.end()
+        return pixmap
+
+
+def _centered_rect(w: float, h: float, d: float) -> QRectF:
+    """以 (w, h) 为中心、边长 d 的方形，供 drawEllipse 使用。"""
+    return QRectF((w - d) / 2, (h - d) / 2, d, d)
+
+
 class _StageRow:
-    """阶段清单里的一行：名称 / 本阶段进度条 / 状态文字。"""
+    """阶段清单里的一行：状态点 / 名称 / 本阶段胶囊进度条 / 状态文字。"""
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self.state = StageState.PENDING
+        self.dot = _StageDot()
         self.label = QLabel(name)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 100)
-        self.bar.setValue(0)
-        self.bar.setTextVisible(False)
+        self.bar = CapsuleProgressBar(thickness=8)
         self.bar.setFixedWidth(200)
         self.status = QLabel("等待")
         self.status.setProperty("role", "muted")
         self.status.setMinimumWidth(52)
 
+    def _apply(self, state: StageState) -> None:
+        self.state = state
+        self.dot.set_state(state)
+        self.bar.set_tone(_TONE[state])
+        self.status.setText(_STATUS_TEXT[state])
+
     def mark_pending(self) -> None:
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
-        self.status.setText("等待")
+        self._apply(StageState.PENDING)
 
     def mark_running(self) -> None:
-        # busy 模式：数值范围 0–0，进度条自己来回流动
+        # 流动模式：数值范围 0–0，胶囊条自己扫高光
         self.bar.setRange(0, 0)
-        self.status.setText("进行中")
+        self._apply(StageState.RUNNING)
 
     def mark_progress(self, ratio: float) -> None:
         if self.bar.maximum() == 0:      # 首次拿到具体比例，从流动切到确定模式
             self.bar.setRange(0, 100)
         value = int(round(max(0.0, min(1.0, ratio)) * 100))
         self.bar.setValue(value)
+        self.state = StageState.RUNNING
+        self.dot.set_state(StageState.RUNNING)
+        self.bar.set_tone(_TONE[StageState.RUNNING])
         self.status.setText(f"{value}%")
 
     def mark_done(self) -> None:
         self.bar.setRange(0, 100)
         self.bar.setValue(100)
-        self.status.setText("已完成")
+        self._apply(StageState.DONE)
 
     def mark_failed(self) -> None:
         self.bar.setRange(0, 100)        # 停在失败时的数值，不再假装在跑
-        self.status.setText("失败")
+        self._apply(StageState.FAILED)
 
     def mark_cancelled(self) -> None:
         self.bar.setRange(0, 100)
-        self.status.setText("已取消")
+        self._apply(StageState.CANCELLED)
 
 
 class AnalysisPane(QWidget):
@@ -120,26 +243,28 @@ class AnalysisPane(QWidget):
         self.stage_rows = [_StageRow(name) for name in self.STAGES]
 
         table = QGridLayout()
-        table.setHorizontalSpacing(12)
-        table.setVerticalSpacing(6)
+        table.setHorizontalSpacing(10)
+        table.setVerticalSpacing(8)
+        table.setColumnStretch(2, 1)     # 胶囊条独占可伸缩的一列
         for row, stage_row in enumerate(self.stage_rows):
-            table.addWidget(stage_row.label, row, 0)
-            table.addWidget(stage_row.bar, row, 1)
-            table.addWidget(stage_row.status, row, 2)
+            table.addWidget(stage_row.dot, row, 0, Qt.AlignmentFlag.AlignVCenter)
+            table.addWidget(stage_row.label, row, 1)
+            table.addWidget(stage_row.bar, row, 2, Qt.AlignmentFlag.AlignVCenter)
+            table.addWidget(stage_row.status, row, 3)
         table_host = QWidget(self)
         table_host.setLayout(table)
+        table_host.setMinimumWidth(360)
 
         table_line = QHBoxLayout()
         table_line.addStretch(1)
-        table_line.addWidget(table_host)
+        table_line.addWidget(table_host, 3)
         table_line.addStretch(1)
 
         self.total_label = QLabel("总进度")
         self.total_label.setProperty("role", "muted")
-        self.total = QProgressBar()
-        self.total.setRange(0, 100)
-        self.total.setFormat("%p%")
+        self.total = CapsuleProgressBar(thickness=10)
         self.total.setMinimumWidth(240)
+        self.total.setMaximumWidth(420)
 
         total_line = QHBoxLayout()
         total_line.addStretch(1)
@@ -203,6 +328,7 @@ class AnalysisPane(QWidget):
         self._stage_ratio = 0.0
         for row in self.stage_rows:
             row.mark_pending()
+        self.total.set_tone("normal")
         self.total.setValue(0)
 
     def is_active(self) -> bool:
@@ -218,6 +344,7 @@ class AnalysisPane(QWidget):
         self._active = False
         if 0 <= self._current < len(self.stage_rows):
             self.stage_rows[self._current].mark_cancelled()
+        self.total.set_tone("muted")
         self._append("已取消。", "warn")
         self.stage_label.setText("已取消")
         self.finished.emit()
@@ -273,6 +400,7 @@ class AnalysisPane(QWidget):
             row.mark_done()
         self._current = len(self.STAGES) - 1
         self._stage_ratio = 1.0
+        self.total.set_tone("done")
         self.total.setValue(100)
         self.stage_label.setText("分析完成")
         self._active = False
@@ -340,6 +468,7 @@ class AnalysisPane(QWidget):
         self._append(f"失败：{text}", "error")
         if 0 <= self._current < len(self.stage_rows):
             self.stage_rows[self._current].mark_failed()
+        self.total.set_tone("failed")
         self.stage_label.setText("分析失败")
         self._active = False
         self.recent.setText(text)

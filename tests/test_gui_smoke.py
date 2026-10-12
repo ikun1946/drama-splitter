@@ -3490,3 +3490,275 @@ class TestAnalysisProgressDisplay:
         assert window.bottom.progress.value() == round(3 / 6 * 100), (
             "底栏小进度条镜像的是总进度"
         )
+
+
+class TestCapsuleProgressBar:
+    """胶囊进度条（自绘控件）的行为约定。
+
+    换掉 QProgressBar 是为了画出参考界面那种"细长全圆角胶囊 + 两色填充"，但
+    接口必须与 QProgressBar 同形——阶段行与总进度都按 ``setRange/setValue``
+    调用。这里把这层同形契约钉死，免得以后改绘制时把接口也带歪。
+    """
+
+    def test_range_and_value_round_trip(self, window):
+        from app.gui.widgets import CapsuleProgressBar
+
+        bar = CapsuleProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(37)
+        assert bar.value() == 37
+        assert bar.maximum() == 100
+        assert bar.minimum() == 0
+
+    def test_zero_maximum_means_indeterminate(self, window):
+        """``setRange(0, 0)`` 是 busy 约定，必须能被判定为"无确定比例"。"""
+        from app.gui.widgets import CapsuleProgressBar
+
+        bar = CapsuleProgressBar()
+        bar.setRange(0, 0)
+        assert bar.maximum() == 0
+
+    def test_tone_switches_fill_color(self, window):
+        from app.gui.widgets import CapsuleProgressBar
+
+        bar = CapsuleProgressBar()
+        assert bar.tone() == "normal"
+        bar.set_tone("done")
+        assert bar.tone() == "done"
+        bar.set_tone("不存在的色调")     # 无效值不该悄悄改掉当前色调
+        assert bar.tone() == "done"
+
+    def test_paints_without_error_in_both_themes(self, window, qapp):
+        """真画一遍：两种主题下自绘都不得抛异常，且要画出非背景色。
+
+        只调 ``.grab()`` 就能触发 ``paintEvent``——这是唯一能挡住"取色键写错、
+        运行时 KeyError"的廉价手段。
+        """
+        from app.gui import theme
+        from app.gui.widgets import CapsuleProgressBar
+
+        for mode in ("light", "dark"):
+            theme.apply_theme(qapp, mode)
+            bar = CapsuleProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(60)
+            bar.resize(240, 10)
+            bar.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            bar.show()
+            qapp.processEvents()
+            image = bar.grab().toImage()
+            colors = {image.pixelColor(x, 5).name() for x in range(0, 240, 8)}
+            bar.close()
+            assert len(colors) > 1, f"{mode} 下胶囊条只画出一种颜色，八成没画出来"
+        theme.apply_theme(qapp, "light")
+
+
+class TestStageDot:
+    """阶段状态点：颜色随状态走，与阶段行的状态机一致。"""
+
+    def test_dot_follows_row_state(self, window):
+        from app.gui.panes.analysis_pane import StageState
+
+        row = window.workbench.analysis_pane.stage_rows[0]
+        row.mark_pending()
+        assert row.dot.state() is StageState.PENDING
+        row.mark_running()
+        assert row.dot.state() is StageState.RUNNING
+        row.mark_done()
+        assert row.dot.state() is StageState.DONE
+        row.mark_failed()
+        assert row.dot.state() is StageState.FAILED
+        window.workbench.analysis_pane._reset_progress()
+
+    def test_dot_paints_in_both_themes(self, window, qapp):
+        from app.gui import theme
+        from app.gui.panes.analysis_pane import StageState, _StageDot
+
+        for mode in ("light", "dark"):
+            theme.apply_theme(qapp, mode)
+            for state in StageState:
+                dot = _StageDot()
+                dot.set_state(state)
+                dot.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+                dot.show()
+                qapp.processEvents()
+                assert not dot.grab().isNull(), f"{mode}/{state} 画不出来"
+                dot.close()
+        theme.apply_theme(qapp, "light")
+
+
+class TestEnvCheckDialog:
+    """「环境自检」对话框：检测只读、修复诚实、入口在帮助菜单。
+
+    焦点是"界面如实反映后端结论"——后端的能力边界已由 tests/test_env_check.py
+    钉死，这里盯的是对话框有没有把它们如实画出来。
+    """
+
+    def _dialog(self, window, qapp):
+        dialog = window.build_env_check_dialog()
+        dialog.show()
+        qapp.processEvents()
+        return dialog
+
+    def _report(self, *items):
+        from app.core.env_check import EnvReport
+
+        return EnvReport(items=tuple(items))
+
+    def test_menu_has_env_check(self, window):
+        from app.gui.main_window import MainWindow
+
+        labels = []
+        for action in window.menuBar().actions():
+            menu = action.menu()
+            if menu is not None:
+                labels += [a.text() for a in menu.actions()]
+        assert "环境自检…" in labels, f"菜单里没有「环境自检…」：{labels}"
+        assert "env_check" in MainWindow.WORKER_NAMES
+
+    def test_menu_action_opens_dialog(self, window, monkeypatch, qapp):
+        """点菜单应调到 open_env_check_dialog（打桩避免 exec 阻塞）。"""
+        opened = []
+        monkeypatch.setattr(window, "open_env_check_dialog", lambda: opened.append(1))
+        help_menu = next(
+            a.menu() for a in window.menuBar().actions() if a.text() == "帮助"
+        )
+        actions = {a.text(): a for a in help_menu.actions()}
+        actions["环境自检…"].trigger()
+        assert opened == [1]
+
+    def test_dialog_builds_and_shows(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        try:
+            assert dialog.headline.text(), "结论行不能是空的"
+        finally:
+            dialog.close()
+
+    def test_all_ok_report_reads_usable(self, window, qapp):
+        from app.core.env_check import LEVEL_OK, EnvCheckItem
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem("ffmpeg", "FFmpeg 工具链", LEVEL_OK, "就绪"),
+            ))
+            assert "可用" in dialog.headline.text()
+            assert dialog.items()[0]["level"] == LEVEL_OK
+        finally:
+            dialog.close()
+
+    def test_blocked_report_lists_the_blockers(self, window, qapp):
+        from app.core.env_check import LEVEL_BLOCK, EnvCheckItem
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem("asr_engine", "语音转写引擎（faster-whisper）",
+                             LEVEL_BLOCK, "未安装 faster-whisper"),
+            ))
+            assert "不可用" in dialog.headline.text()
+            assert "faster-whisper" in dialog.headline.text()
+        finally:
+            dialog.close()
+
+    def test_only_download_fix_gets_a_button(self, window, qapp):
+        """只有 download_model 类修复画按钮；纯指引项不给按钮。
+
+        这是"诚实"落到界面上的体现：缺包没有按钮可点，只有模型能一键下载。
+        """
+        from app.core.env_check import (
+            FIX_DOWNLOAD,
+            FIX_NONE,
+            LEVEL_BLOCK,
+            EnvCheckItem,
+            EnvFix,
+        )
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem(
+                    "whisper_model", "转写模型（whisper-small）", LEVEL_BLOCK,
+                    "未下载", fix=EnvFix(FIX_DOWNLOAD, "下载 whisper-small", "whisper:small"),
+                ),
+                EnvCheckItem(
+                    "asr_engine", "语音转写引擎（faster-whisper）", LEVEL_BLOCK,
+                    "未安装", fix=EnvFix(FIX_NONE, "装不了"),
+                ),
+            ))
+            from app.gui.dialogs.env_check_dialog import _ItemRow
+
+            rows = dialog.findChildren(_ItemRow)
+            assert len(rows) == 2
+            assert rows[0].btn_fix is not None, "模型项应给下载按钮"
+            assert rows[1].btn_fix is None, "缺包项不该给按钮（点了也没用）"
+        finally:
+            dialog.close()
+
+    def test_download_button_emits_signal(self, window, qapp):
+        from app.core.env_check import FIX_DOWNLOAD, LEVEL_BLOCK, EnvCheckItem, EnvFix
+
+        dialog = self._dialog(window, qapp)
+        got = []
+        dialog.download_requested.connect(got.append)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem(
+                    "whisper_model", "转写模型", LEVEL_BLOCK, "未下载",
+                    fix=EnvFix(FIX_DOWNLOAD, "下载", "whisper:small"),
+                ),
+            ))
+            dialog._rows[0].btn_fix.click()
+            assert got == ["whisper:small"]
+        finally:
+            dialog.close()
+
+    def test_recheck_button_emits_signal(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        got = []
+        dialog.recheck_requested.connect(lambda: got.append(1))
+        try:
+            dialog.btn_recheck.click()
+            assert got == [1]
+        finally:
+            dialog.close()
+
+
+class TestAnalysisSurvivesMissingAsrModule:
+    """回归：打包版缺 faster-whisper 时，分析必须降级而不是崩溃。
+
+    根因：``asr.py`` 里 ``from faster_whisper import WhisperModel`` 抛的是
+    ``ModuleNotFoundError``（ImportError 子类，**不是** RuntimeError），而
+    ``AnalysisWorker`` 只 ``except RuntimeError``——于是"跳过转写继续分集"
+    的降级漏网，冒泡成致命的"分析失败：No module named 'faster_whisper'"。
+    """
+
+    def test_ensure_model_raises_runtime_error_when_module_missing(
+        self, monkeypatch, tmp_path
+    ):
+        from app.core import asr
+        from app.core.asr import AsrEngine, AsrSettings, ModelInfo
+
+        model_dir = tmp_path / "faster-whisper-small"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.bin").write_bytes(b"x" * 100)
+        info = ModelInfo(tier="small", path=model_dir, size_bytes=100)
+        monkeypatch.setattr(asr, "locate_model", lambda tier: info)
+
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "faster_whisper" or name.startswith("faster_whisper."):
+                raise ModuleNotFoundError("No module named 'faster_whisper'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        engine = AsrEngine(AsrSettings(model_tier="small"))
+        with pytest.raises(RuntimeError) as caught:
+            engine.ensure_model()
+        # 必须是 RuntimeError（workers 接得住），不能是 ImportError 冒泡出去
+        assert not isinstance(caught.value, ImportError)
+        assert "faster-whisper" in str(caught.value)

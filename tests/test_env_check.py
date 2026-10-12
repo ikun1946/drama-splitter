@@ -1,0 +1,179 @@
+"""环境自检的检测逻辑测试（纯逻辑，离屏，绝不联网、绝不 exec）。
+
+三条要钉死的约定：
+1. 报告能正确汇总严重度（取最严重者）、能正确判断"是否可用"（无 required-block）；
+2. **只有模型能在应用内一键修复**——`fix.kind == "download_model"` 仅出现在
+   模型类条目上；缺 Python 包（尤其 faster-whisper）绝不能给出下载修复；
+3. 检测是**只读**的：跑一遍不得创建/修改任何文件（修复必须由用户点按钮触发）。
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest  # noqa: E402
+
+from app.core.env_check import (  # noqa: E402
+    FIX_DOWNLOAD,
+    LEVEL_BLOCK,
+    LEVEL_OK,
+    LEVEL_WARN,
+    EnvCheckItem,
+    EnvReport,
+    check_environment,
+)
+
+
+class TestReportAggregation:
+    """报告汇总：严重度取最严重，可用性只看 required-block。"""
+
+    def test_level_takes_worst(self):
+        report = EnvReport(items=(
+            EnvCheckItem("a", "A", LEVEL_OK, "ok"),
+            EnvCheckItem("b", "B", LEVEL_WARN, "warn", required=False),
+            EnvCheckItem("c", "C", LEVEL_BLOCK, "block"),
+        ))
+        assert report.level == LEVEL_BLOCK
+
+    def test_level_is_ok_when_all_ok(self):
+        report = EnvReport(items=(EnvCheckItem("a", "A", LEVEL_OK, "ok"),))
+        assert report.level == LEVEL_OK
+
+    def test_optional_block_does_not_make_unusable(self):
+        """非必需项哪怕是 block，也不该判"不可用"——可用性只看 required。"""
+        report = EnvReport(items=(
+            EnvCheckItem("a", "A", LEVEL_OK, "ok"),
+            EnvCheckItem("b", "B", LEVEL_BLOCK, "block", required=False),
+        ))
+        assert report.usable is True
+
+    def test_required_block_makes_unusable(self):
+        report = EnvReport(items=(
+            EnvCheckItem("a", "A", LEVEL_OK, "ok"),
+            EnvCheckItem("b", "B", LEVEL_BLOCK, "block", required=True),
+        ))
+        assert report.usable is False
+
+    def test_by_key_finds_item(self):
+        report = EnvReport(items=(EnvCheckItem("ffmpeg", "F", LEVEL_OK, "ok"),))
+        assert report.by_key("ffmpeg").key == "ffmpeg"
+        assert report.by_key("nope") is None
+
+
+class TestCheckEnvironmentRuns:
+    """真跑一遍：项齐全、结构合法、且**只读**（不改任何文件）。"""
+
+    def test_reports_all_expected_keys(self):
+        report = check_environment()
+        keys = {i.key for i in report.items}
+        for expected in (
+            "ffmpeg", "ffplay", "asr_engine", "whisper_model",
+            "llm_model", "llm_stack", "models_dir",
+            "scenedetect", "zhconv", "pysubs2",
+        ):
+            assert expected in keys, f"自检缺少项：{expected}"
+
+    def test_every_item_has_valid_level_and_summary(self):
+        report = check_environment()
+        for item in report.items:
+            assert item.level in (LEVEL_OK, LEVEL_WARN, LEVEL_BLOCK), item.key
+            assert item.summary, f"{item.key} 没有结论文案"
+
+    def test_detection_is_read_only(self, tmp_path):
+        """检测不得创建目录、不得写文件——修复必须由用户点按钮触发。"""
+        probe_root = tmp_path / "not-created-yet"
+        before = sorted(p.name for p in tmp_path.iterdir())
+        check_environment(models_root=probe_root)
+        after = sorted(p.name for p in tmp_path.iterdir())
+        assert before == after, "自检过程动过文件系统"
+
+
+class TestRepairHonesty:
+    """修复能力的诚实边界——这是本功能的成败点。"""
+
+    def test_only_model_items_offer_download(self):
+        """只有模型类条目才给 download_model 修复。"""
+        report = check_environment()
+        for item in report.items:
+            if item.fix is not None and item.fix.kind == FIX_DOWNLOAD:
+                assert item.key in ("whisper_model", "llm_model"), (
+                    f"{item.key} 给了下载修复，但它不是模型——应用内修不了"
+                )
+
+    def test_missing_python_package_offers_no_download(self, monkeypatch):
+        """缺 Python 包（如 faster-whisper）**绝不能**给下载修复。
+
+        打包版没有 pip，装不了包；下载模型也解决不了缺包。给它一个"下载"
+        按钮就是骗用户。这一条把"不能应用内修"固化成断言。
+        """
+        import app.core.env_check as ec
+
+        # 强制 asr_engine 判定为"模块不可用"
+        monkeypatch.setattr(ec, "_module_available", lambda name: False)
+        report = ec.check_environment()
+        item = report.by_key("asr_engine")
+        assert item is not None and item.level == LEVEL_BLOCK
+        assert item.fix is None or item.fix.kind != FIX_DOWNLOAD, (
+            "缺 faster-whisper 时给了下载修复——下载模型解决不了缺包"
+        )
+
+    def test_present_module_reported_ok(self, monkeypatch):
+        """模块可导入时该项应为 ok——检测要能双向表态。"""
+        import app.core.env_check as ec
+
+        monkeypatch.setattr(ec, "_module_available", lambda name: True)
+        report = ec.check_environment()
+        for key in ("asr_engine", "scenedetect", "zhconv", "pysubs2"):
+            item = report.by_key(key)
+            assert item is not None and item.level == LEVEL_OK, key
+
+
+class TestFfmpegDegradation:
+    def test_missing_ffmpeg_blocks_and_offers_url(self, monkeypatch):
+        from app.core import env_check as ec
+        from app.core.ffmpeg import FfmpegNotFound
+
+        def boom(*a, **k):
+            raise FfmpegNotFound("未找到 ffmpeg")
+
+        monkeypatch.setattr("app.core.ffmpeg.locate_ffmpeg", boom)
+        report = ec.check_environment()
+        item = report.by_key("ffmpeg")
+        assert item.level == LEVEL_BLOCK
+        assert item.fix is not None and item.fix.kind == "open_url"
+        assert report.usable is False, "FFmpeg 缺失应判为不可用"
+
+
+class TestModelDownloadOffered:
+    def test_missing_whisper_model_offers_download(self, monkeypatch, tmp_path):
+        """引擎就绪、只是缺模型时，应给出 download_model 修复，payload 是可解析的 key。"""
+        from app.core import env_check as ec
+        from app.core.model_manager import spec_by_key
+
+        monkeypatch.setattr(ec, "_module_available", lambda name: True)  # 引擎在
+        monkeypatch.setattr("app.core.asr.locate_model", lambda tier: None)
+        report = ec.check_environment(models_root=tmp_path)
+        item = report.by_key("whisper_model")
+        assert item.level == LEVEL_BLOCK
+        assert item.fix is not None and item.fix.kind == FIX_DOWNLOAD
+        assert spec_by_key(item.fix.payload) is not None, (
+            f"下载 payload {item.fix.payload!r} 不是有效模型 key"
+        )
+
+    def test_missing_engine_suppresses_model_download(self, monkeypatch, tmp_path):
+        """引擎缺失时**不给**模型下载按钮——下了也用不了，别骗用户等几个 GB。
+
+        这是诚实边界的又一体现：两项结论相互牵连时，结论要反映这种牵连。
+        """
+        from app.core import env_check as ec
+
+        monkeypatch.setattr(ec, "_module_available", lambda name: False)  # 引擎缺
+        monkeypatch.setattr("app.core.asr.locate_model", lambda tier: None)
+        report = ec.check_environment(models_root=tmp_path)
+        item = report.by_key("whisper_model")
+        assert item.fix is None or item.fix.kind != FIX_DOWNLOAD, (
+            "引擎装不上时给了模型下载按钮——用户会白等"
+        )
+        assert "引擎" in item.summary or "引擎" in item.detail

@@ -44,7 +44,8 @@ class TimelineRuler(QWidget):
     float），切点给**整数 ticks**（方案模型的唯一真值形式，避免二次换算）。
     """
 
-    seek_requested = Signal(float)
+    seek_requested = Signal(float)          # 松手/点击：接收方要精确落定
+    scrub_requested = Signal(float)         # 拖动中（30Hz）：接收方只需尽快出画面
     boundary_move_requested = Signal(int, int)   # (边界下标, 新 ticks)
     episode_activated = Signal(int)              # 集号（1 起）
 
@@ -294,21 +295,57 @@ class TimelineRuler(QWidget):
                                color, filled=locked)
 
         # 两端时长标注
+        #
+        # 两端统一用 format_timecode（HH:MM:SS.mmm）——这是本项目时间码的规范
+        # 格式，与预览 HUD、审核卡片一致。原先左端写死 "00:00.000"、右端是
+        # "600.067s"，一边像时间码一边像秒表读数，看着像 bug（用户就是这么报的）。
         painter.setPen(QColor(qcolor(mode, "TEXT_MUTED")))
         font = QFont(FONT_MONO.split(",")[0].strip("'"))
         font.setPointSize(FONT_SIZE_CAPTION)
         painter.setFont(font)
-        painter.drawText(QRect(left, 2, 120, 16),
-                         Qt.AlignmentFlag.AlignLeft, "00:00.000")
-        total = self._total_seconds()
-        painter.drawText(QRect(right - 140, 2, 140, 16),
-                         Qt.AlignmentFlag.AlignRight, f"{float(total):.3f}s")
+        metrics = painter.fontMetrics()
+        start_text, end_text, show_start = self._time_labels(metrics)
+        top_label_h = 16
+        start_w = metrics.horizontalAdvance(start_text) + 4
+        end_w = metrics.horizontalAdvance(end_text) + 4
+        if show_start:
+            painter.drawText(QRect(left, 2, start_w, top_label_h),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             start_text)
+        painter.drawText(QRect(right - end_w, 2, end_w, top_label_h),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         end_text)
+
         if self._vfr:
             painter.setPen(QColor(qcolor(mode, "WARN")))
             painter.drawText(QRect(left, 2, right - left, 16),
                              Qt.AlignmentFlag.AlignCenter, "VFR 源 · 按时间吸附")
         painter.end()
         return pixmap
+
+    def _time_labels(self, metrics) -> tuple[str, str, bool]:
+        """两端时长标注的文案。
+
+        两端统一走 ``format_timecode``（HH:MM:SS.mmm）——这是本项目时间码的
+        规范格式，与预览 HUD、审核卡片一致。原先左端写死 "00:00.000"、右端是
+        "600.067s"（一边像时间码一边像秒表读数），用户直接把它当 bug 报了回来。
+
+        返回 ``(左端文案, 右端文案, 是否画左端)``：窄窗口下 Qt 不会自动避让，
+        两段文字会重叠。左端恒为 00:00:00.000 没有信息量，空间不够时优先舍弃它，
+        保住右端的总时长。阈值用实际字形宽度算，不用魔法数。
+        """
+        from ...core.timebase import format_timecode
+
+        start_text = format_timecode(Fraction(0))
+        end_text = format_timecode(self._total_seconds())
+        gap = 12
+        needed = (
+            metrics.horizontalAdvance(start_text)
+            + metrics.horizontalAdvance(end_text)
+            + gap
+        )
+        show_start = needed <= max(1, self.width() - 2 * self.MARGIN)
+        return start_text, end_text, show_start
 
     def _draw_stripes(self, painter: QPainter, rect: QRect, color: str) -> None:
         """例外集斜纹：对角细线，稀疏到不与集号冲突。"""
@@ -422,7 +459,10 @@ class TimelineRuler(QWidget):
             now = time.monotonic()
             if now - self._last_emit >= self.DRAG_THROTTLE:
                 self._last_emit = now
-                self.seek_requested.emit(float(self._drag_seconds))
+                # 拖动中发 scrub_requested 而不是 seek_requested：接收方据此走
+                # **异步**取帧，不阻塞 GUI 线程。松手时才发 seek_requested 做
+                # 精确落定（见 mouseReleaseEvent）。
+                self.scrub_requested.emit(float(self._drag_seconds))
             self.update()
             return
         if self._drag == "boundary":
