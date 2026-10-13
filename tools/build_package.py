@@ -67,6 +67,54 @@ EXCLUDES = [
     "PySide6.QtQml",
 ]
 
+# ---------------------------------------------------------------------------
+# 外挂依赖所需的**标准库**——必须显式带上
+# ---------------------------------------------------------------------------
+# 为什么需要这一组：上面 EXCLUDES 把 faster_whisper / llama_cpp / scenedetect
+# 等排除了，PyInstaller 就**不会分析它们的 import**，于是这些包在运行时需要的
+# **标准库**（纯 Python 部分）也没被打进产物。而它们是在应用内下载、运行时从
+# 外部 ``deps/`` 加载的——那时才发现 ``import ctypes`` / ``import multiprocessing``
+# 直接 ModuleNotFoundError。
+#
+# 实测：真实产物里 ``_ctypes.pyd`` / ``_multiprocessing.pyd`` 这些**扩展模块在**，
+# 但 ``ctypes/__init__.py``、``multiprocessing/`` 这些**纯 Python 包装层**一个都
+# 没有——所以 ``llama_cpp`` 一导入就 ``No module named 'ctypes'``（伪装成"推理栈
+# 不可用"，界面显示降级运行）。
+#
+# 这一组是 llama_cpp + diskcache + faster_whisper + scenedetect 的 stdlib 并集，
+# 逐个从它们的源码 import 语句里抠出来的。都是标准库，体积可忽略。
+HIDDEN_STDLIB = [
+    "ctypes", "ctypes.util", "ctypes.wintypes",   # llama_cpp 的核心机制
+    "multiprocessing", "multiprocessing.spawn",    # llama_cpp 多进程推理
+    "pickletools", "pickle", "dis",                # diskcache 序列化
+    "sqlite3", "sqlite3.dbapi2",                   # diskcache 后端
+    "csv", "bisect", "gc", "inspect", "struct",
+    "zlib", "fnmatch", "uuid", "random", "string",
+    "numbers", "fractions", "platform", "importlib.util",
+    "queue", "weakref", "copyreg", "operator", "shutil",
+    # numpy 2.x 的 `numpy.core` 向后兼容垫片 —— **不能漏**。
+    # numpy 2 把 `core` 改名为 `_core`，只留 `numpy/core/` 做转发。它是纯 Python
+    # 转发层，PyInstaller 静态分析**看不到**（产品自身代码不 import 它），于是
+    # 产物里只有 `numpy/_core/` 而没有 `numpy/core/`。而 opencv(cv2) 这类老代码
+    # 仍在 `import numpy.core.multiarray`，运行时直接
+    # `ModuleNotFoundError: No module named 'numpy.core.multiarray'`
+    # ——表现为"镜头检测导入失败"，但报的却是 numpy 找不到。
+    "numpy.core", "numpy.core.multiarray", "numpy.core._multiarray_umath",
+    "numpy.core.numeric", "numpy.core._dtype", "numpy.core._dtype_ctypes",
+    "numpy.core.umath", "numpy.core.multiarray", "numpy.core.fromnumeric",
+    "numpy.core.shape_base", "numpy.core.numerictypes", "numpy.core.function_base",
+    # xml 一族：scenedetect / click 的间接依赖会用到（缺了报 xml.dom 找不到）。
+    # 纯标准库，体积小，一次带全省得逐个试。
+    "xml", "xml.dom", "xml.dom.minidom", "xml.etree", "xml.etree.ElementTree",
+    "xml.parsers", "xml.parsers.expat", "xml.sax", "xml.sax.saxutils",
+    "xmlrpc", "xmlrpc.client",
+    # 其它外挂包常用到的标准库
+    "concurrent", "concurrent.futures", "subprocess", "signal",
+    "importlib.metadata", "pkgutil", "dataclasses", "enum", "typing",
+    "logging", "logging.handlers", "threading", "tempfile", "errno",
+    "io", "codecs", "unicodedata", "locale", "gettext",
+]
+
 
 def stable_abi_dll() -> Path | None:
     """定位当前解释器的 ``python3.dll``（稳定 ABI 转发库）；找不到返回 None。
@@ -133,6 +181,9 @@ def main() -> int:
         command += ["--add-data", f"{stable_abi}{os.pathsep}."]
     for module in EXCLUDES:
         command += ["--exclude-module", module]
+    # 外挂依赖需要的标准库要显式带上（EXCLUDES 让 PyInstaller 分析不到它们）
+    for module in HIDDEN_STDLIB:
+        command += ["--hidden-import", module]
     command.append(str(ROOT / "run.py"))
 
     print("执行打包：")

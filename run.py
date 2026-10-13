@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 #     OutputBaseFilename
 # 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
 # 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 
 def _print_version() -> int:
@@ -49,6 +49,102 @@ def _module_importable(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
+
+
+def _deps_report() -> int:
+    """诊断外挂依赖的可用性（``--deps-report``）。
+
+    为什么做成常驻命令：外挂依赖是在运行时从 exe 同级的 ``deps/`` 加载的，
+    一旦某个包导入失败，界面只会含糊地说"推理栈不可用"，看不出是哪一层断的。
+    这个入口把**每个关键包的导入结果与真实异常**逐条打出来，供用户贴回来排障。
+    """
+    import platform
+
+    print(f"AI 短剧智能分集器 {VERSION} 外挂依赖诊断")
+    print(f"Python {platform.python_version()} / 打包运行：{'是' if getattr(sys, 'frozen', False) else '否'}")
+    try:
+        from app.core.deps_manager import (
+            REQUIRED_IMPORTS,
+            default_deps_root,
+            deps_present,
+            register_deps,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  无法加载 deps_manager：{exc}")
+        return 1
+
+    root = default_deps_root()
+    print(f"  依赖目录 : {root}")
+    print(f"  存在     : {root.is_dir()}")
+    print(f"  文件齐全 : {deps_present()}")
+    if root.is_dir():
+        print(f"  挂载结果 : {register_deps()}")
+
+    print("  逐个导入：")
+    ok = True
+    probes = list(REQUIRED_IMPORTS) + ["llama_cpp", "scenedetect", "cv2", "diskcache"]
+    for name in probes:
+        try:
+            module = __import__(name)
+            version = getattr(module, "__version__", "?")
+            print(f"    [OK]   {name} {version}")
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            print(f"    [FAIL] {name}: {type(exc).__name__}: {exc}")
+            # 打印完整调用链——只报一句"找不到 X"往往看不出是哪一层断的
+            import traceback
+
+            for line in traceback.format_exc().splitlines()[-8:]:
+                print(f"           {line}")
+
+    # 顶层 import 成功**不等于**能用：真正的加载发生在取具体类/函数时
+    # （llama_cpp 的 Llama、scenedetect 的 ContentDetector 都要在这一步才碰 DLL）。
+    print("  关键接口：")
+    for label, probe in (
+        ("llama_cpp.Llama", lambda: __import__("llama_cpp", fromlist=["Llama"]).Llama),
+        ("scenedetect.ContentDetector",
+         lambda: __import__("scenedetect", fromlist=["ContentDetector"]).ContentDetector),
+        ("faster_whisper.WhisperModel",
+         lambda: __import__("faster_whisper", fromlist=["WhisperModel"]).WhisperModel),
+    ):
+        try:
+            probe()
+            print(f"    [OK]   {label}")
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            print(f"    [FAIL] {label}: {type(exc).__name__}: {exc}")
+
+    # 语义判断的判定器链——这是自检「语义判断」那一行的真实依据，
+    # 单独跑一遍才能对着它排障（它会**真的加载 GGUF 模型**）。
+    print("  语义判定器：")
+    try:
+        from app.core.semantic import create_judge
+
+        judge = create_judge()
+        print(f"    [{'OK' if judge else 'FAIL'}]   create_judge() → "
+              f"{judge.describe() if judge else 'None（降级为规则评分）'}")
+        if judge is None:
+            ok = False
+            from app.core.semantic import LocalLlmJudge, locate_llm_model
+
+            model = locate_llm_model()
+            print(f"           本地模型：{model}")
+            if model is not None:
+                try:
+                    LocalLlmJudge(model)
+                    print("           直接构造 LocalLlmJudge：成功（那问题在 create_judge 的选择逻辑）")
+                except Exception as exc:  # noqa: BLE001
+                    import traceback
+
+                    print(f"           直接构造 LocalLlmJudge：{type(exc).__name__}: {exc}")
+                    for line in traceback.format_exc().splitlines()[-10:]:
+                        print(f"              {line}")
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        print(f"    [FAIL] create_judge 异常：{type(exc).__name__}: {exc}")
+
+    print("结论：" + ("外挂依赖可用" if ok else "有依赖导入失败（见上）"))
+    return 0 if ok else 1
 
 
 def _self_check() -> int:
@@ -289,6 +385,8 @@ def main() -> int:
         return _print_version()
     if "--self-check" in sys.argv:
         return _self_check()
+    if "--deps-report" in sys.argv:
+        return _deps_report()
 
     from PySide6.QtWidgets import QApplication, QMessageBox
 

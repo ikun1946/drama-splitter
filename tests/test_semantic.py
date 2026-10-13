@@ -310,6 +310,52 @@ class TestLocalLlmJudgeOffline:
         assert verdict.verdict == VERDICT_UNPARSEABLE
 
 
+class TestLocalJudgeLocatesAndBuildsSameModel:
+    """回归：``local_judge`` 定位到的模型，必须就是它拿去构造的那个。
+
+    根因：旧实现用 ``locate_llm_model()`` 判断"模型在不在"（它会遍历
+    ``model_search_roots()``，打包后能找到 exe 旁边的 ``models/``），构造时却
+    退回硬编码的 ``Path(__file__)/../../models/llm``。打包后 ``__file__`` 指进
+    ``_internal/app/core/``，该路径不存在 —— 于是"明明定位到了、构造却说没有"，
+    判定器恒为 None，**语义判断在打包版里永远降级**（自检显示"模型已就位但推理
+    栈不可用"），而模型和推理栈其实都好着。
+
+    这里把"定位结果 == 构造依据"钉死：模型放在**非** `__file__` 相对路径下时，
+    ``local_judge`` 也必须把它用起来。
+    """
+
+    def test_uses_located_model_not_hardcoded_path(self, tmp_path, monkeypatch):
+        import app.core.semantic as sem
+
+        model = tmp_path / "llm" / "Qwen3.5-2B-GGUF" / "Qwen3.5-2B-Q4_K_M.gguf"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"x" * 2048)
+
+        built: list = []
+
+        class FakeJudge:
+            def __init__(self, path):  # 记录被拿去构造的实际路径
+                built.append(path)
+
+        monkeypatch.setattr(sem, "locate_llm_model", lambda root=None: model)
+        monkeypatch.setattr(sem, "LocalLlmJudge", FakeJudge)
+
+        judge = sem.local_judge()
+
+        assert isinstance(judge, FakeJudge), "定位到了模型却没构造判定器"
+        assert built == [model], (
+            f"构造用的是 {built}，不是定位到的 {model}——定位与使用路径不一致"
+        )
+
+    def test_returns_none_when_no_model_and_no_ollama(self, monkeypatch):
+        """定位不到模型、也没有 Ollama 时返回 None（降级是合法路径，不抛异常）。"""
+        import app.core.semantic as sem
+
+        monkeypatch.setattr(sem, "locate_llm_model", lambda root=None: None)
+        monkeypatch.setattr(sem.OllamaJudge, "auto_model_name", staticmethod(lambda: None))
+        assert sem.local_judge() is None
+
+
 class TestPromptRendering:
     """提示词渲染。
 

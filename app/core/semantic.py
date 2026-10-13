@@ -753,12 +753,18 @@ def local_judge(
     """本地判定器链：进程内 llama.cpp（延迟最低）→ Ollama → None。
 
     返回 None 不是错误——降级是阶段4 的明确路径（§ 预算与降级）。
+
+    **定位与构造必须用同一个结果**：旧实现用 ``locate_llm_model()`` 判断"模型在
+    不在"（它会遍历 ``model_search_roots()``，能找到 exe 旁边的模型），构造时却
+    退回一句硬编码的 ``Path(__file__)/../../models/llm``——打包后 ``__file__``
+    指向 ``_internal/app/core/``，那个路径不存在，于是"明明定位到了模型、构造却
+    说找不到"，判定器恒为 None、语义判断永远降级。这里改成直接构造定位到的
+    那个文件，定位与使用就不会再各说各话。
     """
-    if locate_llm_model(model_dir) is not None:
+    located = locate_llm_model(model_dir)
+    if located is not None:
         try:
-            return LocalLlmJudge.from_model_dir(
-                model_dir or (Path(__file__).resolve().parent.parent.parent / "models" / "llm")
-            )
+            return LocalLlmJudge(located)
         except ModelUnavailableError:
             pass
 
