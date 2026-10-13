@@ -461,7 +461,8 @@ class AsrEngine:
             except ImportError as exc:
                 raise RuntimeError(
                     "未安装 faster-whisper，无法做语音转写。"
-                    "打包版不含该依赖（体积原因）；如需本地转写请改用源码版运行。"
+                    "可在「帮助 → 环境自检」里点「安装转写引擎」一键装好"
+                    "（约 80 MB，不需要 pip 或编译器）。"
                 ) from exc
 
             self._model = WhisperModel(

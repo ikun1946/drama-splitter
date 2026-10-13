@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 #     OutputBaseFilename
 # 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
 # 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 
 def _print_version() -> int:
@@ -39,6 +39,16 @@ def _print_version() -> int:
     print(f"打包运行：{'是' if getattr(sys, 'frozen', False) else '否'}")
     print(f"程序目录：{getattr(sys, '_MEIPASS', ROOT)}")
     return 0
+
+
+def _module_importable(name: str) -> bool:
+    """该模块此刻能否导入（不触发重型顶层代码）。"""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
 
 
 def _self_check() -> int:
@@ -75,6 +85,27 @@ def _self_check() -> int:
         "  转写模型 : "
         + (f"就绪 {whisper.describe()}" if whisper else "未下载（python tools/fetch_whisper_model.py small）")
     )
+    # 转写引擎要单独报：打包版**有意不含** faster-whisper，此时模型就绪也转不了。
+    # 用户可在应用内安装（「环境自检 → 安装转写引擎」），装好后落在 exe 同级的
+    # deps/。这里如实区分"没有引擎"与"有引擎"两种处境。
+    try:
+        from app.core.deps_manager import deps_present, default_deps_root
+
+        if deps_present():
+            from app.core.deps_manager import deps_installed
+
+            engine_state = "就绪（应用内安装）" if deps_installed() else "已下载但无法导入（可能缺 DLL）"
+        elif _module_importable("faster_whisper"):
+            engine_state = "就绪（系统 Python 环境）"
+        else:
+            engine_state = (
+                "未安装 — 可在「帮助 → 环境自检」里点「安装转写引擎」一键装好"
+                f"（约 80 MB）；引擎目录：{default_deps_root()}"
+            )
+        print(f"  转写引擎 : {engine_state}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  转写引擎 : 状态未知 — {exc}")
+
     llm = locate_llm_model()
     print("  语义模型 : " + (f"就绪 {llm.name}" if llm else "未下载（python tools/fetch_llm.py）"))
     if llm is not None:

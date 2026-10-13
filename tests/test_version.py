@@ -250,3 +250,23 @@ def test_model_search_covers_exe_sibling_when_frozen(frozen):
     from app.core.asr import model_search_roots
 
     assert frozen / "models" in model_search_roots()
+
+
+def test_about_text_is_user_facing_not_dev_notes():
+    """「关于」对话框必须是给用户看的简介，不能是开发/设计备注。
+
+    历史：这里曾写着「按《……可实施修订方案》落地」——那是仓库内部文档的
+    定位说明，用户看到只会莫名其妙。用两个信号钉住：不得出现书名号里的
+    方案名，也不得出现「落地」这类开发术语。
+    """
+    text = (ROOT / "app" / "gui" / "main_window.py").read_text(encoding="utf-8")
+    # 只在 _show_about 这一段的范围内检查，避免误伤别处的正常文字
+    start = text.index("def _show_about")
+    end = text.index("def ", start + 10)
+    block = text[start:end]
+    assert "《" not in block, "「关于」里出现了《…》书名号——像内部方案名，用户看不懂"
+    assert "落地" not in block, "「关于」里出现了「落地」这类开发术语"
+    assert "修订方案" not in block
+    # 必须带上应用名与当前版本号
+    assert "AI 短剧智能分集器" in block
+    assert "{VERSION}" in block

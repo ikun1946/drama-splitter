@@ -227,10 +227,11 @@ def dialogue_failure_advice(kind: str, model_tier: str = "") -> tuple[str, str]:
     """
     if kind == DIALOGUE_NO_ENGINE:
         return (
-            "本版本不含语音转写引擎",
-            "当前运行的是打包版，因体积原因不含 faster-whisper。"
-            "下载再多模型也用不了转写——请改用源码版运行"
-            "（pip install -r requirements.txt），或把它当作只做静音/字幕分集的工具。",
+            "还没装语音转写引擎",
+            "转写需要 faster-whisper，而它不在安装包里（体积原因）。"
+            "到「帮助 → 环境自检」点「安装转写引擎」即可应用内一键装好"
+            "（约 80 MB，不需要 pip 或编译器）。暂时也可以把它当作"
+            "只做静音 / 字幕分集的工具使用。",
         )
     if kind == DIALOGUE_NO_MODEL:
         tier = model_tier or "small"
@@ -1003,3 +1004,44 @@ class EnvCheckWorker(BaseWorker):
                 )
             )
         self.checked.emit(report)
+
+
+class DepsInstallWorker(BaseWorker):
+    """在应用内安装语音转写引擎（下载 wheel 到 exe 同级的 deps/）。
+
+    为什么后台：全套约 80 MB，同步会冻住界面半分钟以上。可取消——``cancel_check``
+    会让 ``install_deps`` 在下一个包之前停下；已下好的部分留在缓存里，重试时跳过。
+    """
+
+    progress = Signal(int, int, str, int, int)  # 已下载字节, 总字节, 当前文件, 第几个, 共几个
+    log = Signal(str)
+    finished_with = Signal(object)  # DepsInstallResult
+
+    def __init__(self, *, deps_root=None, endpoint: str | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._deps_root = deps_root
+        self._endpoint = endpoint
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.deps_manager import DepsInstallResult, install_deps
+
+        try:
+            kwargs = {"deps_root": self._deps_root} if self._deps_root else {}
+            if self._endpoint:
+                kwargs["endpoint"] = self._endpoint
+            result = install_deps(
+                **kwargs,
+                on_progress=lambda done, total, name, i, n: self.progress.emit(
+                    done, total, name, i, n
+                ),
+                cancel_check=lambda: self.cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
+            result = DepsInstallResult(ok=False, message=f"安装过程异常：{exc}")
+        if result.cancelled:
+            self.finish_cancelled()
+        elif not result.ok:
+            self._last_error = result.message
+            self._state = "failed"
+        self.log.emit(result.describe())
+        self.finished_with.emit(result)

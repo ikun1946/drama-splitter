@@ -639,20 +639,22 @@ class ModelSetupForm(QWidget):
             card.set_status(f"正在使用 云端 {cloud.label} 的 {model}。")
             return
 
-        # 语音转写专有的一种处境：**模型下好了，但这一版没有转写引擎**。
+        # 语音转写专有的一种处境：**模型下好了，但转写引擎还没装**。
         # 必须单独说，且要早于下面的通用"未就绪"分支——否则用户会看到
         # "本机没有安装可用的模型，去下载"，而去下载根本解决不了缺引擎的问题
-        # （他已经下过了）。这与环境自检在缺 faster-whisper 时收起模型下载
-        # 按钮是同一条道理。
+        # （他已经下过了）。
+        #
+        # 现在引擎**可以应用内安装**（见 deps_manager），所以出口是"去自检"
+        # 而不是旧文案里的"改用源码版"——那已经不是唯一选择了。
         if capability == CAP_ASR and self._asr_model_present() and not self._asr_engine_available():
             card.set_badge("本地", warn=True)
             card.set_status(
-                f"{label}不会执行：本版本不含转写引擎。",
+                f"{label}不会执行：还没装转写引擎。",
                 tone="warn",
                 detail=(
-                    "模型已就绪，但当前运行的是打包版，因体积原因不含 "
-                    "faster-whisper。下载再多模型也用不了转写——请改用源码版运行"
-                    "（pip install -r requirements.txt）。"
+                    "模型已就绪，但转写引擎（faster-whisper）不在安装包里。"
+                    "到「环境自检 → 安装转写引擎」可以应用内一键安装"
+                    "（约 80 MB，不需要 pip 或编译器），装好即可转写。"
                 ),
                 fix=("去自检", "envcheck"),
             )

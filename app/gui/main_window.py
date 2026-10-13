@@ -312,6 +312,7 @@ class MainWindow(QMainWindow):
         self.env_check_dialog = EnvCheckDialog(self)
         self.env_check_dialog.recheck_requested.connect(self._start_env_check)
         self.env_check_dialog.download_requested.connect(self._on_env_fix_download)
+        self.env_check_dialog.install_engine_requested.connect(self._on_env_install_engine)
         self.env_check_dialog.open_url_requested.connect(self._on_env_fix_open_url)
         self.env_check_dialog.navigate_requested.connect(self._on_env_fix_navigate)
         return self.env_check_dialog
@@ -347,6 +348,51 @@ class MainWindow(QMainWindow):
         self.bottom.set_hint(
             f"请在「本地模型」里下载 {model_key}（已为你打开模型管理）。"
         )
+
+    def _on_env_install_engine(self) -> None:
+        """「安装转写引擎」：后台下载官方预编译依赖到 exe 同级的 deps/。
+
+        与「下载模型」不同——那是把用户送到模型管理页自己点；这里是真的在应用内
+        把依赖装上（不需要 pip / 编译器）。装完立刻重新自检，让那一项变绿。
+        """
+        from .workers import DepsInstallWorker
+
+        if self.is_busy():
+            self.bottom.set_hint("有后台任务在跑，等它结束再安装引擎。")
+            return
+
+        worker = DepsInstallWorker(parent=self)
+        worker.progress.connect(self._on_deps_progress)
+        worker.log.connect(lambda text: self.workbench.inspector.append_log(text))
+        worker.finished_with.connect(self._on_deps_finished)
+        self.register_worker("deps_install", worker)
+        self.bottom.set_hint("正在下载语音转写引擎（约 80 MB），可继续用其它功能…")
+        self.bottom.set_progress(0)
+        worker.start()
+
+    def _on_deps_progress(self, done: int, total: int, name: str, index: int, count: int) -> None:
+        pct = int(done / total * 100) if total else 0
+        self.bottom.set_progress(max(0, min(100, pct)))
+        self.bottom.set_hint(f"安装转写引擎：{index}/{count} {name}")
+
+    def _on_deps_finished(self, result) -> None:
+        self.bottom.set_progress(None)
+        from .widgets import message
+
+        if result.ok:
+            self.bottom.set_hint("语音转写引擎已安装，重新检测中…")
+            message.information(
+                self,
+                "安装完成",
+                "语音转写引擎已安装到：\n"
+                f"{result.deps_root}\n\n"
+                "现在可以做语音转写了（还需要有转写模型）。"
+                "点「重新检测」可看到该状态更新。",
+            )
+            self._start_env_check()
+        else:
+            self.bottom.set_hint("转写引擎安装未完成。")
+            message.warning(self, "安装未完成", result.message or "未知原因")
 
     def _on_env_fix_open_url(self, url: str) -> None:
         import webbrowser
@@ -429,8 +475,10 @@ class MainWindow(QMainWindow):
             self,
             "关于",
             f"AI 短剧智能分集器 {VERSION}\n\n"
-            "按《AI短剧智能分集器 V1.2.0 可实施修订方案》落地。\n"
-            "AI 只给建议，用户审核，程序按帧精确导出；默认不重排、不补拍。",
+            "把一部长剧按剧情切成一集一集，并精确导出成片。\n\n"
+            "程序先依据对白、静音与画面变化找出候选切点，再由 AI 给出建议，"
+            "最终由你逐集审核确认；导出按帧精确切割，默认不重排、不补拍、"
+            "不改动画面与对白。",
         )
 
     # ---- 顶栏 ----------------------------------------------------------
@@ -614,7 +662,7 @@ class MainWindow(QMainWindow):
 
     WORKER_NAMES = (
         "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
-        "update_check", "update_download", "env_check",
+        "update_check", "update_download", "env_check", "deps_install",
     )
 
     #: 允许"一类多实例"的任务前缀。模型设置页会同时给多家厂商拉 ``/models``，

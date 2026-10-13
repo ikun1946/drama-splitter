@@ -103,21 +103,46 @@ class TestRepairHonesty:
                 )
 
     def test_missing_python_package_offers_no_download(self, monkeypatch):
-        """缺 Python 包（如 faster-whisper）**绝不能**给下载修复。
+        """缺转写引擎时**绝不能**给 `download_model`。
 
-        打包版没有 pip，装不了包；下载模型也解决不了缺包。给它一个"下载"
-        按钮就是骗用户。这一条把"不能应用内修"固化成断言。
+        缺的是**包**不是**模型**——下模型解决不了缺包，给它一个"下载模型"
+        按钮就是骗用户。这一条把那个区分固化成断言。
+
+        注意：缺引擎现在**可以**给 `install_engine`（应用内装 wheel），
+        所以这里只禁 `download_model`，不禁"能在应用内修"这件事。
         """
         import app.core.env_check as ec
 
-        # 强制 asr_engine 判定为"模块不可用"
+        # 强制转写引擎判定为"不可用"，且没有任何外挂依赖目录
         monkeypatch.setattr(ec, "_module_available", lambda name: False)
+        monkeypatch.setattr(
+            "app.core.deps_manager.deps_present", lambda *a, **k: False
+        )
         report = ec.check_environment()
         item = report.by_key("asr_engine")
         assert item is not None and item.level == LEVEL_BLOCK
         assert item.fix is None or item.fix.kind != FIX_DOWNLOAD, (
             "缺 faster-whisper 时给了下载修复——下载模型解决不了缺包"
         )
+
+    def test_missing_engine_offers_install(self, monkeypatch):
+        """缺引擎时应给 `install_engine`——应用内真能装上，这才是对的出口。"""
+        import app.core.env_check as ec
+        from app.core.env_check import FIX_INSTALL_ENGINE
+
+        monkeypatch.setattr(ec, "_module_available", lambda name: False)
+        # 让 deps_manager 探测报告"既没装也不完整"
+        monkeypatch.setattr(
+            "app.core.deps_manager.deps_present", lambda *a, **k: False
+        )
+        report = ec.check_environment()
+        item = report.by_key("asr_engine")
+        assert item is not None and item.level == LEVEL_BLOCK
+        assert item.fix is not None, "缺引擎却不给任何出口"
+        assert item.fix.kind == FIX_INSTALL_ENGINE, (
+            f"缺引擎应给 install_engine，实际给了 {item.fix.kind}"
+        )
+        assert item.fix.label, "有修复动作就必须有按钮文案"
 
     def test_present_module_reported_ok(self, monkeypatch):
         """模块可导入时该项应为 ok——检测要能双向表态。"""

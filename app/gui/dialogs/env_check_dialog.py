@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from ...core.env_check import (
     FIX_DOWNLOAD,
+    FIX_INSTALL_ENGINE,
     FIX_NAVIGATE,
     FIX_OPEN_URL,
     LEVEL_BLOCK,
@@ -93,7 +94,8 @@ class _ItemRow(QFrame):
         self.btn_fix: QPushButton | None = None
         if item.fix is not None and item.fix.kind != "none" and item.fix.label:
             self.btn_fix = QPushButton(item.fix.label)
-            if item.fix.kind == FIX_DOWNLOAD:
+            if item.fix.kind in (FIX_DOWNLOAD, FIX_INSTALL_ENGINE):
+                # 这两种是**真的会在应用内动手装东西**的，样式给足分量
                 self.btn_fix.setProperty("role", "primary")
             else:
                 self.btn_fix.setProperty("role", "mini")
@@ -111,6 +113,8 @@ class EnvCheckDialog(DialogShell):
 
     #: 用户点了"下载模型"类修复（payload = 模型 key）
     download_requested = Signal(str)
+    #: 用户点了"安装转写引擎"（应用内下载运行期依赖）
+    install_engine_requested = Signal()
     #: 用户点了"打开网页"类修复（payload = URL）
     open_url_requested = Signal(str)
     #: 用户点了"跳到某处"类修复（payload = 目标标识）
@@ -151,8 +155,8 @@ class EnvCheckDialog(DialogShell):
 
         self.footer_hint.setText(
             "本页只检测、只报告——不会自动下载或安装任何东西，点按钮才会动手。\n"
-            "只有「模型」能在应用内一键下载完成；FFmpeg 与 Python 依赖只能给出下载页与办法"
-            "（打包版不含这些依赖，需要改用源码版运行）。"
+            "「下载模型」与「安装转写引擎」能在应用内一键完成；"
+            "FFmpeg 与部分可选依赖只能给出下载页与办法。"
         )
         self.add_close_button()
         self.install_footer()
@@ -200,6 +204,8 @@ class EnvCheckDialog(DialogShell):
     def _on_fix_requested(self, kind: str, payload: str) -> None:
         if kind == FIX_DOWNLOAD:
             self.download_requested.emit(payload)
+        elif kind == FIX_INSTALL_ENGINE:
+            self.install_engine_requested.emit()
         elif kind == FIX_OPEN_URL:
             self.open_url_requested.emit(payload)
         elif kind == FIX_NAVIGATE:

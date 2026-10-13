@@ -68,6 +68,23 @@ EXCLUDES = [
 ]
 
 
+def stable_abi_dll() -> Path | None:
+    """定位当前解释器的 ``python3.dll``（稳定 ABI 转发库）；找不到返回 None。
+
+    它就在解释器可执行文件旁边。用 ``sys.base_prefix`` 而不是
+    ``sys.prefix``：venv 里通常**没有**这个 DLL（它属于基础安装），
+    而是要往前找基础解释器——实测本机 venv 的 Scripts/ 下确实没有。
+    """
+    candidates = [
+        Path(sys.executable).resolve().parent / "python3.dll",
+        Path(sys.base_prefix) / "python3.dll",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 def main() -> int:
     name = "drama-splitter"
     dist = ROOT / "dist"
@@ -102,6 +119,18 @@ def main() -> int:
         # 目标写成 "assets"（无点号）——PyInstaller 的分隔符是平台相关的，
         # 冒号在 Windows 上才对；这里用相对 dest，落到 _internal/assets/。
         command += ["--add-data", f"{ICON}{os.pathsep}assets"]
+    # `python3.dll` —— Python 的**稳定 ABI 转发库**，PyInstaller 不会自动带上。
+    #
+    # 为什么必须显式加：外挂的转写引擎依赖（tokenizers / av / faster_whisper）
+    # 是编译时链接 ``python3.dll``（abi3 约定）的 .pyd，而不是版本专用的
+    # ``python312.dll``。普通 Python 安装目录里有它，所以源码版能跑；冻结后
+    # 只带 ``python312.dll``，这些 .pyd 就一律 ``DLL load failed while importing
+    # _core: 找不到指定的模块``。实测把 python3.dll 放进产物后三个包全部导入成功。
+    #
+    # 它只有 ~70 KB，随包分发无负担；缺了它，应用内装好的引擎会静默不可用。
+    stable_abi = stable_abi_dll()
+    if stable_abi is not None:
+        command += ["--add-data", f"{stable_abi}{os.pathsep}."]
     for module in EXCLUDES:
         command += ["--exclude-module", module]
     command.append(str(ROOT / "run.py"))

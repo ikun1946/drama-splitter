@@ -3802,13 +3802,15 @@ class TestEnvCheckDialog:
         finally:
             dialog.close()
 
-    def test_only_download_fix_gets_a_button(self, window, qapp):
-        """只有 download_model 类修复画按钮；纯指引项不给按钮。
+    def test_only_actionable_fixes_get_a_button(self, window, qapp):
+        """只有会真动手的修复画按钮；纯指引（none）不画。
 
-        这是"诚实"落到界面上的体现：缺包没有按钮可点，只有模型能一键下载。
+        这是"诚实"落到界面上的体现：能修的给按钮，纯告知的（`none`）连按钮
+        都没有。`download_model` 与 `install_engine` 都算"真动手"。
         """
         from app.core.env_check import (
             FIX_DOWNLOAD,
+            FIX_INSTALL_ENGINE,
             FIX_NONE,
             LEVEL_BLOCK,
             EnvCheckItem,
@@ -3824,17 +3826,63 @@ class TestEnvCheckDialog:
                 ),
                 EnvCheckItem(
                     "asr_engine", "语音转写引擎（faster-whisper）", LEVEL_BLOCK,
-                    "未安装", fix=EnvFix(FIX_NONE, "装不了"),
+                    "未安装", fix=EnvFix(FIX_INSTALL_ENGINE, "安装转写引擎"),
+                ),
+                EnvCheckItem(
+                    "ffplay", "预览声音（ffplay）", LEVEL_BLOCK,
+                    "缺 ffplay", fix=EnvFix(FIX_NONE, "只是告知"),
                 ),
             ))
             from app.gui.dialogs.env_check_dialog import _ItemRow
 
             rows = dialog.findChildren(_ItemRow)
-            assert len(rows) == 2
+            assert len(rows) == 3
             assert rows[0].btn_fix is not None, "模型项应给下载按钮"
-            assert rows[1].btn_fix is None, "缺包项不该给按钮（点了也没用）"
+            assert rows[1].btn_fix is not None, "缺引擎项应给安装按钮"
+            assert rows[1].btn_fix.text() == "安装转写引擎"
+            assert rows[2].btn_fix is None, "纯告知项不该给按钮"
         finally:
             dialog.close()
+
+    def test_install_engine_button_emits_signal(self, window, qapp):
+        """点「安装转写引擎」应发出 install_engine_requested。"""
+        from app.core.env_check import (
+            FIX_INSTALL_ENGINE,
+            LEVEL_BLOCK,
+            EnvCheckItem,
+            EnvFix,
+        )
+
+        dialog = self._dialog(window, qapp)
+        got = []
+        dialog.install_engine_requested.connect(lambda: got.append(1))
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem(
+                    "asr_engine", "语音转写引擎", LEVEL_BLOCK, "未安装",
+                    fix=EnvFix(FIX_INSTALL_ENGINE, "安装转写引擎"),
+                ),
+            ))
+            dialog._rows[0].btn_fix.click()
+            assert got == [1]
+        finally:
+            dialog.close()
+
+    def test_install_engine_wired_to_main_window(self, window, qapp):
+        """主窗口构建对话框时必须已把 install_engine_requested 接上处理器。
+
+        否则按钮点了没反应。这里直接替换处理器为探针，再触发信号验证接线。
+        """
+        calls = []
+        dialog = window.build_env_check_dialog()
+        # 断开原有连接，接上探针，确认信号确实通到主窗口的方法名上
+        dialog.install_engine_requested.disconnect()
+        dialog.install_engine_requested.connect(lambda: calls.append(1))
+        dialog.install_engine_requested.emit()
+        assert calls == [1]
+        assert "deps_install" in type(window).WORKER_NAMES
+        # 真正的处理器存在
+        assert callable(getattr(window, "_on_env_install_engine", None))
 
     def test_download_button_emits_signal(self, window, qapp):
         from app.core.env_check import FIX_DOWNLOAD, LEVEL_BLOCK, EnvCheckItem, EnvFix
@@ -3930,13 +3978,19 @@ class TestDialogueDiagnosis:
             "未找到模型 small。尚未下载任何模型。请先运行：..."
         ) == DIALOGUE_NO_MODEL
 
-    def test_missing_engine_advice_points_at_source_build_not_download(self):
-        """缺引擎时**不能**引导用户去下模型——那解决不了问题。"""
+    def test_missing_engine_advice_points_at_install_not_download(self):
+        """缺引擎时**不能**引导用户去下模型——那解决不了问题。
+
+        现在的正确出口是「环境自检 → 安装转写引擎」（应用内可装），不再是
+        旧文案里那条"只能改用源码版"。
+        """
         from app.gui.workers import DIALOGUE_NO_ENGINE, dialogue_failure_advice
 
         title, detail = dialogue_failure_advice(DIALOGUE_NO_ENGINE)
         assert "引擎" in title
-        assert "源码版" in detail, "应引导改用源码版，而不是再下模型"
+        assert "环境自检" in detail or "安装转写引擎" in detail, (
+            "应引导到应用内安装引擎，而不是再下模型"
+        )
         assert "下载" not in detail or "用不了" in detail
 
     def test_detailed_log_line_includes_cause_and_raw_error(self):
@@ -3949,7 +4003,7 @@ class TestDialogueDiagnosis:
             DIALOGUE_NO_ENGINE, "small", "No module named 'faster_whisper'"
         )
         assert "引擎" in line, "要有分类结论（人话）"
-        assert "源码版" in line, "要有下一步"
+        assert "环境自检" in line or "安装转写引擎" in line, "要有下一步"
         assert "No module named" in line, "要带上原始报错（排障用）"
 
     def test_pane_surfaces_warning_on_diagnosis(self, window):

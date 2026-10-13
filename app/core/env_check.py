@@ -8,21 +8,24 @@
 
 诚实边界（重要，别让界面撒谎）
 ------------------------------
-自检能查出问题，但**只有模型文件能在应用内一键下载修复**（走
-``model_manager.download_model``，用的是 curl，不依赖 pip）。其余一律只能
-"检测 + 给指引"：
+自检能查出问题，可修的动作分两类，**kind 必须如实标注**：
+
+- ``download_model``：应用内下载**模型文件**（走 ``model_manager``，用 curl）；
+- ``install_engine``：应用内安装**运行期依赖**（走 ``deps_manager``，下载
+  wheel 解压到 exe 同级的 ``deps/``）——语音转写引擎走这条，不需要 pip。
+
+其余一律只能"检测 + 给指引"：
 
 - **FFmpeg**：没有任何下载逻辑，只能让用户去装、或设 DRAMA_FFMPEG_DIR；
-- **Python 包**（faster-whisper / llama-cpp-python / scenedetect / zhconv /
-  pysubs2 …）：打包版不含 pip，**应用内装不了**。这不是"忘了做"，是打包策略
-  （体积）的必然结果。给 ``open_url`` 指到官方发布页（llama-cpp-python 有
-  ``py3-none`` 预编译轮子），让用户自己下——但绝不给 ``download_model``：
-  下模型解决不了缺包。
+- **可选 Python 包**（scenedetect / zhconv / pysubs2）：缺失只降级，给说明
+  （scenedetect 还会给 ``open_url`` 指到发布页）；
+- **llama-cpp-python**：给 ``open_url`` 指到官方发布页（有 prebuilt 轮子），
+  让用户自己下——不冒充应用内能装。
 
-所以 `EnvCheckItem.fix` 的 kind 必须如实区分：``download_model`` 才是应用内
-可执行的修复，其余是 ``open_url`` / ``navigate`` / ``none``（纯告知）。
-测试里把这条钉死了（见 tests/test_env_check.py）——尤其"缺 faster-whisper
-时不得给出下载修复"，因为下载模型**解决不了**缺包的问题。
+历史教训：早期只有 ``download_model`` 能在应用内执行，那时的注释写成"Python
+包一律装不了"。**那是错的**——冻结 exe 的 sys.path 含 ``_internal``，把 wheel
+解压到独立目录再挂上就能用；实测（本机 PyInstaller onedir 产物）转写引擎
+装好后能在冻结版里真正完成中文语音识别。故新增 ``install_engine``。
 
 模型文件与转写引擎必须分成两项
 ------------------------------
@@ -42,6 +45,11 @@ __all__ = [
     "LEVEL_OK",
     "LEVEL_WARN",
     "LEVEL_BLOCK",
+    "FIX_DOWNLOAD",
+    "FIX_INSTALL_ENGINE",
+    "FIX_OPEN_URL",
+    "FIX_NAVIGATE",
+    "FIX_NONE",
     "EnvFix",
     "EnvCheckItem",
     "EnvReport",
@@ -56,8 +64,15 @@ LEVEL_BLOCK = "block"
 
 _ORDER = {LEVEL_OK: 0, LEVEL_WARN: 1, LEVEL_BLOCK: 2}
 
-#: 修复动作的种类。**只有 download_model 是应用内能真正执行的**。
+#: 修复动作的种类。
+#:
+#: - ``download_model``：应用内下载**模型文件**（走 model_manager，curl）；
+#: - ``install_engine``：应用内安装**运行期依赖**（走 deps_manager，下载 wheel
+#:   并解压到 exe 同级的 ``deps/``）——这是给"转写引擎"用的，与下模型是两回事；
+#: - ``open_url`` / ``navigate``：只能引导，应用内做不了；
+#: - ``none``：纯告知，连按钮都不画。
 FIX_DOWNLOAD = "download_model"   # payload = 模型 key（spec_by_key 能解析）
+FIX_INSTALL_ENGINE = "install_engine"  # payload = ""（清单在 deps_manager 里）
 FIX_OPEN_URL = "open_url"         # payload = 要打开的网址
 FIX_NAVIGATE = "navigate"         # payload = 目标对话框标识（如 "models"）
 FIX_NONE = "none"
@@ -68,7 +83,8 @@ class EnvFix:
     """一条可执行的补救动作。
 
     ``kind`` 决定界面怎么处理，也决定"这条到底能不能在应用内修好"：只有
-    :data:`FIX_DOWNLOAD` 会真的启动下载，其余都是引导。
+    :data:`FIX_DOWNLOAD` 与 :data:`FIX_INSTALL_ENGINE` 会真的动手装，
+    其余都是引导。
     """
 
     kind: str
@@ -228,23 +244,59 @@ def _check_asr_engine() -> EnvCheckItem:
     """语音转写引擎（faster-whisper）。
 
     **这条与 ``whisper_model`` 必须分开**：打包版有意不含 faster-whisper，
-    此时即便模型文件都在，转写也不可用。给用户的动作只能是"改用源码版/装
-    依赖"，**绝不能**给"下载模型"——那解决不了缺包。
+    此时即便模型文件都在，转写也不可用。
+
+    可修性分三种处境，动作各不相同：
+
+    - 引擎已在系统 Python 环境里（源码版）→ 就绪，无动作；
+    - 引擎在应用内装的 deps 里 → 就绪，无动作；
+    - 都没有 → 给「安装转写引擎」（``install_engine``）：应用内下载官方
+      wheel 到 exe 同级的 ``deps/``，不需要 pip、不需要编译器。
+
+    第三种的按钮**不是** ``download_model``——缺的是包不是模型，下模型解决
+    不了。给 ``install_engine`` 才是对的；这也让"只有模型能在应用内一键修"
+    的旧说法就此更新（现在依赖也能装了，见 deps_manager）。
     """
+    # 1) 应用内安装的引擎（优先判断：源码版与打包版都可能用它）
+    try:
+        from .deps_manager import deps_installed, deps_present, default_deps_root
+
+        if deps_present():
+            if deps_installed():
+                return EnvCheckItem(
+                    key="asr_engine", label="语音转写引擎（faster-whisper）",
+                    level=LEVEL_OK, summary="就绪（应用内安装）",
+                    detail=str(default_deps_root()),
+                )
+            # 目录在、包导入不了：多半是缺 DLL 或版本不匹配。给"重新安装"的出口。
+            return EnvCheckItem(
+                key="asr_engine", label="语音转写引擎（faster-whisper）",
+                level=LEVEL_BLOCK,
+                summary="已下载但无法加载（可能缺 DLL 或版本不匹配）",
+                detail=f"可重新安装以修复。引擎目录：{default_deps_root()}",
+                fix=EnvFix(kind=FIX_INSTALL_ENGINE, label="重新安装转写引擎"),
+            )
+    except Exception:  # noqa: BLE001 - 探测依赖目录失败不应影响自检
+        pass
+
+    # 2) 系统 Python 环境里已有（源码版运行的情形）
     if _module_available("faster_whisper"):
         return EnvCheckItem(
             key="asr_engine", label="语音转写引擎（faster-whisper）",
             level=LEVEL_OK, summary="就绪",
         )
+
+    # 3) 都没有：给应用内安装的出口
     return EnvCheckItem(
         key="asr_engine", label="语音转写引擎（faster-whisper）",
         level=LEVEL_BLOCK,
         summary="未安装 faster-whisper，无法做语音转写",
         detail=(
-            "打包版因体积原因不含该依赖。装好模型也解决不了这一项——"
-            "需要改用源码版（pip install -r requirements.txt）运行。"
+            "语音转写需要这个引擎，而它不在安装包里（体积原因）。"
+            "点右侧按钮可在应用内安装：程序会下载官方预编译组件（约 80 MB）"
+            "放进一个独立目录，装好后转写就能用，无需 pip 或编译器。"
         ),
-        fix=EnvFix(kind=FIX_NONE, label=""),
+        fix=EnvFix(kind=FIX_INSTALL_ENGINE, label="安装转写引擎"),
     )
 
 
