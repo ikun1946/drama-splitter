@@ -80,6 +80,11 @@ CLAUSE_GAP_MULTIPLIER = Fraction(3, 2)
 
 SIMPLIFIED_LOCALE = "zh-cn"
 
+#: 繁简转换可用性探测的样本。为什么要有它：zhconv 的词典是**首次
+#: convert()** 时才从包目录读出来的，光 ``import zhconv`` 成功不代表
+#: 词典在——打包版漏带 ``zhcdict.json`` 时正是这样。
+_SIMPLIFY_PROBE_TEXT = "測試"
+
 # 模型档位与实测性能（RTF = 处理耗时 / 音频时长，CPU int8，越大越慢）
 MODEL_TABLE: dict[str, dict] = {
     "tiny": {"size_mb": 75, "rtf_cpu_int8": 0.053, "cer_zh": 0.0659},
@@ -912,6 +917,10 @@ def _apply_simplified(transcript: Transcript) -> None:
         # 真正的转换在下面 convert_simplified 里做。
         # noqa 标记是给清理脚本看的——没有它，`imported but unused` 会把它当垃圾删掉。
         import zhconv  # noqa: F401
+
+        # 光 import 成功**不够**：词典是首次 convert() 才读的。
+        # 先转一个样本，把“代码在、词典不在”挡在批量转换之前。
+        zhconv.convert(_SIMPLIFY_PROBE_TEXT, SIMPLIFIED_LOCALE)
     except ImportError:
         transcript.issues.append(
             Issue(
@@ -919,6 +928,18 @@ def _apply_simplified(transcript: Transcript) -> None:
                 "SIMPLIFY_UNAVAILABLE",
                 "未安装 zhconv，无法保证输出为简体中文。",
                 "模型在句尾可能输出繁体（实测出现过）。安装 zhconv 即可自动转换。",
+            )
+        )
+        return
+    except OSError as exc:
+        # 词典文件读不到（FileNotFoundError 属 OSError）。降级成一条风险后
+        # 继续：字幕可能仍是繁体，但不该因为一个词典文件让整个分析全废。
+        transcript.issues.append(
+            Issue(
+                LEVEL_WARN,
+                "SIMPLIFY_UNAVAILABLE",
+                "繁简转换不可用（zhconv 词典文件缺失），字幕可能仍是繁体。",
+                f"{type(exc).__name__}: {exc}",
             )
         )
         return
@@ -1030,8 +1051,8 @@ def to_simplified(text: str) -> str:
     仍会输出「那我們就法庭上見。」「隨便你。」。短剧字幕必须是简体，
     因此提示词只是第一道防线，这里用确定性转换兜底。
 
-    未安装 zhconv 时原样返回，并把情况交给调用方记录为风险——
-    静默返回繁体比报错更糟。
+    未安装 zhconv、或词典文件缺失时原样返回，并把情况交给调用方记录为
+    风险——静默返回繁体比报错更糟，但报错炸掉整次分析更糟。
     """
     if not text:
         return text
@@ -1039,7 +1060,13 @@ def to_simplified(text: str) -> str:
         import zhconv  # type: ignore
     except ImportError:
         return text
-    return zhconv.convert(text, SIMPLIFIED_LOCALE)
+    try:
+        return zhconv.convert(text, SIMPLIFIED_LOCALE)
+    except OSError:
+        # 词典缺失（打包版漏带 zhconv/zhcdict.json 时实测如此）会抛
+        # FileNotFoundError。原样返回，让调用方按“转换没生效”记风险——
+        # 一个词典文件不该让整次分析失败。
+        return text
 
 
 def traditional_char_ratio(text: str) -> float:

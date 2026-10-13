@@ -269,6 +269,18 @@ dist/drama-splitter/
 界面模块时它照样"通过"，而用户双击才崩。`--ui-smoke` 会离屏构建整个界面
 并走一遍模型页。
 
+打包脚本还会核对一件两个自检都覆盖不到的东西：**`_internal/zhconv/zhcdict.json`**
+（繁简转换的词典）。PyInstaller 只把 zhconv 的**代码**冻进产物，不会自动带上它的
+词典数据；而 `--self-check` / `--ui-smoke` 都不碰繁简转换——v1.0.7 就是这样漏掉的：
+装出来的程序界面照常打开、两项目检全绿，用户一跑「分析」才报
+`FileNotFoundError: ...\_internal\zhconv\zhcdict.json`，整次分析白跑。现在收不到
+词典直接让**构建失败**，产出来之后还会再查一遍文件在不在。
+
+构建时另请留意 PATH：PyInstaller 会按 PATH 解析 DLL 依赖，PATH 里若有别的 Qt / ICU
+目录（例如某个工具自带的 poppler），那些不兼容的 DLL 会被一并打进 `_internal/`，
+症状是程序启动即 `DLL load failed while importing QtWidgets`。`--ui-smoke` 能拦住这类
+产物（返回码非 0），所以别跳过它。
+
 ⚠️ **产物是 `--windowed` 编译的 GUI 子系统程序，没有控制台**，因此这两个自检
 在打包版里**看不到任何文字输出**（进程内 `sys.stdout is None`，`print()` 是空操作）。
 它们只通过**返回码**表态：0 = 通过。需要看详细报告时用源码运行

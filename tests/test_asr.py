@@ -36,6 +36,24 @@ from app.core.cache import CacheKey, CacheStore, SourceFingerprint
 from conftest import whisper_model_or_skip
 
 
+def _install_zhconv_without_dict(monkeypatch) -> None:
+    """把 zhconv 换成一个「能导入、一转换就找不到词典」的替身。
+
+    这正是打包版漏带 ``zhconv/zhcdict.json`` 时的真实状态：``import zhconv``
+    成功，``convert()`` 抛 FileNotFoundError（v1.0.7 实测）。
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("zhconv")
+
+    def convert(text: str, locale: str) -> str:  # noqa: ARG001
+        raise FileNotFoundError(2, "No such file or directory", "zhcdict.json")
+
+    fake.convert = convert  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "zhconv", fake)
+
+
 def word(start: float, end: float, text: str, probability: float = 0.9) -> AsrWord:
     return AsrWord(
         start=Fraction(str(start)), end=Fraction(str(end)), text=text, probability=probability
@@ -140,6 +158,31 @@ class TestSimplifiedConversion:
     def test_empty_is_safe(self):
         assert to_simplified("") == ""
         assert traditional_char_ratio("") == 0.0
+
+    def test_missing_dict_returns_text_unchanged(self, monkeypatch):
+        """打包版缺 zhconv 词典时降级：原样返回，绝不抛异常。
+
+        v1.0.7 的真实故障：PyInstaller 冻进了 zhconv 的代码却没带
+        zhcdict.json，于是 convert() 抛 FileNotFoundError，而这里只捕
+        ImportError——异常直接冒到界面，用户看到的是「分析失败」。
+        """
+        _install_zhconv_without_dict(monkeypatch)
+        assert to_simplified("隨便你。") == "隨便你。"
+
+    def test_missing_dict_records_risk_instead_of_raising(self, monkeypatch):
+        """整次分析不能被一个词典文件打断——只记一条风险。"""
+        from app.core.asr import _apply_simplified
+
+        _install_zhconv_without_dict(monkeypatch)
+        transcript = Transcript(
+            words=[word(0, 1, "隨便你。")],
+            segments=[AsrSegment(start=Fraction(0), end=Fraction(1), text="隨便你。")],
+        )
+
+        _apply_simplified(transcript)
+
+        assert "SIMPLIFY_UNAVAILABLE" in [issue.code for issue in transcript.issues]
+        assert transcript.text == "隨便你。", "缺词典时应原样保留文本"
 
 
 # ---------------------------------------------------------------------------

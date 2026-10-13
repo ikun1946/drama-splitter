@@ -133,6 +133,45 @@ def stable_abi_dll() -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# zhconv 的**词典数据**——必须显式收集，否则打包版一分析就炸
+# ---------------------------------------------------------------------------
+# 为什么要这一段：zhconv 是纯 Python 包，PyInstaller 的静态分析会把它的
+# **代码**冻进产物，但**不会带上词典数据** ``zhcdict.json``——那份 500 KB 的
+# JSON 是包自己用 ``os.path.dirname(__file__)`` 直接 ``open()`` 读的，不走
+# importlib.resources，PyInstaller 看不出它算数据文件。
+#
+# 后果（v1.0.7 实测）：``import zhconv`` 一切正常，一 ``convert()`` 就
+#   FileNotFoundError: [Errno 2] No such file or directory:
+#       ...\_internal\zhconv\zhcdict.json
+# 而 asr 那一步只把 ImportError 当“没装”（记一条风险继续跑），这个异常会直接
+# 冒到界面——用户看到的是“分析失败”弹窗，整次分析白跑。
+#
+# 落点必须是 ``_internal/zhconv/``：zhconv 用包目录找词典，冻结后模块的
+# ``__file__`` 就落在这里。文件名随版本变过（1.4 起叫 ``zhcdict.json``，
+# 更早叫 ``zhdict.json``），所以按 ``*.json`` 全收，不写死名字。
+def zhconv_data_args() -> list[str]:
+    """收集 zhconv 的词典文件，返回 ``--add-data`` 参数；找不到包则返回空表。
+
+    返回空表是“本机没装 zhconv”的信号，由 :func:`main` 决定是否致命——
+    这里不自己抛异常，方便测试直接调用。
+    """
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("zhconv")
+    except (ImportError, ValueError):
+        return []
+    if spec is None or not spec.submodule_search_locations:
+        return []
+
+    package_dir = Path(next(iter(spec.submodule_search_locations)))
+    command: list[str] = []
+    for path in sorted(package_dir.glob("*.json")):
+        command += ["--add-data", f"{path}{os.pathsep}zhconv"]
+    return command
+
+
 def main() -> int:
     name = "drama-splitter"
     dist = ROOT / "dist"
@@ -179,6 +218,18 @@ def main() -> int:
     stable_abi = stable_abi_dll()
     if stable_abi is not None:
         command += ["--add-data", f"{stable_abi}{os.pathsep}."]
+    # zhconv 的词典数据（繁简转换）。漏了它，打包版“界面能开、一分析就炸”，
+    # 而 --self-check / --ui-smoke 都发现不了（两者都不碰繁简转换）。
+    # 这里当致命错误处理：与其出一个坏包，不如构建时就停下。
+    zhconv_args = zhconv_data_args()
+    if not zhconv_args:
+        print("未找到 zhconv 的词典数据（本机没装 zhconv？）。")
+        print("请先安装运行依赖：pip install -r requirements.txt")
+        return 1
+    command += zhconv_args
+    # 代码也显式钉一次：asr 里是函数内延迟导入，静态分析理论上能看到，
+    # 但这条链已经断过一次，显式带上不值钱。
+    command += ["--hidden-import", "zhconv"]
     for module in EXCLUDES:
         command += ["--exclude-module", module]
     # 外挂依赖需要的标准库要显式带上（EXCLUDES 让 PyInstaller 分析不到它们）
@@ -221,6 +272,18 @@ def main() -> int:
         print(f"  返回码：{check.returncode}")
         if check.returncode != 0:
             ok = False
+
+    # 第三项检查：zhconv 的词典是否真的落进了产物。
+    # 上面两项都碰不到繁简转换——v1.0.7 正是“两项目检全绿、用户一跑分析
+    # 就报 FileNotFoundError”。直接查文件最省事，也最硬。
+    print()
+    dict_dir = dist / name / "_internal" / "zhconv"
+    dict_files = sorted(dict_dir.glob("*.json")) if dict_dir.is_dir() else []
+    if dict_files:
+        print("zhconv 词典已进产物：" + "、".join(path.name for path in dict_files))
+    else:
+        print(f"产物里没有 zhconv 词典（{dict_dir}）——繁简转换会在分析时失败。")
+        ok = False
     return 0 if ok else 1
 
 
