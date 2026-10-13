@@ -13,8 +13,11 @@
 "检测 + 给指引"：
 
 - **FFmpeg**：没有任何下载逻辑，只能让用户去装、或设 DRAMA_FFMPEG_DIR；
-- **Python 包**（faster-whisper / scenedetect / zhconv / pysubs2 …）：打包版
-  不含 pip，装不了。这不是"忘了做"，是打包策略（体积）的必然结果。
+- **Python 包**（faster-whisper / llama-cpp-python / scenedetect / zhconv /
+  pysubs2 …）：打包版不含 pip，**应用内装不了**。这不是"忘了做"，是打包策略
+  （体积）的必然结果。给 ``open_url`` 指到官方发布页（llama-cpp-python 有
+  ``py3-none`` 预编译轮子），让用户自己下——但绝不给 ``download_model``：
+  下模型解决不了缺包。
 
 所以 `EnvCheckItem.fix` 的 kind 必须如实区分：``download_model`` 才是应用内
 可执行的修复，其余是 ``open_url`` / ``navigate`` / ``none``（纯告知）。
@@ -304,7 +307,14 @@ def _check_llm_model() -> EnvCheckItem:
 
 
 def _check_llm_stack() -> EnvCheckItem:
-    """本地语义推理栈（llama.cpp / Ollama）。缺失只降级，不阻断。"""
+    """本地语义推理栈（llama.cpp / Ollama）。缺失只降级，不阻断。
+
+    这一项**给不了** ``download_model``——缺的是 Python 包而不是模型，下模型
+    解决不了。但也不能只丢一句"装不上"：官方发布页有 ``py3-none-win_amd64``
+    的**预编译轮子**（``py3-none`` 不绑定具体 Python 版本，7 MB 的 CPU 版也
+    在内），没编译器的用户下回来 ``pip install`` 即可。所以给 ``open_url``
+    指向发布页——与 FFmpeg 那条同一处理：应用装不了，但把路指清楚。
+    """
     from .semantic import _import_llama
 
     if _import_llama() is not None:
@@ -315,8 +325,16 @@ def _check_llm_stack() -> EnvCheckItem:
     return EnvCheckItem(
         key="llm_stack", label="本地语义推理栈", level=LEVEL_WARN, required=False,
         summary="未安装 llama-cpp-python，本地语义判断不可用",
-        detail="可改用云端语义，或在源码版安装 llama-cpp-python。",
-        fix=EnvFix(kind=FIX_NONE, label=""),
+        detail=(
+            "可在发布页下载预编译轮子（win_amd64 有 py3-none 标签，不挑 Python "
+            "版本；CPU 版约 7 MB，CUDA 版更大），装好后本地语义判断即生效。"
+            "也可以改用云端语义，或直接装 Ollama。"
+        ),
+        fix=EnvFix(
+            kind=FIX_OPEN_URL,
+            label="打开下载页",
+            payload="https://github.com/abetlen/llama-cpp-python/releases",
+        ),
     )
 
 

@@ -130,6 +130,42 @@ class TestRepairHonesty:
             assert item is not None and item.level == LEVEL_OK, key
 
 
+class TestLlmStackFix:
+    """本地推理栈缺失项：给下载页，但**不给**应用内下载。"""
+
+    def test_missing_stack_offers_release_url_not_download(self, monkeypatch):
+        """llama-cpp-python 缺失时应指向官方发布页，且绝不出现 download_model。
+
+        与 faster-whisper 同理：装不了包给个"下载"按钮是骗人。但也不能只留一句
+        "装不上"——发布页有 py3-none 轮子，把地址给到，用户能自己解决。
+        """
+        import app.core.env_check as ec
+        from app.core import semantic as sem
+
+        monkeypatch.setattr(sem, "_import_llama", lambda: None)
+        report = ec.check_environment()
+        item = report.by_key("llm_stack")
+        assert item is not None and item.level == LEVEL_WARN
+        assert item.fix is not None, "缺推理栈却连指引都没有"
+        assert item.fix.kind == "open_url", "应给下载页（open_url），不是应用内下载"
+        assert item.fix.kind != FIX_DOWNLOAD
+        assert item.fix.payload.startswith("https://github.com/abetlen/llama-cpp-python"), (
+            f"下载页地址不对：{item.fix.payload}"
+        )
+        assert item.fix.label, "有修复动作就必须有按钮文案"
+
+    def test_present_stack_reports_ok_without_fix(self, monkeypatch):
+        """推理栈就绪时该项为 ok、且不带任何修复动作。"""
+        import app.core.env_check as ec
+        from app.core import semantic as sem
+
+        monkeypatch.setattr(sem, "_import_llama", lambda: object())
+        report = ec.check_environment()
+        item = report.by_key("llm_stack")
+        assert item is not None and item.level == LEVEL_OK
+        assert item.fix is None or item.fix.kind != FIX_DOWNLOAD
+
+
 class TestFfmpegDegradation:
     def test_missing_ffmpeg_blocks_and_offers_url(self, monkeypatch):
         from app.core import env_check as ec
