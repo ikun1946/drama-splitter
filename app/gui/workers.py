@@ -29,7 +29,9 @@
 
 from __future__ import annotations
 
+import atexit
 import time
+import weakref
 from fractions import Fraction
 from pathlib import Path
 
@@ -56,7 +58,60 @@ __all__ = [
     "JudgeProbeWorker",
     "ModelListWorker",
     "EnvCheckWorker",
+    "stop_all_workers",
 ]
+
+
+#: 所有**还在跑**的后台任务。为什么要有这份全局登记：
+#:
+#: ``MainWindow.register_worker`` 只登记到主窗口，而"进程要退出"这件事与宿主无关。
+#: Qt 在析构一个还在运行的 QThread 时会直接 fail-fast——实测整个进程以
+#: ``0xC0000409`` 死掉（故障模块 ``Qt6Core.dll``），且**只在收尾那一刻**发生，
+#: 表现为"测试跑完了、进程却崩了"这种最难查的偶发失败。模型页的推理栈探测线程
+#: 已经单独收过一次（见 model_form）；这里是覆盖全部 QThread 子类的通用兜底。
+_LIVE_WORKERS: "weakref.WeakSet[BaseWorker]" = weakref.WeakSet()
+
+
+def _is_running(worker: object) -> bool:
+    try:
+        return bool(worker.isRunning())
+    except RuntimeError:      # C++ 侧已释放
+        return False
+
+
+def stop_all_workers(wait_ms: int = 5000) -> int:
+    """请求取消并等待所有后台任务收尾；返回等待后**仍在跑**的数量。
+
+    退出路径专用：返回非 0 说明还有线程没停（比如工作函数不检查取消标志），
+    调用方可以再等一轮——但绝不能带着"还在跑的 QThread"进解释器收尾。
+    """
+    pending = [worker for worker in list(_LIVE_WORKERS) if _is_running(worker)]
+    for worker in pending:
+        try:
+            worker.cancel()
+        except Exception:  # noqa: BLE001 - 收尾尽力而为
+            pass
+    for worker in pending:
+        try:
+            worker.wait(wait_ms)
+        except Exception:  # noqa: BLE001
+            pass
+    return sum(1 for worker in list(_LIVE_WORKERS) if _is_running(worker))
+
+
+def _drain_workers_at_exit() -> None:
+    """解释器退出前把所有后台任务收干净。
+
+    ``atexit`` 在 C 扩展（Qt）被拆除**之前**执行，所以这里 ``wait`` 来得及；
+    晚了就只能在 QThread 析构处崩掉。
+    """
+    try:
+        stop_all_workers(wait_ms=10_000)
+    except Exception:  # noqa: BLE001 - 退出路径不许再抛
+        pass
+
+
+atexit.register(_drain_workers_at_exit)
 
 
 class BaseWorker(QThread):
@@ -117,6 +172,7 @@ class BaseWorker(QThread):
 
     def run(self) -> None:  # noqa: D102
         self._state = "running"
+        _LIVE_WORKERS.add(self)
         try:
             self.work()
         except Exception as exc:  # noqa: BLE001 - 边界层必须把异常变成可读信息
@@ -125,6 +181,7 @@ class BaseWorker(QThread):
             if self._state == "running":
                 self._state = "done"
         finally:
+            _LIVE_WORKERS.discard(self)
             self.finished_ok.emit()
 
     def describe_error(self, exc: BaseException) -> str:

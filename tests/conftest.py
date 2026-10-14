@@ -112,6 +112,42 @@ def speech_video(binaries) -> Path:
     return target
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _qt_teardown_at_session_end():
+    """会话结束前显式拆掉 Qt，不留 QApplication 给解释器收尾。
+
+    实测：跑完几百个界面用例之后，解释器收尾阶段销毁 QApplication 会**偶发**
+    fail-fast（退出码 ``0xC0000409``、故障模块 ``Qt6Core.dll``）。收尾诊断显示
+    那一刻已经没有 Python 线程、没有 QThread，只剩一个 QApplication —— 也就是说
+    崩点不在我们的后台任务，而在 Qt 自己的拆除顺序上。
+
+    这种"全部用例都通过之后才崩"的失败最难查，所以在解释器还健康时自己拆：
+    关掉所有顶层窗口 → 标记删除 → 处理事件 → 退出 → 显式析构 QApplication。
+    """
+    yield
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError:      # 没装 Qt 的环境（纯核心测试）
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:  # C++ 侧已释放
+            continue
+    app.processEvents()
+    app.quit()
+    try:
+        import shiboken6
+
+        shiboken6.delete(app)
+    except Exception:  # noqa: BLE001 - 拆不掉也别再抛
+        pass
+
+
 def whisper_model_or_skip(tier: str = "small"):
     """定位 whisper 模型；缺失时跳过并给出下载命令。"""
     from app.core.asr import locate_model

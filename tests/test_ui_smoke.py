@@ -9,8 +9,9 @@
   它的返回码）；
 - pytest：用例构造过模型页、既不关闭也不销毁，整个进程崩在收尾。
 
-所以这里钉两条兜底：``_ui_smoke`` 的出口统一走收尾，模型页在解释器退出前
-自己把探测线程收干净。
+所以这里钉三条：``_ui_smoke`` 的出口统一走收尾、模型页在解释器退出前自己
+把探测线程收干净，以及 **所有** ``BaseWorker`` 的全局登记 + 退出统一收尾
+（模型页那条只是特例；任何 QThread 活到收尾都会崩）。
 """
 
 from __future__ import annotations
@@ -18,9 +19,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界面收尾测试")
 
 import run  # noqa: E402
 
@@ -97,3 +102,40 @@ def test_model_form_stops_probe_before_destruction() -> None:
     source = (ROOT / "app" / "gui" / "panes" / "model_form.py").read_text(encoding="utf-8")
     assert "self.destroyed.connect" in source, "模型页没有析构前收线程"
     assert "probe.wait(" in source, "收线程时没有等它结束"
+
+
+def test_running_worker_is_registered_and_drained() -> None:
+    """跑着的后台任务必须被登记，并能被退出收尾一次收干净。
+
+    这是"探测线程活过进程"那条的通用版：任何 ``BaseWorker`` 子类在解释器收尾时
+    还活着，Qt 都会 fail-fast（``0xC0000409`` @ ``Qt6Core.dll``）——而且崩在
+    "测试已经全部跑完"之后，最难查。
+    """
+    import time
+
+    from app.gui import workers as workers_mod
+    from app.gui.workers import BaseWorker
+
+    class _SlowWorker(BaseWorker):
+        def work(self) -> None:  # noqa: D102 - 故意睡够，让收尾有机会抓到它
+            time.sleep(0.4)
+
+    worker = _SlowWorker()
+    worker.start()
+    try:
+        time.sleep(0.1)
+        assert any(w is worker for w in list(workers_mod._LIVE_WORKERS)), (
+            "运行中的任务没被登记——退出时就没法收它"
+        )
+        assert workers_mod.stop_all_workers(wait_ms=3000) == 0, "收尾后不该还有在跑的线程"
+        assert not worker.isRunning(), "收尾必须等线程真正结束"
+    finally:
+        worker.wait(3000)
+
+
+def test_exit_drain_is_wired() -> None:
+    """源码级断言：全局登记与 atexit 兜底都在（防回退）。"""
+    source = (ROOT / "app" / "gui" / "workers.py").read_text(encoding="utf-8")
+    assert "_LIVE_WORKERS.add(self)" in source, "运行中的任务没有登记"
+    assert "atexit.register(_drain_workers_at_exit)" in source, "退出兜底没挂上"
+    assert "def stop_all_workers(" in source
