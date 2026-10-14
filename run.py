@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 #     OutputBaseFilename
 # 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
 # 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 
 def _print_version() -> int:
@@ -244,6 +244,29 @@ def _force_utf8_console() -> None:
             continue
 
 
+def _finish_ui_smoke(window, app, code: int) -> int:
+    """界面自检的收尾：把还在跑的后台线程停干净，再返回结果。
+
+    为什么必须有这一步：模型页一构造就会起一个推理栈探测线程
+    （``JudgeProbeWorker``）——装了模型时它会真的去加载本地模型，能跑好几秒。
+    而 ``--ui-smoke`` 不做事件循环、检查完就返回，解释器收尾时 Qt 发现还有个
+    QThread 在跑，直接 fail-fast：实测退出码 ``0xC0000409``、故障模块
+    ``Qt6Core.dll``，且**只在装了模型的机器上复现**（没模型时探测早就跑完了）。
+
+    这跟"界面是否完整"无关，却会让装机验收拿到假失败——本仓库的 README 正是
+    让用户用 ``--ui-smoke`` 的返回码做验收，所以这里必须收干净。
+    """
+    try:
+        window.cancel_all_workers(wait_ms=5000)
+    except Exception:  # noqa: BLE001 - 收尾失败不该改变自检结论
+        pass
+    try:
+        app.processEvents()
+    except Exception:  # noqa: BLE001
+        pass
+    return code
+
+
 def _ui_smoke() -> int:
     """离屏构建整个界面并自检。
 
@@ -351,28 +374,28 @@ def _ui_smoke() -> int:
     llm_rows = [row for row in rows if row["kind"] == "llm"]
     if page.asr_card.title() != "语音转写" or page.llm_card.title() != "语义判断":
         print("界面自检失败：模型清单应分为「语音转写 / 语义判断」两组卡片")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if len(asr_rows) != 5:
         print(f"界面自检失败：转写档位应列出 5 档，实际 {len(asr_rows)}")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if sum(1 for row in asr_rows if row["in_use"]) != 1:
         print("界面自检失败：转写组「使用中」应恰有一个")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if sum(1 for row in llm_rows if row["in_use"]) > 1:
         print("界面自检失败：语义组「使用中」最多一个")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if not page.asr_status.text().startswith("使用中："):
         print(f"界面自检失败：转写组应写明使用中的档位，实际「{page.asr_status.text()}」")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if len(window.menuBar().actions()) != 4:
         print("界面自检失败：菜单应为 4 组（文件 / 工具 / 视图 / 帮助）")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     if count < len(DEFAULT_PROFILES):
         print("界面自检失败：厂商列表少于预置目录")
-        return 1
+        return _finish_ui_smoke(window, app, 1)
     model_dialog.close()
     print("界面自检通过")
-    return 0
+    return _finish_ui_smoke(window, app, 0)
 
 
 def main() -> int:

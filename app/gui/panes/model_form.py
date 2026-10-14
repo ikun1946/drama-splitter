@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import atexit
+import weakref
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -168,6 +170,34 @@ class _ModelRow(QFrame):
         row.addWidget(self.button)
 
 
+#: 活着的模型页。为什么需要全局登记：推理栈探测线程是本控件的子对象，只要控件
+#: 没被析构，线程就可能还在跑；而进程退出时 Qt 会去析构它——撞上"还在跑的
+#: QThread"就是 fail-fast（实测退出码 0xC0000409、故障模块 Qt6Core.dll，且**只在
+#: 装了模型**的机器上复现：没模型时探测早跑完了）。
+#:
+#: 宿主该收的都会收（``MainWindow.closeEvent``、``--ui-smoke`` 的收尾、本控件
+#: 析构时的 ``destroyed`` 钩子），但"用例直接构造控件、既不关闭也不销毁"这种
+#: 情况只有退出兜底能救——实测装了模型的开发机上跑 pytest，整个进程会崩在
+#: 某个构造过本页的用例之后。
+_LIVE_FORMS: "weakref.WeakSet[ModelForm]" = weakref.WeakSet()
+
+
+def _stop_probes_at_exit() -> None:
+    """解释器退出前，把还活着的模型页的探测线程收干净。
+
+    ``atexit`` 在 C 扩展（Qt）被拆除**之前**执行，所以这里 ``wait()`` 来得及；
+    晚了就只能在析构处崩掉。
+    """
+    for form in list(_LIVE_FORMS):
+        try:
+            form._stop_probe()
+        except Exception:  # noqa: BLE001 - 退出路径不许再抛
+            pass
+
+
+atexit.register(_stop_probes_at_exit)
+
+
 class ModelForm(QWidget):
     """模型管理与「使用中」切换。"""
 
@@ -307,6 +337,14 @@ class ModelForm(QWidget):
 
         self.refresh()
         self._start_probe()
+        _LIVE_FORMS.add(self)
+        # 探测线程是本控件的子对象：控件析构时线程若还在跑，Qt 会在析构处
+        # fail-fast——实测退出码 0xC0000409、故障模块 Qt6Core.dll，且只在
+        # **装了模型**的机器上复现（没模型时探测早跑完了）。受害的不止
+        # ``--ui-smoke``：装了模型的开发机上跑 pytest，进程会直接崩在某个
+        # 构造过本页的用例上。destroyed 在子对象析构**之前**发出，在这里等
+        # 它收尾最稳，也让本控件自带闭环、不依赖调用方记得收拾。
+        self.destroyed.connect(lambda *_: self._stop_probe())
 
     # ---- 公开面（工具与测试用）------------------------------------------
 
@@ -555,6 +593,24 @@ class ModelForm(QWidget):
         self._probe.probed.connect(self._on_probed)
         register_worker(self, "judge_probe", self._probe)
         self._probe.start()
+
+    def _stop_probe(self) -> None:
+        """停掉探测线程并等它收尾；由 ``destroyed`` 触发。
+
+        为什么不能只 ``cancel()`` 就走：``BaseWorker.cancel()`` 只是置标记，
+        探测本身（Ollama 请求 / 读模型文件）不检查它，所以必须 ``wait()`` 到
+        它自己结束——等不到就让 Qt 去析构一个在跑的 QThread，那就是崩溃现场。
+        """
+        probe = getattr(self, "_probe", None)
+        if probe is None:
+            return
+        try:
+            if probe.isRunning():
+                probe.cancel()
+                probe.wait(10_000)
+        except RuntimeError:
+            # 极端时序下 C++ 侧已经释放：这时什么也做不了，但不该再抛
+            pass
 
     def _on_probed(self, description) -> None:
         if description:
