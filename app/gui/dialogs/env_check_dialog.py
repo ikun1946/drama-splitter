@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -45,6 +46,7 @@ from ...core.env_check import (
     EnvReport,
     check_environment,
 )
+from ...core.env_repair import RepairStep, repair_steps
 from ..widgets import Card, StatusPill, scrollable
 from .base import DialogShell
 
@@ -103,6 +105,11 @@ class _ItemRow(QFrame):
             self.btn_fix.clicked.connect(self._on_fix)
             outer.addWidget(self.btn_fix, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    def set_fix_enabled(self, enabled: bool) -> None:
+        """修复进行中禁用行内按钮，避免并发触发第二次修复。"""
+        if self.btn_fix is not None:
+            self.btn_fix.setEnabled(enabled)
+
     def _on_fix(self) -> None:
         assert self.item.fix is not None
         self.fix_requested.emit(self.item.fix.kind, self.item.fix.payload)
@@ -122,10 +129,17 @@ class EnvCheckDialog(DialogShell):
     #: 用户点了"重新检测"
     recheck_requested = Signal()
 
+    #: 用户点了「一键修复」（修复计划由 repair_steps() 提供）
+    repair_requested = Signal()
+    #: 用户点了「取消修复」
+    repair_cancel_requested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("环境自检", parent, width=840, height=640)
 
         self._rows: list[_ItemRow] = []
+        self._steps: tuple[RepairStep, ...] = ()
+        self._repairing = False
 
         self.headline = QLabel("检测中…")
         self.headline.setWordWrap(True)
@@ -145,6 +159,19 @@ class EnvCheckDialog(DialogShell):
         body_layout.setContentsMargins(16, 12, 16, 0)
         body_layout.setSpacing(8)
         body_layout.addWidget(self.headline)
+
+        self.repair_status = QLabel("")
+        self.repair_status.setWordWrap(True)
+        self.repair_status.setProperty("role", "subtitle")
+        self.repair_status.setVisible(False)
+        body_layout.addWidget(self.repair_status)
+
+        self.repair_progress = QProgressBar()
+        self.repair_progress.setRange(0, 100)
+        self.repair_progress.setValue(0)
+        self.repair_progress.setVisible(False)
+        body_layout.addWidget(self.repair_progress)
+
         body_layout.addWidget(card, 1)
         self.add_body(body)
 
@@ -153,10 +180,24 @@ class EnvCheckDialog(DialogShell):
         self.btn_recheck.clicked.connect(self.request_recheck)
         self.add_footer(self.btn_recheck)
 
+        self.btn_cancel_repair = QPushButton("取消修复")
+        self.btn_cancel_repair.setProperty("role", "mini")
+        self.btn_cancel_repair.setVisible(False)
+        self.btn_cancel_repair.clicked.connect(self._on_repair_cancel)
+        self.add_footer(self.btn_cancel_repair)
+
+        self.btn_repair_all = QPushButton("一键修复")
+        self.btn_repair_all.setProperty("role", "primary")
+        self.btn_repair_all.setMinimumHeight(32)
+        self.btn_repair_all.setEnabled(False)
+        self.btn_repair_all.setToolTip("没有可在应用内自动修复的项")
+        self.btn_repair_all.clicked.connect(self._on_repair_clicked)
+        self.add_footer(self.btn_repair_all)
+
         self.footer_hint.setText(
             "本页只检测、只报告——不会自动下载或安装任何东西，点按钮才会动手。\n"
-            "「下载模型」与「安装转写引擎」能在应用内一键完成；"
-            "FFmpeg 与部分可选依赖只能给出下载页与办法。"
+            "「一键修复」会按顺序执行所有能自动修的项（转写引擎 → 转写模型 → 语义模型）；"
+            "FFmpeg、本地语义推理栈等只能给出下载页与办法。"
         )
         self.add_close_button()
         self.install_footer()
@@ -176,11 +217,61 @@ class EnvCheckDialog(DialogShell):
             self._list_layout.insertWidget(self._list_layout.count() - 1, row)
             self._rows.append(row)
 
+        self._steps = repair_steps(report)
+        self._refresh_repair_button()
+
         self.headline.setText(self._headline_text(report))
 
     def items(self) -> list[dict]:
         """当前展示的条目（供测试断言，仿 ModelForm.rows()）。"""
         return [r.item.to_dict() for r in self._rows]
+
+    def repair_steps(self) -> tuple[RepairStep, ...]:
+        """当前报告的修复计划（主窗口点「一键修复」时取用）。"""
+        return self._steps
+
+    def set_repair_running(self, running: bool) -> None:
+        """进入 / 退出「修复中」状态：锁按钮、亮进度、禁行内修复按钮。"""
+        self._repairing = running
+        self.btn_recheck.setEnabled(not running)
+        self.btn_cancel_repair.setVisible(running)
+        self.btn_cancel_repair.setEnabled(running)
+        for row in self._rows:
+            row.set_fix_enabled(not running)
+        self.repair_status.setVisible(running)
+        self.repair_progress.setVisible(running)
+        if running:
+            self.btn_repair_all.setEnabled(False)
+            self.repair_status.setText("正在准备修复…")
+            self.repair_progress.setRange(0, 100)
+            self.repair_progress.setValue(0)
+        else:
+            self.repair_progress.setRange(0, 100)
+            self.repair_progress.setValue(0)
+            self._refresh_repair_button()
+
+    def set_repair_step(self, index: int, total: int, label: str) -> None:
+        """显示「第几步在做什么」。"""
+        self.repair_status.setText(f"正在修复（{index}/{total}）：{label}…")
+        self.repair_progress.setRange(0, 100)
+        self.repair_progress.setValue(0)
+
+    def set_repair_progress(
+        self, done: int, total: int, name: str, index: int, count: int
+    ) -> None:
+        """下载字节进度（模型与 wheel 共用同一种回调）。"""
+        if total > 0:
+            self.repair_progress.setRange(0, 100)
+            self.repair_progress.setValue(int(done / total * 100))
+            self.repair_progress.setFormat(
+                f"{name}（{index}/{count}）"
+                f"{done / 1024 / 1024:.0f}/{total / 1024 / 1024:.0f} MB"
+            )
+        else:
+            self.repair_progress.setRange(0, 0)
+            self.repair_progress.setFormat(
+                f"{name} 已下载 {done / 1024 / 1024:.0f} MB（总大小未知）"
+            )
 
     def request_recheck(self) -> None:
         """发起一次重新检测（由主窗口接上后台 worker）。"""
@@ -210,3 +301,29 @@ class EnvCheckDialog(DialogShell):
             self.open_url_requested.emit(payload)
         elif kind == FIX_NAVIGATE:
             self.navigate_requested.emit(payload)
+
+    def _on_repair_clicked(self) -> None:
+        if self._repairing:
+            return
+        self.repair_requested.emit()
+
+    def _on_repair_cancel(self) -> None:
+        self.btn_cancel_repair.setEnabled(False)
+        self.repair_status.setText("正在取消…（当前这一步结束后停下）")
+        self.repair_cancel_requested.emit()
+
+    def _refresh_repair_button(self) -> None:
+        """按当前计划更新「一键修复」按钮的可用性与文案。"""
+        if self._repairing:
+            self.btn_repair_all.setEnabled(False)
+            return
+        count = len(self._steps)
+        if count > 0:
+            self.btn_repair_all.setEnabled(True)
+            self.btn_repair_all.setText(f"一键修复（{count} 项）")
+            labels = "、".join(step.label for step in self._steps)
+            self.btn_repair_all.setToolTip(f"将依次执行：{labels}")
+        else:
+            self.btn_repair_all.setEnabled(False)
+            self.btn_repair_all.setText("一键修复")
+            self.btn_repair_all.setToolTip("没有可在应用内自动修复的项")

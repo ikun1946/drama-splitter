@@ -58,6 +58,7 @@ __all__ = [
     "JudgeProbeWorker",
     "ModelListWorker",
     "EnvCheckWorker",
+    "EnvRepairWorker",
     "stop_all_workers",
 ]
 
@@ -1165,3 +1166,68 @@ class DepsInstallWorker(BaseWorker):
             self._state = "failed"
         self.log.emit(result.describe())
         self.finished_with.emit(result)
+
+
+class EnvRepairWorker(BaseWorker):
+    """「一键修复环境」：按计划装转写引擎、下缺失模型（后台线程，可取消）。
+
+    真正的执行逻辑在 ``app.core.env_repair.execute_repair``——纯 Python、不依赖
+    Qt，可单独单测（tests/test_env_repair.py）。本类只负责把它挪到线程里，
+    并把回调转成 Qt 信号。
+
+    为什么不让面板自己逐个起 worker：修复是**有顺序的**（先引擎、后模型），
+    完成时要统一汇总与重检。一条 worker 串联执行，界面只盯一个进度。
+    """
+
+    step_changed = Signal(int, int, str)   # 第几步（1 起）, 共几步, 步骤文案
+    progress = Signal(int, int, str, int, int)  # 已下载字节, 总字节, 当前文件, 第几个, 共几个
+    log = Signal(str)
+    finished_with = Signal(object)  # RepairSummary
+
+    def __init__(
+        self, steps, *, models_root=None, endpoint=None, deps_root=None, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self._steps = tuple(steps)
+        self._models_root = models_root
+        self._endpoint = endpoint
+        self._deps_root = deps_root
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.env_repair import RepairStepResult, RepairSummary, execute_repair
+
+        try:
+            summary = execute_repair(
+                self._steps,
+                models_root=self._models_root,
+                model_endpoint=self._endpoint,
+                deps_root=self._deps_root,
+                on_step=lambda index, total, label: self.step_changed.emit(
+                    index, total, label
+                ),
+                on_progress=lambda done, total, name, i, n: self.progress.emit(
+                    done, total, name, i, n
+                ),
+                on_log=self.log.emit,
+                cancel_check=lambda: self.cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
+            summary = RepairSummary(
+                results=tuple(
+                    RepairStepResult(
+                        label=getattr(step, "label", str(step)),
+                        ok=False,
+                        message=f"修复过程异常：{exc}",
+                    )
+                    for step in self._steps
+                ),
+                cancelled=self.cancelled,
+                total_steps=len(self._steps),
+            )
+        if summary.cancelled:
+            self.finish_cancelled()
+        elif summary.failed_count:
+            self._last_error = summary.describe()
+            self._state = "failed"
+        self.log.emit(summary.describe())
+        self.finished_with.emit(summary)

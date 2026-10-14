@@ -320,6 +320,8 @@ class MainWindow(QMainWindow):
         self.env_check_dialog.install_engine_requested.connect(self._on_env_install_engine)
         self.env_check_dialog.open_url_requested.connect(self._on_env_fix_open_url)
         self.env_check_dialog.navigate_requested.connect(self._on_env_fix_navigate)
+        self.env_check_dialog.repair_requested.connect(self._on_env_repair)
+        self.env_check_dialog.repair_cancel_requested.connect(self._on_env_repair_cancel)
         return self.env_check_dialog
 
     def open_env_check_dialog(self) -> None:
@@ -398,6 +400,64 @@ class MainWindow(QMainWindow):
         else:
             self.bottom.set_hint("转写引擎安装未完成。")
             message.warning(self, "安装未完成", result.message or "未知原因")
+
+    # ---- 一键修复环境 ----------------------------------------------------
+
+    def _on_env_repair(self) -> None:
+        """「一键修复」：按自检报告的计划装引擎、下模型（串行后台任务）。
+
+        计划来自对话框（它随每份报告刷新）——主窗口不自己拼清单，避免两处
+        逻辑各写各的。修复完成后自动重新检测，让每一项的结论直接更新。
+        """
+        dialog = getattr(self, "env_check_dialog", None)
+        if dialog is None:
+            return
+        steps = dialog.repair_steps()
+        if not steps:
+            self.bottom.set_hint("没有可在应用内自动修复的项。")
+            return
+        if self.is_busy():
+            self.bottom.set_hint("有后台任务在跑，等它结束再一键修复。")
+            return
+
+        from .workers import EnvRepairWorker
+
+        worker = EnvRepairWorker(steps, endpoint=self.config.endpoint, parent=self)
+        worker.step_changed.connect(dialog.set_repair_step)
+        worker.progress.connect(dialog.set_repair_progress)
+        worker.log.connect(lambda text: self.workbench.inspector.append_log(text))
+        worker.finished_with.connect(self._on_env_repair_finished)
+        self.register_worker("env_repair", worker)
+        dialog.set_repair_running(True)
+        self.bottom.set_hint(f"正在一键修复环境（共 {len(steps)} 项）…")
+        self.bottom.set_progress(0)
+        worker.start()
+
+    def _on_env_repair_cancel(self) -> None:
+        worker = self._workers.get("env_repair")
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            self.bottom.set_hint("已请求取消修复，正在停下…")
+
+    def _on_env_repair_finished(self, summary) -> None:
+        from .widgets import message
+
+        dialog = getattr(self, "env_check_dialog", None)
+        if dialog is not None:
+            dialog.set_repair_running(False)
+        self.bottom.set_progress(None)
+        if summary.cancelled:
+            self.bottom.set_hint("环境修复已取消。")
+            message.information(self, "修复已取消", summary.describe())
+        elif summary.failed_count == 0 and summary.ok_count > 0:
+            self.bottom.set_hint("环境修复完成，重新检测中…")
+            message.information(
+                self, "修复完成", summary.describe() + "\n\n已自动重新检测，请查看最新结果。"
+            )
+        else:
+            self.bottom.set_hint("环境修复部分完成，重新检测中…")
+            message.warning(self, "修复未全部完成", summary.describe())
+        self._start_env_check()
 
     def _on_env_fix_open_url(self, url: str) -> None:
         import webbrowser
@@ -698,6 +758,7 @@ class MainWindow(QMainWindow):
     WORKER_NAMES = (
         "probe", "analysis", "export", "download", "judge_probe", "model_list", "model_scan",
         "update_check", "update_download", "env_check", "deps_install",
+        "env_repair",
     )
 
     #: 允许"一类多实例"的任务前缀。模型设置页会同时给多家厂商拉 ``/models``，

@@ -4444,6 +4444,126 @@ class TestEnvCheckDialog:
             dialog.close()
 
 
+    # ---- 一键修复 --------------------------------------------------------
+
+    def _bootstrap_items(self):
+        from app.core.env_check import (
+            FIX_DOWNLOAD,
+            FIX_INSTALL_ENGINE,
+            LEVEL_BLOCK,
+            EnvCheckItem,
+            EnvFix,
+        )
+
+        return (
+            EnvCheckItem(
+                "asr_engine", "语音转写引擎", LEVEL_BLOCK, "未安装",
+                fix=EnvFix(FIX_INSTALL_ENGINE, "安装转写引擎"),
+            ),
+            EnvCheckItem(
+                "whisper_model", "转写模型", LEVEL_BLOCK, "未下载",
+                fix=EnvFix(FIX_DOWNLOAD, "下载 whisper-small", "whisper:small"),
+            ),
+        )
+
+    def test_repair_button_counts_fixable_items(self, window, qapp):
+        """一键修复按钮要带上可修项数量，计划按「先引擎、后模型」排序。"""
+        from app.core.env_check import FIX_DOWNLOAD, FIX_INSTALL_ENGINE
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(*self._bootstrap_items()))
+            assert dialog.btn_repair_all.isEnabled()
+            assert "2" in dialog.btn_repair_all.text()
+            steps = dialog.repair_steps()
+            assert [s.kind for s in steps] == [FIX_INSTALL_ENGINE, FIX_DOWNLOAD]
+            assert [s.payload for s in steps] == ["", "whisper:small"]
+        finally:
+            dialog.close()
+
+    def test_repair_button_disabled_without_fixable(self, window, qapp):
+        from app.core.env_check import LEVEL_OK, EnvCheckItem
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem("ffmpeg", "FFmpeg 工具链", LEVEL_OK, "就绪"),
+            ))
+            assert not dialog.btn_repair_all.isEnabled()
+            assert dialog.repair_steps() == ()
+        finally:
+            dialog.close()
+
+    def test_repair_button_emits_signal(self, window, qapp):
+        """点「一键修复」应发出 repair_requested（先断真处理器防联网）。"""
+        dialog = self._dialog(window, qapp)
+        dialog.repair_requested.disconnect()
+        got = []
+        dialog.repair_requested.connect(lambda: got.append(1))
+        try:
+            dialog.apply_report(self._report(*self._bootstrap_items()))
+            dialog.btn_repair_all.click()
+            assert got == [1]
+        finally:
+            dialog.close()
+
+    def test_repair_running_locks_buttons_and_shows_cancel(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(*self._bootstrap_items()))
+            dialog.set_repair_running(True)
+            qapp.processEvents()
+            assert not dialog.btn_repair_all.isEnabled()
+            assert not dialog.btn_recheck.isEnabled()
+            assert dialog.btn_cancel_repair.isVisible()
+            assert dialog.repair_status.isVisible()
+            assert all(not row.btn_fix.isEnabled() for row in dialog._rows)
+
+            dialog.set_repair_running(False)
+            qapp.processEvents()
+            assert dialog.btn_repair_all.isEnabled()
+            assert not dialog.btn_cancel_repair.isVisible()
+            assert all(row.btn_fix.isEnabled() for row in dialog._rows)
+        finally:
+            dialog.close()
+
+    def test_repair_cancel_button_emits_signal(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        got = []
+        dialog.repair_cancel_requested.connect(lambda: got.append(1))
+        try:
+            dialog.set_repair_running(True)
+            dialog.btn_cancel_repair.click()
+            assert got == [1]
+        finally:
+            dialog.close()
+
+    def test_repair_progress_updates_ui(self, window, qapp):
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.set_repair_running(True)
+            dialog.set_repair_step(1, 2, "安装转写引擎")
+            assert "1/2" in dialog.repair_status.text()
+            dialog.set_repair_progress(50, 100, "faster_whisper.whl", 1, 8)
+            assert dialog.repair_progress.value() == 50
+            assert "faster_whisper.whl" in dialog.repair_progress.format()
+        finally:
+            dialog.close()
+
+    def test_repair_wired_to_main_window(self, window, qapp):
+        """主窗口构建对话框时必须把一键修复两个信号接上处理器。"""
+        calls = []
+        dialog = window.build_env_check_dialog()
+        dialog.repair_requested.disconnect()
+        dialog.repair_requested.connect(lambda: calls.append(1))
+        dialog.repair_requested.emit()
+        assert calls == [1]
+        assert "env_repair" in type(window).WORKER_NAMES
+        assert callable(getattr(window, "_on_env_repair", None))
+        assert callable(getattr(window, "_on_env_repair_cancel", None))
+        assert callable(getattr(window, "_on_env_repair_finished", None))
+
+
 class TestAnalysisSurvivesMissingAsrModule:
     """回归：打包版缺 faster-whisper 时，分析必须降级而不是崩溃。
 

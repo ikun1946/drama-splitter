@@ -50,6 +50,7 @@ __all__ = [
     "FIX_OPEN_URL",
     "FIX_NAVIGATE",
     "FIX_NONE",
+    "AUTO_FIX_KINDS",
     "EnvFix",
     "EnvCheckItem",
     "EnvReport",
@@ -77,6 +78,12 @@ FIX_OPEN_URL = "open_url"         # payload = 要打开的网址
 FIX_NAVIGATE = "navigate"         # payload = 目标对话框标识（如 "models"）
 FIX_NONE = "none"
 
+#: 能在应用内**真正自动修好**的 fix 种类（「一键修复环境」只收这两类）：
+#: - ``install_engine``：装 / 重装转写引擎（deps_manager 把 wheel 解压到 deps/）；
+#: - ``download_model``：下载转写 / 语义模型（model_manager 用 curl 下载）。
+#: 其余（open_url / navigate / none）只能引导——一键修复不承诺「全都能修」。
+AUTO_FIX_KINDS: tuple[str, ...] = (FIX_INSTALL_ENGINE, FIX_DOWNLOAD)
+
 
 @dataclass(frozen=True)
 class EnvFix:
@@ -103,6 +110,11 @@ class EnvCheckItem:
     detail: str = ""    # 细节（路径、版本、缺什么）
     fix: EnvFix | None = None
     required: bool = True   # 是否阻断性（决定整体可用性）
+
+    @property
+    def auto_fixable(self) -> bool:
+        """本项是否能在应用内一键修好（而不是只能给指引）。"""
+        return self.fix is not None and self.fix.kind in AUTO_FIX_KINDS
 
     def to_dict(self) -> dict:
         return {
