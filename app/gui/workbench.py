@@ -63,6 +63,13 @@ class _EmptyView(QWidget):
         outer.addStretch(2)
 
 
+#: 左栏两屏各自的最小宽度。审核页那几张卡需要 ~330px；导入页改版后自身只要
+#: ~200px（按内容算，不给额外下限）。下限跟着**当前页**走：钉死整条左栏会让
+#: 用户在导入页拖不窄，QSplitter 也会静默忽略 setSizes。
+LEFT_REVIEW_MIN_WIDTH = 340
+LEFT_IMPORT_MIN_WIDTH = 0
+
+
 class Workbench(QWidget):
     stage_changed = Signal(object)     # Stage：底栏文案与主动作据此刷新
     state_changed = Signal()           # 方案或选择被改动（自动保存的脏检测读快照）
@@ -93,6 +100,9 @@ class Workbench(QWidget):
         self.left_stack = QStackedWidget()
         self.left_stack.addWidget(self._left_import)
         self.left_stack.addWidget(self._left_review)
+        # 下限只钉在**审核页**上：它那几张卡需要 ~330px；导入页改版后自身只要 ~200px，
+        # 所以不能钉在整条左栏上（那样用户就拖不窄了，分割器还会"设不动"）。
+        # QStackedWidget 取当前页的最小宽度，于是两种页面各按自己的需要占位。
 
         self.center_stack = QStackedWidget()
         self.center_stack.addWidget(self.empty_view)
@@ -165,9 +175,12 @@ class Workbench(QWidget):
 
         if self.stage is Stage.REVIEW:
             self.left_stack.setCurrentWidget(self._left_review)
+            # 审核页的卡片需要 ~330px 才不被裁；导入页只要 ~200px
+            self.left_stack.setMinimumWidth(LEFT_REVIEW_MIN_WIDTH)
             self.review_pane.refresh()
         else:
             self.left_stack.setCurrentWidget(self._left_import)
+            self.left_stack.setMinimumWidth(LEFT_IMPORT_MIN_WIDTH)
         self.left_stack.setVisible(self.stage is not Stage.EMPTY)
 
         if self.stage is Stage.EMPTY:

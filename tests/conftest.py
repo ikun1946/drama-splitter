@@ -148,6 +148,27 @@ def _qt_teardown_at_session_end():
         pass
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_network_update_check():
+    """测试期不联网查更新。
+
+    ``MainWindow`` 构造时会做一次"今天还没查过就静默查一次"的更新检查——那是一次
+    **真实网络请求**（curl，超时十几秒）。测试里会反复新建主窗口，慢网络上这些
+    线程会活过收尾：``test_ui_smoke`` 的"收尾后不该还有在跑的线程"就是这么被拖红的
+    （仓库里的 config.json 没有 update_checked_at，于是每个新窗口都会真的去查）。
+    界面测试只关心界面行为，联网那条链路由 updater 的单测覆盖。
+    """
+    try:
+        from app.gui.main_window import MainWindow
+    except ImportError:      # 没装 PySide6 的纯核心环境
+        yield
+        return
+    original = MainWindow._startup_update_check
+    MainWindow._startup_update_check = lambda self: None
+    yield
+    MainWindow._startup_update_check = original
+
+
 def whisper_model_or_skip(tier: str = "small"):
     """定位 whisper 模型；缺失时跳过并给出下载命令。"""
     from app.core.asr import locate_model

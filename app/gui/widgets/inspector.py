@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import message
+from .card import Card
 from .empty_state import EmptyState
 from .log_panel import LogPanel
 
@@ -208,13 +209,31 @@ class Inspector(QFrame):
             parent=self,
         )
 
-        problem_scroll = _scrolled(self._problem_list)
+        # 没有问题时把空列表藏起来：留着一个空滚动区，用户看到的就是「一片空白」
+        self._problem_scroll = _scrolled(self._problem_list)
+        self._problem_scroll.setVisible(False)
+        self._next_step = Card("下一步", parent=self)
+        next_hint = QLabel(
+            "点右下角「开始分析」：AI 按对白停顿给出切点候选，再回到这里逐条核对。",
+            self._next_step,
+        )
+        next_hint.setWordWrap(True)
+        next_hint.setProperty("role", "muted")
+        # 文字贴顶：QLabel 默认把文本在框内居中，卡片一高就"掉到底部"
+        next_hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._next_step.body_layout.addWidget(next_hint)
+        self._next_step.body_layout.addStretch(1)
+        # 空列表被藏起来之后，整列多出来的高度会全给这张卡——文字就掉到底部了
+        self._next_step.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         problem_page = QWidget()
         problem_wrap = QVBoxLayout(problem_page)
         problem_wrap.setContentsMargins(0, 0, 0, 0)
         problem_wrap.setSpacing(6)
         problem_wrap.addWidget(self._empty)
-        problem_wrap.addWidget(problem_scroll, 1)
+        problem_wrap.addWidget(self._next_step)
+        problem_wrap.addWidget(self._problem_scroll, 1)
 
         # 页 1：建议 —— 复用问题列表的渲染逻辑，但用独立数据源
         self._advice_list = QWidget()
@@ -231,8 +250,10 @@ class Inspector(QFrame):
         advice_wrap = QVBoxLayout(advice_page)
         advice_wrap.setContentsMargins(0, 0, 0, 0)
         advice_wrap.setSpacing(6)
+        self._advice_scroll = _scrolled(self._advice_list)
+        self._advice_scroll.setVisible(False)
         advice_wrap.addWidget(self._advice_empty)
-        advice_wrap.addWidget(_scrolled(self._advice_list), 1)
+        advice_wrap.addWidget(self._advice_scroll, 1)
 
         # 页 2：日志
         self._log = LogPanel()
@@ -306,6 +327,8 @@ class Inspector(QFrame):
             self._rows.append(row)
 
         self._empty.setVisible(not unique)
+        self._next_step.setVisible(not unique)
+        self._problem_scroll.setVisible(bool(unique))
         self._refresh_count()
 
     def issues(self) -> list[InspectorIssue]:
@@ -329,6 +352,7 @@ class Inspector(QFrame):
             row.jump_requested.connect(self.jump_requested.emit)
             self._advice_layout.insertWidget(self._advice_layout.count() - 1, row)
         self._advice_empty.setVisible(not advice)
+        self._advice_scroll.setVisible(bool(advice))
 
     def cycle_issue(self, delta: int) -> InspectorIssue | None:
         """在可定位的问题之间循环巡航（N=下一个 / P=上一个，方案 §54）。
@@ -366,7 +390,9 @@ class Inspector(QFrame):
         self.btn_export_log = QPushButton("导出日志…")
         self.btn_export_log.setProperty("role", "mini")
         self.btn_export_log.setToolTip("把当前日志另存为文本文件（便于反馈问题）")
-        self.btn_export_log.clicked.connect(self.export_log)
+        # 不能直接连 export_log：clicked 带 checked(bool)，会被当成 path 收下
+        # （见 _on_export_clicked 的说明）。
+        self.btn_export_log.clicked.connect(self._on_export_clicked)
 
         self.btn_clear_log = QPushButton("清空")
         self.btn_clear_log.setProperty("role", "mini")
@@ -382,6 +408,17 @@ class Inspector(QFrame):
         row.addWidget(self.btn_clear_log)
         row.addStretch(1)
         return holder
+
+    def _on_export_clicked(self) -> None:
+        """按钮点击入口——**必须把 clicked 带的 checked 参数丢掉**。
+
+        直接 ``clicked.connect(self.export_log)`` 会出问题：``QPushButton.clicked``
+        带一个 checked(bool)，PySide 会把它塞进 ``export_log(path=None)`` 的 path。
+        它不是 None，于是跳过文件对话框，拿 False 去 ``Path()`` 抛 TypeError；
+        异常发生在 Qt 槽里被直接吞掉，用户看到的就是「点了没反应」。
+        （此前的测试全是直接调 export_log，所以一直没抓到。）
+        """
+        self.export_log()
 
     def export_log(self, path: str | None = None) -> str | None:
         """把日志写到文件；返回落盘路径（用户取消时返回 None）。

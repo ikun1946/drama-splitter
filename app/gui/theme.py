@@ -1122,6 +1122,14 @@ QLabel[role="mono-hud"] {{
     background: {HUD_BG};
     padding: 4px 10px;
 }}
+
+/* 预览下方的「当前时间」：这一行是"现在在哪"，比旁边的总时长/帧号更该被看见 */
+QLabel[role="timecode-now"] {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_TITLE}pt;
+    font-weight: 600;
+    color: {TEXT};
+}}
 """
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..theme import current_mode, qcolor
 from .scroll_area import h_scrollable
 
 
@@ -41,6 +43,7 @@ class MediaPreview(QWidget):
         self._image: QImage | None = None
         self._frame_index: int | None = None
         self._pts: str = "--:--:--.---"
+        self._total_frames: int | None = None
 
         # 画面区：最小高度按"能看清切点画面"给，宽度给得宽松（画面按比例缩放）
         self.view = QLabel("尚未选择源文件")
@@ -48,9 +51,23 @@ class MediaPreview(QWidget):
         self.view.setMinimumSize(360, 200)
         self.view.setProperty("role", "video-canvas")
 
-        # 时间码（HUD 顶部条）
+        # 时间信息行：当前时间（大）+ 总时长 + 帧号——原来只有前者，而且
+        # 总时长/帧号要么在时间轴两端、要么画在画面上，看一个数要满屏找。
         self.timecode = QLabel("--:--:--.---")
-        self.timecode.setProperty("role", "mono-hud")
+        self.timecode.setProperty("role", "timecode-now")
+        self.total_timecode = QLabel("")
+        self.total_timecode.setProperty("role", "muted")
+        self.frame_number = QLabel("")
+        self.frame_number.setProperty("role", "muted")
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(8)
+        time_row.addWidget(self.timecode)
+        time_row.addWidget(self.total_timecode)
+        time_row.addStretch(1)
+        time_row.addWidget(self.frame_number)
+        time_holder = QWidget()
+        time_holder.setLayout(time_row)
 
         # 控制按钮
         self.btn_play = QPushButton(self.PLAY_TEXT)
@@ -75,7 +92,8 @@ class MediaPreview(QWidget):
             self.btn_fwd_5s,
         ):
             b.setMinimumWidth(0)
-            if b in (self.btn_play, self.btn_boundary):
+            if b is self.btn_play:
+                # 只有播放是主操作；切点前后/成片连看降成次级，别和它抢注意力
                 b.setProperty("role", "primary")
                 b.setProperty("compact", "true")   # QSS: padding 4px 8px
                 # primary 在 QSS 里要重新 polish 才生效
@@ -86,15 +104,15 @@ class MediaPreview(QWidget):
                 # 挤出审核页右列视口（QSS role="mini"）
                 b.setProperty("role", "mini")
 
+        # 按用途分三组：逐帧（上一帧/播放/下一帧）｜检视（切点前后/成片连看）｜微调（±秒）
+        # 以前九个按钮排一排、全部同款，看不出分组、也看不出哪个是主操作。
         controls = QHBoxLayout()
         controls.setSpacing(6)
-        for b in (
-            self.btn_prev_frame,
-            self.btn_play,
-            self.btn_next_frame,
-            self.btn_boundary,
-            self.btn_stitch,
-        ):
+        for b in (self.btn_prev_frame, self.btn_play, self.btn_next_frame):
+            controls.addWidget(b)
+        self.group_divider = self._group_divider()
+        controls.addWidget(self.group_divider)
+        for b in (self.btn_boundary, self.btn_stitch):
             controls.addWidget(b)
         controls.addStretch(1)
         for b in (
@@ -112,8 +130,34 @@ class MediaPreview(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.view, 1)
-        layout.addWidget(self.timecode)
+        layout.addWidget(time_holder)
         layout.addWidget(h_scrollable(controls_holder))
+
+    @staticmethod
+    def _group_divider() -> QFrame:
+        """控制条的分组竖线——没有它，三组按钮读起来还是一排。"""
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFixedWidth(1)
+        line.setStyleSheet(
+            f"background: {qcolor(current_mode(), 'BORDER')}; border: none;"
+        )
+        return line
+
+    def set_total(self, duration: str, total_frames: int | None = None) -> None:
+        """设置总时长与总帧数（帧号显示成「帧 417 / 18441」）。"""
+        self._total_frames = total_frames
+        self.total_timecode.setText(f"/ {duration}" if duration else "")
+        self._refresh_frame_label()
+
+    def _refresh_frame_label(self) -> None:
+        if self._frame_index is None:
+            self.frame_number.setText("")
+            return
+        if self._total_frames:
+            self.frame_number.setText(f"帧 {self._frame_index} / {self._total_frames}")
+        else:
+            self.frame_number.setText(f"帧 #{self._frame_index}")
 
     def set_image(self, image: QImage | None) -> None:
         self._image = image
@@ -124,6 +168,7 @@ class MediaPreview(QWidget):
             self._frame_index = frame_index
         if pts is not None:
             self._pts = pts
+        self._refresh_frame_label()
 
     def set_playing(self, playing: bool) -> None:
         """播放键兼作暂停键：按实际状态切文案（唯一的状态展示出口）。"""

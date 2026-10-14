@@ -137,6 +137,12 @@ class StageView(QWidget):
         )
         if video is not None:
             self.player.set_fps(video.nominal_fps)
+        # 时间信息行要知道总长与总帧数：帧号才有分母，总时长也不用去时间轴两端找
+        duration = media.timeline_duration
+        self.preview.set_total(
+            format_timecode(duration) if duration else "",
+            video.nb_frames if video is not None else None,
+        )
         self.timeline.set_project(
             media, self.state.current_plan, self.state.exported, self.current_episode
         )

@@ -4382,6 +4382,10 @@ class TestEnvCheckDialog:
 
         dialog = self._dialog(window, qapp)
         got = []
+        # 必须先断开主窗口那条连接：它是真的会在应用内下载安装依赖（联网），
+        # 一旦跑起来就会拖到会话收尾——完成信号在 teardown 里投递、弹出模态框，
+        # 进程以 0xC0000374（堆损坏）崩在"测试全绿之后"。这里只验证按钮发不发信号。
+        dialog.install_engine_requested.disconnect()
         dialog.install_engine_requested.connect(lambda: got.append(1))
         try:
             dialog.apply_report(self._report(
@@ -4648,10 +4652,106 @@ class TestLogExport:
         assert insp.export_log("whatever.txt") is None
         assert calls, "空日志应给出提示，而不是写出一个空文件"
 
+    def test_export_button_does_not_pass_checked_as_path(self, window, monkeypatch):
+        """按钮点击不能把 clicked 的 checked(bool) 当成路径传进来。
+
+        回归：以前 ``clicked.connect(self.export_log)``，False 落到 path 上，
+        ``Path(False)`` 抛 TypeError 被 Qt 吞掉——用户点了完全没反应。
+        """
+        insp = window.workbench.inspector
+        seen: list = []
+        monkeypatch.setattr(insp, "export_log", lambda path=None: seen.append(path))
+
+        insp.btn_export_log.click()
+
+        assert seen == [None], f"按钮点击应当不带路径调用 export_log，实际收到 {seen!r}"
+
+    def test_export_button_writes_the_file(self, window, qapp, tmp_path, monkeypatch):
+        """真点按钮（含另存为对话框）要能真的写出文件。"""
+        import PySide6.QtWidgets as qtw
+
+        from app.gui.widgets import message
+
+        monkeypatch.setattr(message, "information", lambda *a, **k: None)
+        insp = window.workbench.inspector
+        insp.clear_log()
+        insp.append_log("点按钮导出的这一行", "info")
+
+        target = tmp_path / "from-click.txt"
+
+        class _FakeFileDialog:
+            @staticmethod
+            def getSaveFileName(*args, **kwargs):
+                return (str(target), "文本文件 (*.txt)")
+
+        monkeypatch.setattr(qtw, "QFileDialog", _FakeFileDialog)
+
+        insp.btn_export_log.click()
+        qapp.processEvents()
+
+        assert target.exists(), "点了「导出日志…」应当真的落盘"
+        assert "点按钮导出的这一行" in target.read_text(encoding="utf-8")
+
     def test_log_toolbar_buttons_exist(self, window):
         insp = window.workbench.inspector
         assert hasattr(insp, "btn_export_log") and hasattr(insp, "btn_clear_log")
 
+
+class TestReadyPageLayout:
+    """素材就绪页 v2（按 docs/mockups/ready-stage-v2.html 落地）。
+
+    三处都是"用户看得见但测试测不到就会退化"的版式约定：
+    - 左栏是「标签 / 值」信息网格，长路径折行显示而不是被硬截断；
+    - 中栏把当前时间 / 总时长 / 帧号并成一行，控制条按用途分组；
+    - 右栏空态不再让空列表撑满整列，并给出「下一步」。
+    """
+
+    @pytest.fixture
+    def ready(self, window, qapp, assets):
+        _import_and_wait(window, qapp, assets["cfr"])
+        return window
+
+    def test_left_column_is_a_label_value_grid(self, ready):
+        pane = ready.workbench.import_pane
+        assert pane.file_card.title() == "素材", "三张卡合并成一张「素材」"
+        assert pane._audio_card.title() == "主对白音轨"
+        assert pane._steps_card.title() == "接下来"
+        assert pane._fields["resolution"].text() == "320 × 180"
+        assert pane._fields["fps"].text() == "25.000 fps"
+        assert pane._fields["duration"].text() == "00:02:00.000"
+        assert pane._fields["audio"].text() == "1 条"
+        assert pane._fields["file"].text() == "cfr_120s_25fps.mp4"
+
+    def test_long_path_wraps_instead_of_being_cut(self, ready, assets):
+        """路径要能折行显示全部内容——以前是中间省略，用户看不到完整路径。"""
+        pane = ready.workbench.import_pane
+        shown = pane.path_label.text().replace("\u200b", "")
+        assert shown == str(assets["cfr"]), "路径应当完整显示（零宽断点不计）"
+        assert "\u200b" in pane.path_label.text(), "长路径要插零宽断点才能折行"
+        assert pane.path_label.wordWrap()
+        assert pane.path_label.toolTip() == str(assets["cfr"])
+
+    def test_format_hint_hides_after_import(self, ready):
+        """导入后不再提示支持哪些格式——那时它只是一句废话。"""
+        pane = ready.workbench.import_pane
+        assert pane.formats.isHidden()
+        assert "已完成" in pane._step_labels[0].text(), "第一步应标成已完成"
+
+    def test_center_time_row_and_grouped_controls(self, ready):
+        preview = ready.workbench.stage_view.preview
+        assert preview.total_timecode.text() == "/ 00:02:00.000"
+        assert preview.frame_number.text() == "帧 0 / 3000"
+        assert preview.group_divider.width() == 1, "逐帧组与检视组之间要有分隔线"
+        assert preview.btn_play.property("role") == "primary"
+        assert preview.btn_boundary.property("role") != "primary", (
+            "切点前后是检视动作，不该和播放抢主色"
+        )
+
+    def test_inspector_empty_state_is_compact_with_next_step(self, window):
+        insp = window.workbench.inspector
+        insp.set_issues([])
+        assert not insp._next_step.isHidden(), "空态要给出「下一步」"
+        assert insp._problem_scroll.isHidden(), "空列表不该占着整列（那是空白感的来源）"
 
 class TestExportDialogFitsScreen:
     """导出窗口要放得进屏幕、也要能拖小。

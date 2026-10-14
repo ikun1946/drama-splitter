@@ -1,8 +1,15 @@
-"""左栏「素材」pane：源文件、媒体摘要、主对白音轨。
+"""左栏「素材」pane：素材信息网格、主对白音轨、接下来三步。
 
 只放"看一眼就知道素材是什么"的信息。兼容性问题不在这里重复列一遍——它们
 统一进右栏检查器的「问题」页签（同一份 ``check_compatibility`` 结果原先在
 导入区与检查器各显示一次，是明显的冗余）。
+
+版式（v2）：
+- 信息按「标签 / 值」两列排（原来三张卡片各留一大片空白，内容还被裁）；
+- 长路径折行显示，完整路径进 tooltip——QLabel 的 wordWrap 只在空格处断，
+  而路径没有空格，所以在分隔符后插零宽空格造断点（实测最小宽 252px → 84px）；
+- 格式提示只在**未导入**时出现，导入后不再占位置；
+- 末尾补一张「接下来」三步卡，把第一次使用的人该点哪里写清楚。
 
 拖放导入的 hero 区也不在这里：它在"未导入"阶段占据中栏，属于工作台的版式，
 不属左栏（见 ``app/gui/workbench.py`` 的空态视图）。
@@ -14,9 +21,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -25,7 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.ffmpeg import check_encoders, locate_ffmpeg
-from ...core.probe import check_compatibility, describe_media
+from ...core.probe import check_compatibility
+from ...core.timebase import format_timecode
 from ..state import ProjectState
 from ..widgets import Card
 from ..widgets import NoWheelComboBox
@@ -33,11 +44,53 @@ from ..widgets import message
 from ..workers import ProbeWorker
 from ._common import register_worker
 
-__all__ = ["ImportPane"]
+__all__ = ["ImportPane", "human_size"]
+
+#: 信息网格的行（标签, 内部键）——顺序就是核对素材时的顺序
+INFO_ROWS: tuple[tuple[str, str], ...] = (
+    ("文件", "file"),
+    ("路径", "path"),
+    ("画面", "resolution"),
+    ("帧率", "fps"),
+    ("编码", "codec"),
+    ("时长", "duration"),
+    ("大小", "size"),
+    ("音轨", "audio"),
+)
+
+#: 「接下来」三步——第一次用的人照着点就行
+STEP_TEXTS: tuple[str, ...] = (
+    "选定源片",
+    "点右下角「开始分析」，AI 给出切点候选",
+    "在预览里逐条核对、锁定切点",
+)
+
+
+def human_size(num_bytes: int) -> str:
+    """字节数转成人读的大小（B / KB / MB / GB）。"""
+    size = float(num_bytes or 0)
+    if size < 1024:
+        return f"{size:.0f} B"
+    for unit in ("KB", "MB", "GB"):
+        size /= 1024
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} GB"
+
+
+def breakable_path(path: str) -> str:
+    """在分隔符后插零宽空格，让长路径能在 QLabel 里折行。
+
+    QLabel 的 wordWrap 只在空格/连字符处断行，而 Windows 路径里没有空格：
+    实测不插的话最小宽度 252px（栏宽只有 360，减掉内边距就装不下），插了之后
+    最小宽度降到 84px、按栏宽自然折成 2–3 行。零宽字符不影响视觉，也只在
+    展示用文本里出现（tooltip 仍是原样的路径）。
+    """
+    return path.replace("\\", "\\\u200b").replace("/", "/\u200b")
 
 
 class ImportPane(QWidget):
-    """源文件 / 媒体摘要 / 主对白音轨。"""
+    """素材信息 / 主对白音轨 / 接下来。"""
 
     probed = Signal(object, object)      # (MediaInfo, issues)
     probe_failed = Signal(str)
@@ -46,89 +99,128 @@ class ImportPane(QWidget):
         super().__init__(parent)
         self.state = state
         self.worker: ProbeWorker | None = None
-
-        # ---- 源文件 ----
-        # 路径用 QLabel + 手写省略号，不用 QLineEdit：后者装不下真实路径时会
-        # 横向滚动，光标在末尾于是**只显示路径尾巴**（截图里是「1s 25fps.mp4」），
-        # 看起来像文件被截断了。栏宽 320px 装不下完整路径，头部省略才是诚实的。
-        self.path_label = QLabel("尚未选择源视频")
-        self.path_label.setProperty("role", "mono")
-        self.path_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.path_label.setToolTip("尚未选择源视频")
         self._full_path = ""
-        self.btn_browse = QPushButton("更换视频…")
+
+        # ---- 素材：信息网格 -------------------------------------------
+        self.file_card = Card("素材", parent=self, accent="primary")
+
+        self.path_label = QLabel("尚未选择源视频", self.file_card)
+        self.path_label.setProperty("role", "mono")
+        self.path_label.setWordWrap(True)
+        self.path_label.setToolTip("尚未选择源视频")
+
+        self._fields: dict[str, QLabel] = {}
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(5)
+        for row, (label, key) in enumerate(INFO_ROWS):
+            tag = QLabel(label, self.file_card)
+            tag.setProperty("role", "muted")
+            value = self.path_label if key == "path" else QLabel("—", self.file_card)
+            value.setWordWrap(True)
+            grid.addWidget(tag, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(value, row, 1)
+            self._fields[key] = value
+        grid.setColumnStretch(1, 1)
+        self.file_card.body_layout.addLayout(grid)
+
+        # 未导入时才提示支持的格式；导入后这一段是废话，不该继续占位置
+        self.formats = QLabel(
+            "支持 .mp4 / .mov / .mkv / .avi / .ts / .m4v，也可直接拖入", self.file_card
+        )
+        # 漏了 setWordWrap 就会在这一行被硬裁——左栏只有 256px 可用宽度
+        self.formats.setWordWrap(True)
+        self.formats.setProperty("role", "muted")
+        self.file_card.body_layout.addWidget(self.formats)
+
+        self.btn_browse = QPushButton("选择视频…", self.file_card)
         self.btn_browse.setProperty("role", "ghost")
         self.btn_browse.clicked.connect(self.choose_file)
-        self.status = QLabel("")
+        browse_row = QHBoxLayout()
+        browse_row.setContentsMargins(0, 0, 0, 0)
+        browse_row.addWidget(self.btn_browse)
+        browse_row.addStretch(1)
+        self.file_card.body_layout.addLayout(browse_row)
+
+        self.status = QLabel("", self.file_card)
         self.status.setProperty("role", "muted")
         self.status.setWordWrap(True)
+        self.file_card.body_layout.addWidget(self.status)
 
-        file_row = QHBoxLayout()
-        file_row.setSpacing(8)
-        file_row.addWidget(self.path_label, 1)
-        file_row.addWidget(self.btn_browse)
-        file_card = Card("源文件", parent=self, accent="primary")
-        file_card.body_layout.addLayout(file_row)
-        formats = QLabel("支持 .mp4 / .mov / .mkv / .avi / .ts / .m4v，也可直接拖入")
-        # 漏了 setWordWrap 就会在这一行被硬裁——左栏只有 256px 可用宽度
-        formats.setWordWrap(True)
-        formats.setProperty("role", "muted")
-        file_card.body_layout.addWidget(formats)
-        self.file_card = file_card
-
-        # ---- 媒体摘要 ----
-        self.summary = QLabel("尚未导入。")
-        self.summary.setWordWrap(True)
-        self.summary.setProperty("role", "muted")
-        info_card = Card("媒体信息", parent=self)
-        info_card.body_layout.addWidget(self.summary)
-        self._info_card = info_card
-
-        # ---- 主对白音轨 ----
+        # ---- 主对白音轨 ------------------------------------------------
         self.audio_combo = NoWheelComboBox()
         self.audio_combo.currentIndexChanged.connect(self._audio_changed)
         self.audio_hint = QLabel("导入后列出可选音轨。")
         self.audio_hint.setProperty("role", "muted")
         self.audio_hint.setWordWrap(True)
-        audio_card = Card("主对白音轨", parent=self)
-        audio_card.body_layout.addWidget(self.audio_combo)
-        audio_card.body_layout.addWidget(self.audio_hint)
-        self._audio_card = audio_card
+        self._audio_card = Card("主对白音轨", parent=self)
+        self._audio_card.body_layout.addWidget(self.audio_combo)
+        self._audio_card.body_layout.addWidget(self.audio_hint)
+
+        # ---- 接下来（三步）--------------------------------------------
+        self._steps_card = Card("接下来", parent=self)
+        self._step_labels: list[QLabel] = []
+        for number, text in enumerate(STEP_TEXTS, start=1):
+            label = QLabel(f"{number}  {text}", self._steps_card)
+            label.setWordWrap(True)
+            # 第 1 步做完只是加个后缀；第 2 步是"下一个动作"，用正常文字色抢一下注意力
+            label.setProperty("role", "muted" if number != 2 else "")
+            self._step_labels.append(label)
+            self._steps_card.body_layout.addWidget(label)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
-        outer.addWidget(file_card)
-        outer.addWidget(info_card)
-        outer.addWidget(audio_card)
-        outer.addWidget(self.status)
+        outer.addWidget(self.file_card)
+        outer.addWidget(self._audio_card)
+        outer.addWidget(self._steps_card)
         outer.addStretch(1)
 
     # ---- 行为 ----------------------------------------------------------
 
     def _set_path(self, path: str) -> None:
-        """显示**头部**省略的路径，完整路径进 tooltip。
-
-        省略号放在中间而不是末尾：路径开头是盘符与目录（用户真正需要确认的
-        「哪个盘」），文件名在末尾反而看得见。完整值由 ``self._full_path`` 持有。
-        """
-        self._full_path = str(path)
+        """把完整路径折行铺在「路径」那一格；tooltip 里放原样路径。"""
+        self._full_path = str(path or "")
         if not self._full_path:
             self.path_label.setText("尚未选择源视频")
             self.path_label.setToolTip("尚未选择源视频")
             return
+        self.path_label.setText(breakable_path(self._full_path))
         self.path_label.setToolTip(self._full_path)
-        metrics = self.path_label.fontMetrics()
-        width = max(40, self.path_label.width() or 180)
-        self.path_label.setText(
-            metrics.elidedText(self._full_path, Qt.TextElideMode.ElideMiddle, width)
-        )
 
     def full_path(self) -> str:
-        """完整路径（界面只显示省略版）。"""
+        """完整路径（界面里可能折行显示）。"""
         return self._full_path
+
+    def _set_field(self, key: str, text: str) -> None:
+        self._fields[key].setText(text or "—")
+
+    def _fill_fields(self, info) -> None:
+        """把探测结果填进信息网格。"""
+        video = info.video
+        self._set_field("file", Path(info.path).name)
+        if video is not None:
+            self._set_field("resolution", f"{video.width} × {video.height}")
+            fps = video.nominal_fps
+            self._set_field("fps", f"{float(fps):.3f} fps" if fps else "—")
+            codec = (video.codec_name or "").upper()
+            parts = [part for part in (codec, video.pix_fmt or "") if part]
+            self._set_field("codec", " · ".join(parts))
+        else:
+            self._set_field("resolution", "无视频轨")
+            self._set_field("fps", "—")
+            self._set_field("codec", "—")
+        self._set_field("duration", format_timecode(info.timeline_duration))
+        self._set_field("size", human_size(info.size_bytes))
+        count = len(info.audio_tracks)
+        self._set_field("audio", f"{count} 条" if count else "无音轨")
+
+    def _mark_first_step_done(self, done: bool) -> None:
+        label = self._step_labels[0]
+        label.setText(
+            f"1  {STEP_TEXTS[0]}（已完成）" if done else f"1  {STEP_TEXTS[0]}"
+        )
 
     def choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -153,6 +245,7 @@ class ImportPane(QWidget):
 
         self.status.setText("正在探测媒体信息…")
         self._set_path(path)
+        self._mark_first_step_done(False)
         self.state.reset_media()
         self.worker = ProbeWorker(self.state.binaries, path, self)
         self.worker.completed.connect(self._on_probed)
@@ -162,7 +255,10 @@ class ImportPane(QWidget):
 
     def _on_probed(self, info, issues) -> None:
         self.state.media = info
-        self.summary.setText(describe_media(info))
+        self._fill_fields(info)
+        self.formats.setVisible(False)
+        self.btn_browse.setText("更换视频…")
+        self._mark_first_step_done(True)
 
         self.audio_combo.blockSignals(True)
         self.audio_combo.clear()
@@ -190,11 +286,6 @@ class ImportPane(QWidget):
             self.status.setText("探测完成，可在「工具 → 分集设置」里指定分集目标。")
 
         self.probed.emit(info, issues)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        super().resizeEvent(event)
-        if self._full_path:
-            self._set_path(self._full_path)
 
     def _on_failed(self, text: str) -> None:
         self.status.setText("探测失败，见右侧检查器。")
