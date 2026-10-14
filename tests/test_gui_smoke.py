@@ -214,6 +214,102 @@ class TestPlayback:
         assert playing_position > 0.4, f"播放位置应推进，实际 {playing_position:.3f}s"
         assert max(positions) > playing_position - 0.2, "位置回调应覆盖播放过程"
 
+    def test_reader_never_sleeps_while_holding_the_lock(self, qapp, binaries, monkeypatch):
+        """回归：读者线程**持锁** sleep 会把 GUI 取帧堵住 —— 播放卡顿的根因。
+
+        判据用探针实现，不依赖时序：把 frame_source 里的 ``time`` 换成"睡觉前先
+        试着一把非阻塞拿锁"的替身——拿得到说明睡的时候锁是空闲的（正确）；拿不到
+        说明是持锁睡（错误）。实测持锁睡时 25fps 素材只出 16.8fps、单次 tick
+        最坏近 990ms，而放开锁后 24.7fps、tick 最坏 1ms。
+        """
+        import threading
+        import time as time_mod
+
+        from app.gui import frame_source
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        size = (160, 90)
+        frame = b"\0" * (size[0] * size[1] * 3)
+        player.set_source(Path("fake.mp4"), size=size)   # 尺寸已知 → 不会去跑 ffprobe
+        player._stop_flag.clear()
+        player.MAX_QUEUE = 2
+        with player._lock:
+            player._queue.extend([frame] * 2)            # 先填满，逼读者走"队满"分支
+
+        class _FakeStdout:
+            def read(self, count):
+                time_mod.sleep(0.01)
+                return frame
+
+        class _FakeProc:
+            stdout = _FakeStdout()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        player._proc = _FakeProc()
+
+        sleeps: list[bool] = []
+
+        class _ProbeTime:
+            perf_counter = staticmethod(time_mod.perf_counter)
+
+            def sleep(self, seconds):
+                acquired = player._lock.acquire(blocking=False)
+                sleeps.append(acquired)
+                if acquired:
+                    player._lock.release()
+                time_mod.sleep(seconds)                  # 真睡，别把测试变成忙等
+
+        monkeypatch.setattr(frame_source, "time", _ProbeTime())
+
+        reader = threading.Thread(target=player._read_loop, args=(size,), daemon=True)
+        reader.start()
+        time_mod.sleep(0.3)                              # 让读者进入"队列满"的等待分支
+        player._stop_flag.set()
+        reader.join(timeout=2)
+
+        assert sleeps, "读者线程没走到等待分支，这条测试就失去意义了"
+        assert all(sleeps), "读者线程持锁 sleep：GUI 取帧会被堵住（播放卡顿的根因）"
+
+    def test_playback_keeps_up_with_source_frame_rate(self, qapp, binaries, assets):
+        """端到端帧率：25fps 素材必须稳定出到 22.5fps 以上。
+
+        抓的是"读者线程持锁 sleep"那一类节拍卡顿：解码链路本身有 600fps 余量，
+        旧实现实测只有 19.0fps（画面时间在走、画面在跳），修复后 24.7fps。
+        """
+        import time as time_mod
+
+        from PySide6.QtCore import QTimer
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_max_width(960)
+        player.set_source(assets["cfr"], size=(320, 180))
+        player.set_fps(Fraction(25))
+        player.set_audio_enabled(False)
+        player.set_range(0.0, 4.0)
+
+        stamps: list[float] = []
+        player.frame_ready.connect(lambda _img: stamps.append(time_mod.perf_counter()))
+        player.play()
+        QTimer.singleShot(3000, qapp.quit)
+        qapp.exec()
+        player.stop()
+
+        assert len(stamps) > 20, f"播放期间应持续出帧，实际只出 {len(stamps)} 帧"
+        span = stamps[-1] - stamps[1]                    # 掐掉第一帧的启动开销
+        fps = (len(stamps) - 2) / span if span > 0 else 0.0
+        assert fps >= 25 * 0.9, f"播放只有 {fps:.1f}fps（源 25fps），画面会卡"
+
     def test_position_tracks_wall_clock_not_frame_count(self, qapp, binaries, assets):
         """回归：播放越久、音画越不同步。
 

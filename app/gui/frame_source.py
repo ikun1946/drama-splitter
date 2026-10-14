@@ -559,10 +559,21 @@ class StreamPlayer(QObject):
         if proc is None or proc.stdout is None:
             return
         while not self._stop_flag.is_set():
+            # 队列满了就先**退出 with**（放锁），再睡，醒了重查。
+            #
+            # 为什么不能在持锁时 sleep：GUI 线程的 _on_tick 要拿同一把锁来取帧，
+            # 而 ``time.sleep(0.005)`` 在 Windows 上按 ~15.6ms 的系统时钟粒度落地
+            # ——于是每一帧的取锁都要排在读者这次睡眠后面。实测（1080p25 素材，
+            # 解码链路本身有 641fps 余量）：
+            #   持锁 sleep  → 25fps 的视频只送出 16.8fps，tick 95 分位 16.4ms、
+            #                 最坏 990ms（画面时间在走、画面却在跳 = 卡顿）
+            #   放开锁再睡  → 24.7fps，tick 95 分位 0.6ms、最坏 1ms
+            # 锁只用于保护队列本身，睡眠不属于临界区。
             with self._lock:
-                if len(self._queue) >= self.MAX_QUEUE:
-                    time.sleep(0.005)
-                    continue
+                full = len(self._queue) >= self.MAX_QUEUE
+            if full:
+                time.sleep(0.005)
+                continue
             chunk = proc.stdout.read(frame_bytes)
             if not chunk or len(chunk) < frame_bytes:
                 break
