@@ -348,6 +348,17 @@ _PROMPT_TEMPLATE = """你是一名短剧剪辑助理。下面是一个候选切�
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+#: 推理型模型（Qwen3 等）会先吐一段思考，再给结论——那段里常有自己的花括号，
+#: 直接拿 _JSON_RE 找 JSON 会匹配到思考块里的片段，所以先整段剥掉再解析。
+_THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+
+#: 聊天式的系统提示：只要求给结论，别复述上下文（实测 2B 模型在裸补全下会一路
+#: 复述上下文里的 JSON，被 stop 截断后什么都判不出来）。
+JUDGE_SYSTEM_PROMPT = "你是短剧剪辑助理。只输出一行 JSON（verdict/evidence/risks），不要复述上下文，不要解释。"
+
+#: 有些模型只留下**结束**标记（Qwen3 的思考就是这样）：见到它只取后面的正文。
+_THINK_END_MARKERS = ("<｜end▁of▁thinking｜>", " response")
+
 
 def _import_llama():
     """导入 llama_cpp.Llama；不可用时返回 None（允许测试注入替身）。"""
@@ -366,7 +377,9 @@ class LocalLlmJudge(SemanticJudge):
     """
 
     def __init__(self, model_path: str | Path, *, n_ctx: int = 2048,
-                 n_threads: int | None = None, max_tokens: int = 160) -> None:
+                 n_threads: int | None = None, max_tokens: int = 256) -> None:
+        # 256 而不是 160：推理型模型（Qwen3 等）要先输出思考，预算太紧会把结论
+        # 挤掉，拿到的就是不完整的 JSON。
         llama_cls = _import_llama()
         if llama_cls is None:
             raise ModelUnavailableError(
@@ -432,25 +445,44 @@ class LocalLlmJudge(SemanticJudge):
         return True
 
     def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
-        problems = request.validate()
-        if problems:
-            # 请求不合法不是模型的问题，不能拿去猜
-            return JudgmentVerdict(
-                verdict=VERDICT_UNPARSEABLE,
-                risks=[f"请求校验未通过：{'；'.join(problems)}"],
-                judge_id=self.judge_id,
-            )
+        # 提示词必须走**共用渲染器**。这里原先自己写了一份
+        # ``_PROMPT_TEMPLATE.format(...)``：模板里那段 JSON 示例的花括号会被
+        # format 当成替换字段，于是**任何一次本地判定**都抛
+        # ``KeyError: '"verdict"'``——上层看到的就是「分析失败：'"verdict"'」
+        # （用户日志实证）。共用渲染器早就改成 replace 了，只是这份私有副本没跟着改。
+        prompt, invalid = prepare_prompt(request, self.judge_id)
+        if invalid is not None:
+            return invalid
+        return self._parse(self._complete(prompt), request)
 
-        context = json.dumps(request.to_prompt_dict(), ensure_ascii=False)
-        prompt = _PROMPT_TEMPLATE.format(context=context)
-        output = self._llm.create_completion(
-            prompt,
-            max_tokens=self._max_tokens,
-            temperature=0.1,
-            stop=["\n\n"],
-        )
-        text = (output.get("choices") or [{}])[0].get("text", "") if isinstance(output, dict) else str(output)
-        return self._parse(text, request)
+    def _complete(self, prompt: str) -> str:
+        """跑一次推理并取出回答文本——**优先走模型自己的 chat 模板**。
+
+        为什么不是裸补全：本项目的判定模型是 Qwen3.5 这类**会先输出思考**的模型。
+        以裸补全喂提示词时，它会顺着上下文那一段继续**复述 JSON**，而
+        ``stop=["\\n\\n"]`` 又会把思考块第一步就截断——实测 2B 模型这样只能拿到
+        ``unparseable``；换 chat 模板后同一条请求 4.4 秒返回
+        ``{"verdict": "good_cut", ...}``（本机实测）。
+        没有内嵌 chat 模板的 GGUF（自炼模型）退回裸补全，行为与以前一致。
+        """
+        try:
+            output = self._llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=self._max_tokens,
+                temperature=0.1,
+            )
+            choice = (output.get("choices") or [{}])[0]
+            return str((choice.get("message") or {}).get("content", ""))
+        except Exception:  # noqa: BLE001 - 旧推理栈 / 没有 chat 模板
+            output = self._llm.create_completion(
+                prompt, max_tokens=self._max_tokens, temperature=0.1
+            )
+            if isinstance(output, dict):
+                return (output.get("choices") or [{}])[0].get("text", "")
+            return str(output)
 
     def _parse(self, text: str, request: JudgmentRequest) -> JudgmentVerdict:
         """严格解析模型输出（实现见模块级 parse_verdict）。"""
@@ -739,7 +771,12 @@ class ResilientJudge(SemanticJudge):
 
 def parse_verdict(text: str, judge_id: str) -> JudgmentVerdict:
     """严格解析模型输出。解析失败如实标记，绝不猜测或兜底成某个等级。"""
-    match = _JSON_RE.search(text or "")
+    text = _THINK_RE.sub("", text or "")   # 推理型模型：先剥成对的思考块
+    for marker in _THINK_END_MARKERS:      # 只留结束标记的那种：取标记之后
+        if marker in text:
+            text = text.split(marker, 1)[1]
+            break
+    match = _JSON_RE.search(text)
     if not match:
         return JudgmentVerdict(
             verdict=VERDICT_UNPARSEABLE,

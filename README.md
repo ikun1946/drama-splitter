@@ -839,3 +839,26 @@ testdata/          合成素材（不入版本库）
     那些网络线程会活过收尾）；环境自检「安装转写引擎」那条用例改为先断开真实处理器——它
     原本会在测试里真的联网下载，完成信号拖到 teardown 投递 → 弹模态框 → 进程以
     0xC0000374（堆损坏）崩在"测试全绿之后"。
+
+
+19. **本地语义判定必崩：本地判定器自带一份 `str.format` 渲染。**
+    模板里那段 JSON 示例 ``{"verdict": ...}`` 会被 ``str.format`` 当成替换字段，于是
+    **任何一次本地 llama.cpp 判定**都抛 ``KeyError: '"verdict"'``，上层看到的就是
+    「分析失败：'"verdict"'」——用户日志实证：分析一路走到「整体规划」就整段失败
+    （字幕 / 转写 / 镜头 / 候选全部正常，只有语义这一跳崩）。
+    共用渲染器 ``prepare_prompt`` 在更早的版本就已改成 ``replace(...)`` 且有测试钉着，
+    但 ``LocalLlmJudge`` 里那份**私有副本**没跟着改；测试只覆盖共用渲染器，所以一直没
+    暴露（这条路径只在装了本地推理栈 + 模型时才会被走到）。现在它直接调用共用渲染器，
+    顺带去掉重复的请求校验。回归测试：
+    ``TestPromptRendering::test_local_judge_uses_the_shared_renderer``。
+
+20. **判定模型是推理型的：裸补全会复述上下文，还会被 `stop` 提前截断。**
+    Qwen3.5 这类模型先输出思考、再给结论。以前用 ``create_completion`` +
+    ``stop=["\n\n"]`` 调它：模型顺着「上下文：{…}」继续**复述 JSON**，思考块又被第一个
+    空行截断——实测 2B 模型只能拿到 ``unparseable``（语义判断白做，只剩规则分）。
+    现在优先走模型自己的 **chat 模板**（system + user 两条消息）：实测同一条请求
+    4.4–9 秒返回 ``{"verdict": "poor_cut", ...}``；解析前还会剥掉思考块（成对的
+    `` thinking…<｜end▁of▁thinking｜>`` 与只留结束标记的 Qwen3 形式），否则思考里的花括号会把 JSON
+    正则带偏；没有内嵌 chat 模板的 GGUF 自动退回裸补全。输出预算 160 → 256（思考要占
+    额度，太紧会把结论挤掉）。回归测试：``test_local_judge_prefers_the_chat_template``、
+    ``test_thinking_block_is_stripped_before_parsing``。

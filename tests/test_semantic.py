@@ -374,6 +374,89 @@ class TestPromptRendering:
             rule_score=0.5, strategy="story",
         )
 
+    def test_local_judge_prefers_the_chat_template(self, monkeypatch, tmp_path):
+        """推理型模型要走它自己的 chat 模板——裸补全下它会复述上下文、被 stop 截断。"""
+        from app.core import semantic
+
+        seen: dict = {}
+
+        class _FakeLlama:
+            def __init__(self, **kwargs):
+                pass
+
+            def create_chat_completion(self, messages, **kwargs):
+                seen["messages"] = messages
+                return {
+                    "choices": [
+                        {"message": {"content": '{"verdict": "poor_cut", "evidence": [], "risks": []}'}}
+                    ]
+                }
+
+            def create_completion(self, *args, **kwargs):     # pragma: no cover - 不该被走到
+                raise AssertionError("有 chat 模板时不该退回裸补全")
+
+        monkeypatch.setattr(semantic, "_import_llama", lambda: _FakeLlama)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+
+        verdict = semantic.LocalLlmJudge(model).judge(self.valid_request())
+
+        assert verdict.verdict == "poor_cut"
+        roles = [m["role"] for m in seen["messages"]]
+        assert roles == ["system", "user"], roles
+        assert "不要复述上下文" in seen["messages"][0]["content"]
+        assert '"verdict": "good_cut|acceptable|poor_cut"' in seen["messages"][1]["content"]
+
+    def test_thinking_block_is_stripped_before_parsing(self):
+        """思考块里的花括号不能把 JSON 正则带跑偏。"""
+        from app.core.semantic import parse_verdict
+
+        text = (
+            "这里是思考：先看 {" + '"foo": 1' + "} 这种片段…\n"
+            "<｜end▁of▁thinking｜>\n"
+            '{"verdict": "acceptable", "evidence": ["对白已收尾"], "risks": []}'
+        )
+        verdict = parse_verdict(text, "test")
+        assert verdict.verdict == "acceptable", verdict.risks
+        assert verdict.evidence == ["对白已收尾"]
+
+    def test_local_judge_uses_the_shared_renderer(self, monkeypatch, tmp_path):
+        """回归：本地 llama.cpp 判定器自带过一份 str.format 渲染 → 任何判定都崩。
+
+        模板里那段 JSON 示例的花括号被 format 当成替换字段，抛
+        ``KeyError: '"verdict"'``；用户日志里的「分析失败：'"verdict"'」就是这条路径。
+        现在它必须走 ``prepare_prompt`` 那份共用渲染器。
+        """
+        from app.core import semantic
+
+        captured: dict = {}
+
+        class _FakeLlama:
+            def __init__(self, **kwargs):
+                pass
+
+            def create_completion(self, prompt, **kwargs):
+                captured["prompt"] = prompt
+                return {
+                    "choices": [
+                        {"text": '{"verdict": "good_cut", "evidence": [], "risks": []}'}
+                    ]
+                }
+
+        monkeypatch.setattr(semantic, "_import_llama", lambda: _FakeLlama)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+
+        judge = semantic.LocalLlmJudge(model)
+        verdict = judge.judge(self.valid_request())
+
+        assert verdict.verdict == "good_cut", verdict.risks
+        prompt = captured["prompt"]
+        assert '"verdict": "good_cut|acceptable|poor_cut"' in prompt, (
+            "输出格式示例必须完整留在提示词里（被 format 吃掉就会 KeyError）"
+        )
+        assert "{context}" not in prompt, "占位符应已被替换"
+
     def test_renders_context_and_keeps_json_example(self):
         prompt, invalid = prepare_prompt(self.valid_request(), "test")
         assert invalid is None
