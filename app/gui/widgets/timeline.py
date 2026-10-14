@@ -52,6 +52,13 @@ class TimelineRuler(QWidget):
     MARGIN = 10                                  # 左右留白（放时长标注）
     TRACK_TOP = 30                               # 轨道上沿
     TRACK_HEIGHT = 28                            # 轨道高：20 偏扁，集号挤在中间看不清
+    # 播放头的**时间气泡**：轨道下方那一条（拖动时不必回头看上面的时间码行）。
+    # 高度 72 → 92 就是为它留的：轨道到 58 结束，气泡占 62–80，两侧留 4px 余量。
+    BUBBLE_TOP = 62
+    BUBBLE_HEIGHT = 18
+    BUBBLE_RADIUS = 6
+    BUBBLE_MAX_WIDTH = 132                       # 比它还宽就截（HH:MM:SS.mmm 够用）
+    HEIGHT = 92
     SEGMENT_GAP = 2                              # 分段之间的缝
     SEGMENT_RADIUS = 4                           # 分段圆角
     MARKER_OVERHANG = 7                          # 切点竖线超出轨道的高度
@@ -60,7 +67,7 @@ class TimelineRuler(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(72)
+        self.setFixedHeight(self.HEIGHT)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -385,19 +392,42 @@ class TimelineRuler(QWidget):
     def _draw_playhead(self, painter: QPainter) -> None:
         seconds = self._drag_seconds if self._drag == "playhead" else self._playhead
         x = int(self._x_from_seconds(seconds))
-        painter.setPen(QPen(QColor(qcolor(current_mode(), "PRIMARY")), 1))
-        painter.drawLine(x, 12, x, self.TRACK_TOP + self.TRACK_HEIGHT + 8)
-        painter.setBrush(QBrush(QColor(qcolor(current_mode(), "PRIMARY"))))
+        color = QColor(qcolor(current_mode(), "PRIMARY"))
+        painter.setPen(QPen(color, 1))
+        painter.drawLine(x, 12, x, self.BUBBLE_TOP - 2)
+        painter.setBrush(QBrush(color))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(QPolygon([
             QPoint(x - 4, 12), QPoint(x + 4, 12), QPoint(x, 18),
         ]))
+        self._draw_playhead_bubble(painter, x, seconds)
+
+    def _draw_playhead_bubble(self, painter: QPainter, x: int, seconds) -> None:
+        """播放头下方的当前时间气泡（拖动播放头时看得最清楚）。"""
+        from ...core.timebase import format_timecode
+
+        mode = current_mode()
+        text = format_timecode(seconds)
+        font = QFont(FONT_MONO.split(",")[0].strip("'"))
+        font.setPointSize(FONT_SIZE_CAPTION)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        width = min(self.BUBBLE_MAX_WIDTH, metrics.horizontalAdvance(text) + 12)
+        # 贴着边缘时把气泡拉回可视区内（不然会画到控件外面）
+        left = min(max(0, x - width // 2), max(0, self.width() - width))
+        rect = QRect(left, self.BUBBLE_TOP, width, self.BUBBLE_HEIGHT)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(qcolor(mode, "PRIMARY"))))
+        painter.drawRoundedRect(rect, self.BUBBLE_RADIUS, self.BUBBLE_RADIUS)
+        painter.setPen(QColor(qcolor(mode, "TEXT_INVERSE")))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.setFont(self.font())          # 画笔状态还给调用方
 
     def _draw_drag_preview(self, painter: QPainter) -> None:
         x = int(self._x_from_seconds(self._drag_seconds))
         pen = QPen(QColor(qcolor(current_mode(), "PRIMARY")), 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
-        painter.drawLine(x, 12, x, self.TRACK_TOP + self.TRACK_HEIGHT + 8)
+        painter.drawLine(x, 12, x, self.BUBBLE_TOP - 2)
         if self._error_message:
             painter.setPen(QColor(qcolor(current_mode(), "DANGER")))
             painter.drawText(QRect(x + 6, 2, 320, 16),
@@ -407,7 +437,9 @@ class TimelineRuler(QWidget):
         if self._media is None or self._total_seconds() <= 0:
             return None
         x = int(self._x_from_seconds(self._playhead))
-        return QRect(x - 6, 10, 13, self.TRACK_TOP + self.TRACK_HEIGHT + 10)
+        # 气泡比播放头宽得多：脏矩形要把它整个罩住，否则拖动会留下残影
+        half = self.BUBBLE_MAX_WIDTH // 2 + 4
+        return QRect(x - half, 0, half * 2, self.height())
 
     # ---- 交互 ----------------------------------------------------------
 

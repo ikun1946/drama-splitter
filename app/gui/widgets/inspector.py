@@ -353,6 +353,8 @@ class Inspector(QFrame):
             self._advice_layout.insertWidget(self._advice_layout.count() - 1, row)
         self._advice_empty.setVisible(not advice)
         self._advice_scroll.setVisible(bool(advice))
+        # 页签带计数：建议里有几条要一眼看得见（问题页签同理，见 _refresh_count）
+        self._tabs[1].setText(f"建议 {len(advice)}" if advice else "建议")
 
     def cycle_issue(self, delta: int) -> InspectorIssue | None:
         """在可定位的问题之间循环巡航（N=下一个 / P=上一个，方案 §54）。

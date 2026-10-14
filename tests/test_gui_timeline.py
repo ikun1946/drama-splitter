@@ -290,3 +290,35 @@ class TestStylesheetGuard:
             if "font-size" in body and "font-family" not in body
         ]
         assert not offenders, f"{mode} 主题下缺少 font-family 的规则：{offenders}"
+
+
+class TestPlayheadBubble:
+    """播放头的**时间气泡**：时间轴加高就是为它留的（拖动时不必回头看上面的时间码行）。"""
+
+    def test_ruler_is_tall_enough_for_the_bubble(self, ruler):
+        assert ruler.height() >= 88, "时间轴要留出轨道下方气泡的高度"
+        assert ruler.BUBBLE_TOP + ruler.BUBBLE_HEIGHT <= ruler.height()
+
+    def test_bubble_is_actually_painted(self, ruler):
+        from PySide6.QtGui import QColor
+
+        from app.gui.theme import current_mode, qcolor
+
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.set_playhead(Fraction(30))
+        image = _paint(ruler).toImage()
+
+        y = ruler.BUBBLE_TOP + ruler.BUBBLE_HEIGHT // 2
+        primary = QColor(qcolor(current_mode(), "PRIMARY")).rgb()
+        row = [QColor(image.pixel(x, y)).rgb() for x in range(image.width())]
+        assert primary in row, "播放头气泡没画出来（气泡底色应是主色）"
+
+    def test_dirty_rect_covers_the_bubble(self, ruler):
+        """脏矩形必须罩住气泡——否则拖动播放头会留下残影。"""
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.set_playhead(Fraction(30))
+        rect = ruler._playhead_rect()
+        assert rect is not None
+        assert rect.top() <= ruler.BUBBLE_TOP
+        assert rect.height() >= ruler.BUBBLE_TOP + ruler.BUBBLE_HEIGHT
+        assert rect.width() >= ruler.BUBBLE_MAX_WIDTH, "气泡比播放头宽，脏矩形也要跟着变宽"

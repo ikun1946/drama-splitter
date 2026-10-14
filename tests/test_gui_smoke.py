@@ -4747,6 +4747,17 @@ class TestReadyPageLayout:
             "切点前后是检视动作，不该和播放抢主色"
         )
 
+    def test_advice_tab_shows_its_count(self, window):
+        """页签带计数：建议里几条、一眼看得见。"""
+        from app.gui.widgets.inspector import InspectorIssue
+
+        insp = window.workbench.inspector
+        insp.set_advice([])
+        assert insp._tabs[1].text() == "建议", "没有建议时不加数字"
+
+        insp.set_advice([InspectorIssue(title="整集复核建议", target_ms=1000)])
+        assert insp._tabs[1].text() == "建议 1", insp._tabs[1].text()
+
     def test_inspector_empty_state_is_compact_with_next_step(self, window):
         insp = window.workbench.inspector
         insp.set_issues([])
