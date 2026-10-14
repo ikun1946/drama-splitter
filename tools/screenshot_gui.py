@@ -309,5 +309,35 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def teardown_qt() -> None:
+    """显式拆掉 Qt，再让解释器退出。
+
+    留给解释器收尾会在 Qt 里 fail-fast（0xC0000409）——截图**已经写完了**，
+    但脚本返回码会变成崩溃码，脚本化调用者会以为失败了。
+    """
+    try:
+        import shiboken6
+        from PySide6.QtWidgets import QApplication
+    except ImportError:      # 没装 Qt
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:  # C++ 侧已释放
+            continue
+    app.processEvents()
+    app.quit()
+    try:
+        shiboken6.delete(app)
+    except Exception:  # noqa: BLE001 - 拆不掉也别再抛
+        pass
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    teardown_qt()
+    raise SystemExit(code)
