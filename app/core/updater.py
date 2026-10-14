@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +44,13 @@ __all__ = [
     "installed_copy",
     "check_for_update",
     "download_asset",
+    "download_curl_args",
+    "download_status_text",
     "extract_portable_zip",
+    "format_duration",
+    "format_size",
     "launch_installer",
+    "mirror_url",
     "mark_update_pending",
     "take_update_pending",
     "update_action_label",
@@ -108,6 +114,9 @@ class DownloadOutcome:
     path: Path | None = None
     cancelled: bool = False
     message: str = ""
+    #: 中断/取消时已落盘的部分大小（字节）。界面据此把按钮改成「继续下载」——
+    #: 慢链路上一次下不完是常态，白扔掉已经下到的部分最伤用户。
+    partial_bytes: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +314,91 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def mirror_url(url: str, mirror: str | None) -> str:
+    """把资产地址套上镜像前缀；镜像为空就原样返回。
+
+    约定与常见 GitHub 加速服务一致：``https://mirror.example/`` 直接拼在原始
+    完整 URL 前面；也支持 ``{url}`` 占位（``https://m.example/?u={url}``）。
+
+    镜像**只影响传输**：下载完成后仍然按发布页给出的 SHA-256 校验，所以镜像
+    即使被投毒也过不了校验这一关——这也是敢把它做成可配置的前提。
+    """
+    prefix = (mirror or "").strip()
+    if not prefix or not url:
+        return url
+    if "{url}" in prefix:
+        return prefix.replace("{url}", url)
+    return prefix.rstrip("/") + "/" + url
+
+
+def format_size(num_bytes: float) -> str:
+    """人类可读的字节数：``1.2 MB`` / ``812 KB`` / ``95 B``。"""
+    value = float(max(0.0, num_bytes))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def format_duration(seconds: float) -> str:
+    """``45 秒`` / ``3 分 20 秒`` / ``1 小时 5 分``。"""
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total} 秒"
+    minutes, sec = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {sec} 秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes} 分"
+
+
+def download_status_text(done: int, total: int, elapsed: float) -> tuple[str, bool]:
+    """下载中的状态文案与「是否确定进度」。
+
+    纯函数，便于直接测：速度与剩余时间都由"已下字节 / 已用时间"估，不猜远端。
+    ``total <= 0``（发布页没给大小时）只报已下载量与速度，进度条转不确定模式。
+    """
+    done = max(0, int(done))
+    total = max(0, int(total))
+    determinate = total > 0
+    if determinate:
+        parts = [f"已下载 {format_size(done)} / {format_size(total)}"]
+    else:
+        parts = [f"已下载 {format_size(done)}"]
+    speed = done / elapsed if elapsed > 0.5 and done else 0.0
+    if speed > 0:
+        parts.append(f"{format_size(speed)}/s")
+        if determinate and total > done:
+            parts.append(f"剩余约 {format_duration((total - done) / speed)}")
+    return " · ".join(parts), determinate
+
+
+def download_curl_args(
+    url: str, part: Path, *, mirror: str = "", stall_seconds: int = 30
+) -> list[str]:
+    """构造下载用的 curl 参数（抽出来便于测试断言）。
+
+    **故意不设 ``--max-time``**：它是整个传输的总时限。国内直连 GitHub 实测
+    只有几十 KB/s，35.8 MB 的安装包要十几分钟——30 秒总时限的结果是每到 30 秒
+    就被掐断、再点一次又只下 30 秒，用户看到的就是"又慢又永远下不完"。
+    真正要防的是"卡住不动"，那由 ``--speed-limit/--speed-time`` 负责。
+    """
+    args = [
+        "curl", "-sS", "-L", "--fail",
+        "--noproxy", "localhost,127.0.0.1",
+        "-o", str(part),
+    ]
+    if part.is_file() and part.stat().st_size:
+        args += ["-C", "-"]  # 断点续传
+    args += [
+        "--speed-limit", "1024",   # 低于 1 KB/s 持续 stall_seconds 秒 → 判定卡死
+        "--speed-time", str(stall_seconds),
+        mirror_url(url, mirror),
+    ]
+    return args
+
+
 def download_asset(
     url: str,
     target: Path,
@@ -313,12 +407,18 @@ def download_asset(
     size: int = 0,
     on_progress=None,
     cancel_check=None,
-    timeout: int = 30,
+    mirror: str = "",
+    stall_seconds: int = 30,
 ) -> DownloadOutcome:
-    """下载一个资产到 ``target``，校验 SHA-256，失败时**删掉文件**。
+    """下载一个资产到 ``target``，过程中持续回报进度，最后校验 SHA-256。
 
-    ``target`` 旁边会留一个 ``.part``，支持断点续传（curl 的 ``-C -``），
-    取消或失败时删掉——半截文件留着只会让下次误判成"已完成"。
+    为什么用 ``Popen`` + 轮询而不是 ``subprocess.run``：进度只能从**已落盘的
+    ``.part`` 体积**推出来。写死总时限不行（见 :func:`download_curl_args`），
+    所以要一边等一边看文件长没长——模型下载（1.2 GB）早就是这么做的。
+
+    失败/取消时 **保留 ``.part``**：慢链路上一次下不完是常态，留着就能续传；
+    真正的"完成"只认 ``target``，半截文件永远不会被当成已完成，最后还有
+    SHA-256 把关。
     """
     if not url:
         return DownloadOutcome(ok=False, message="下载地址为空。")
@@ -337,32 +437,79 @@ def download_asset(
                 ),
             )
 
-    args = ["-L", "--fail", "-o", str(part)]
-    if part.is_file() and part.stat().st_size:
-        args += ["-C", "-"]  # 续传
-    args += ["--max-time", str(timeout), "--speed-time", "30", "--speed-limit", "1024", url]
-
-    code, output = _curl(args, timeout=timeout + 60)
-    if code == -2:
-        _unlink(part)
+    args = download_curl_args(url, part, mirror=mirror, stall_seconds=stall_seconds)
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=_NO_WINDOW,
+        )
+    except FileNotFoundError:
         return DownloadOutcome(ok=False, message="本机没有 curl，无法下载更新。")
-    if code == 28 or code == 0 and not part.is_file():
-        # 28 = 超时；超时可能发生在半途，.part 保留以便续传
-        if part.is_file() and part.stat().st_size:
+    except OSError as exc:
+        return DownloadOutcome(ok=False, message=f"无法启动下载：{exc}")
+
+    def partial_size() -> int:
+        try:
+            return part.stat().st_size if part.is_file() else 0
+        except OSError:
+            return 0
+
+    last_report = 0.0
+    try:
+        while True:
+            if cancel_check and cancel_check():
+                try:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                except Exception:  # noqa: BLE001 - 收尾尽力而为
+                    pass
+                got = partial_size()
+                return DownloadOutcome(
+                    ok=False,
+                    cancelled=True,
+                    message=f"已取消，已保留 {format_size(got)}（再点一次可继续）。",
+                    partial_bytes=got,
+                )
+            code = process.poll()
+            current = partial_size()
+            now = time.monotonic()
+            if on_progress and (now - last_report > 0.2 or code is not None):
+                on_progress(current, size, target.name, 1, 1)
+                last_report = now
+            if code is not None:
+                break
+            time.sleep(0.1)
+        detail = (process.stderr.read() or b"").decode("utf-8", "replace").strip()
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+    if code != 0:
+        got = partial_size()
+        if got:
+            # 28 = 触发 --speed-limit 判定；其它非零码也多半是中途断开。
             return DownloadOutcome(
-                ok=False, cancelled=True, message="下载超时，已保留进度。"
+                ok=False,
+                cancelled=True,
+                message=(
+                    f"下载中断（curl {code}）：已保留 {format_size(got)}，"
+                    f"再点一次可继续。{detail[:120]}"
+                ).strip(),
+                partial_bytes=got,
             )
         _unlink(part)
-        return DownloadOutcome(ok=False, message="下载超时，请重试。")
-    if code != 0:
-        _unlink(part)
-        return DownloadOutcome(ok=False, message=f"下载失败（curl 退出码 {code}）。{output[:160]}".strip())
+        return DownloadOutcome(
+            ok=False, message=f"下载失败（curl 退出码 {code}）。{detail[:160]}".strip()
+        )
 
-    if cancel_check and cancel_check():
-        _unlink(part)
-        return DownloadOutcome(ok=False, cancelled=True, message="已取消。")
-
-    expected = digest.split(":", 1)[1].strip().lower() if ":" in digest else digest.strip().lower()
+    expected = (
+        digest.split(":", 1)[1].strip().lower() if ":" in digest else digest.strip().lower()
+    )
     if expected:
         actual = _sha256(part)
         if actual != expected:
@@ -381,10 +528,10 @@ def download_asset(
         _unlink(part)
         return DownloadOutcome(ok=False, message=f"保存文件失败：{exc}")
 
+    final = target.stat().st_size if target.is_file() else 0
     if on_progress:
-        on_progress(1, 1, target.name, 1, 1)
+        on_progress(final, final, target.name, 1, 1)
     return DownloadOutcome(ok=True, path=target, message=f"已下载 {target.name}")
-
 
 def _unlink(path: Path) -> None:
     try:

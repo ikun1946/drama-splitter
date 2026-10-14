@@ -59,6 +59,10 @@ class AppConfig:
 
     models_dir: str | None = None       # 用户指定的模型根目录
     endpoint: str = "https://hf-mirror.com"
+    # 更新包下载镜像前缀（默认空 = 直连 GitHub）。国内直连实测只有几十
+    # KB/s，填一个加速前缀能快很多；镜像只影响传输，下载完仍按发布页的
+    # SHA-256 校验，所以它无法塞进被篡改的包。用法见 README「应用内更新」。
+    update_mirror: str = ""
     asr_model_tier: str | None = None   # 使用中的转写档位；None = 默认档位
     llm_model_key: str | None = None    # 使用中的语义模型（"llm:2B:Q4_K_M"）；None = 自动
     theme: str = "light"                # 界面主题：light / dark
@@ -97,6 +101,7 @@ class AppConfig:
         return cls(
             models_dir=data.get("models_dir"),
             endpoint=str(data.get("endpoint") or "https://hf-mirror.com"),
+            update_mirror=str(data.get("update_mirror") or "").strip(),
             asr_model_tier=tier,
             llm_model_key=key,
             theme=theme,

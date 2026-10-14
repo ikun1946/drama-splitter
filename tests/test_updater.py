@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -121,6 +122,9 @@ class _Handler(BaseHTTPRequestHandler):
     status = 200
     body_blob = b""
     headers_extra: dict = {}
+    #: >0 时按块慢发（每块之间 sleep chunk_delay），用来复现「下载途中」的状态
+    chunk_size = 0
+    chunk_delay = 0.0
 
     def log_message(self, *args):  # noqa: D102 - 测试里别刷屏
         pass
@@ -132,6 +136,16 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/download"):
             self.send_header("Content-Length", str(len(self.body_blob)))
             self.end_headers()
+            if self.chunk_size:
+                sent = 0
+                while sent < len(self.body_blob):
+                    piece = self.body_blob[sent:sent + self.chunk_size]
+                    self.wfile.write(piece)
+                    self.wfile.flush()
+                    sent += len(piece)
+                    if self.chunk_delay:
+                        time.sleep(self.chunk_delay)
+                return
             self.wfile.write(self.body_blob)
             return
         self.send_header("Content-Type", "application/json")
@@ -239,67 +253,186 @@ class TestCheckForUpdate:
 # ---------------------------------------------------------------------------
 
 
+def _require_curl() -> None:
+    import shutil
+
+    if shutil.which("curl") is None:
+        pytest.skip("本机没有 curl——更新下载依赖它，跳过真实下载用例")
+
+
 class TestDownloadAsset:
-    def test_download_and_verify_success(self, server, tmp_path, monkeypatch):
-        blob = b"x" * 4096
+    def test_download_and_verify_success(self, server, tmp_path):
+        _require_curl()
+        blob = b"x" * 65536
         server.body_blob = blob
         server.status = 200
         digest = "sha256:" + hashlib.sha256(blob).hexdigest()
-        monkeypatch.setattr(
-            updater,
-            "_curl",
-            lambda args, timeout=60: (0, "") if "-o" in args else (0, ""),
-        )
-
-        def fake_curl(args, timeout=60):
-            target = Path(args[args.index("-o") + 1])
-            target.write_bytes(blob)
-            return 0, ""
-
-        monkeypatch.setattr(updater, "_curl", fake_curl)
         target = tmp_path / "setup.exe"
-        seen = []
+        seen: list[int] = []
         outcome = updater.download_asset(
-            "https://example.invalid/a", target, digest=digest,
-            on_progress=lambda *a: seen.append(a),
+            f"{server.base_url}/download",
+            target,
+            digest=digest,
+            size=len(blob),
+            on_progress=lambda done, total, *_: seen.append(done),
         )
         assert outcome.ok and outcome.path == target
         assert target.read_bytes() == blob
-        assert not (tmp_path / "setup.exe.part").exists()
-        assert seen, "应回报一次进度"
+        assert not (tmp_path / "setup.exe.part").exists(), "完成后不该留下 .part"
+        assert seen and seen[-1] == len(blob), "结束时要回报最终进度"
 
-    def test_checksum_mismatch_deletes_the_file(self, tmp_path, monkeypatch):
+    def test_checksum_mismatch_deletes_the_file(self, server, tmp_path):
         """安全边界：校验不过必须删掉，绝不把坏包交给安装器。"""
+        _require_curl()
         blob = b"corrupted"
-        target = tmp_path / "setup.exe"
-
-        def fake_curl(args, timeout=60):
-            Path(args[args.index("-o") + 1]).write_bytes(blob)
-            return 0, ""
-
-        monkeypatch.setattr(updater, "_curl", fake_curl)
+        server.body_blob = blob
+        server.status = 200
         outcome = updater.download_asset(
-            "https://example.invalid/a", target, digest="sha256:" + "0" * 64
+            f"{server.base_url}/download",
+            tmp_path / "setup.exe",
+            digest="sha256:" + "0" * 64,
+            size=len(blob),
         )
         assert not outcome.ok
         assert "校验" in outcome.message
-        assert not target.exists(), "校验失败的目标文件必须删掉"
+        assert not (tmp_path / "setup.exe").exists(), "校验失败的目标文件必须删掉"
         assert not (tmp_path / "setup.exe.part").exists(), ".part 也要删掉"
 
     def test_empty_url_is_reported(self, tmp_path):
         outcome = updater.download_asset("", tmp_path / "x.exe")
         assert not outcome.ok and "为空" in outcome.message
 
-    def test_curl_failure_is_reported_and_part_removed(self, tmp_path, monkeypatch):
-        def fake_curl(args, timeout=60):
-            Path(args[args.index("-o") + 1]).write_bytes(b"partial")
-            return 22, "HTTP 404"
-
-        monkeypatch.setattr(updater, "_curl", fake_curl)
-        target = tmp_path / "setup.exe"
-        outcome = updater.download_asset("https://example.invalid/a", target)
+    def test_curl_failure_is_reported_and_part_removed(self, server, tmp_path):
+        _require_curl()
+        server.status = 404
+        server.body_blob = b"nope"
+        outcome = updater.download_asset(f"{server.base_url}/download", tmp_path / "setup.exe")
         assert not outcome.ok
-        assert not (tmp_path / "setup.exe.part").exists()
+        assert not (tmp_path / "setup.exe").exists()
+        assert not (tmp_path / "setup.exe.part").exists(), "空 .part 该清掉"
+
+
+class TestDownloadProgress:
+    """进度条不动 = 三层全断：worker 没传回调、updater 只在结束时回调、界面没接。"""
+
+    @staticmethod
+    def _slow(server, blob, *, chunk=16384, delay=0.05):
+        server.body_blob = blob
+        server.status = 200
+        server.chunk_size = chunk
+        server.chunk_delay = delay
+
+    def test_progress_is_reported_while_downloading(self, server, tmp_path):
+        _require_curl()
+        blob = b"x" * (256 * 1024)
+        self._slow(server, blob)
+        digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+        seen: list[int] = []
+        outcome = updater.download_asset(
+            f"{server.base_url}/download",
+            tmp_path / "a.bin",
+            digest=digest,
+            size=len(blob),
+            on_progress=lambda done, total, *_: seen.append(done),
+        )
+        assert outcome.ok
+        assert len(seen) >= 3, f"下载途中应多次上报，实际 {seen}"
+        assert seen == sorted(seen), "进度必须单调不减"
+        assert seen[-1] == len(blob)
+
+    def test_cancel_keeps_partial_file_for_resume(self, server, tmp_path):
+        """取消不能白扔已下载的部分：慢链路上一次下不完是常态。"""
+        _require_curl()
+        blob = b"y" * (512 * 1024)
+        self._slow(server, blob, chunk=8192, delay=0.05)
+        state = {"cancel": False}
+
+        def on_progress(done, _total, *_rest):
+            if done > 64 * 1024:
+                state["cancel"] = True
+
+        target = tmp_path / "a.bin"
+        outcome = updater.download_asset(
+            f"{server.base_url}/download",
+            target,
+            size=len(blob),
+            on_progress=on_progress,
+            cancel_check=lambda: state["cancel"],
+        )
+        part = tmp_path / "a.bin.part"
+        assert not outcome.ok and outcome.cancelled
+        assert part.is_file() and part.stat().st_size > 0, "取消必须保留 .part"
+        assert outcome.partial_bytes == part.stat().st_size
+        assert not target.exists()
+        assert "已保留" in outcome.message
+
+
+class TestDownloadCurlArgs:
+    def test_no_total_time_limit(self, tmp_path):
+        """--max-time 是总时限：慢链路上每隔 30 秒被掐断，永远下不完。"""
+        args = updater.download_curl_args("https://example.invalid/a", tmp_path / "a.part")
+        assert "--max-time" not in args, "不许再设总时限"
+        assert "--speed-limit" in args and "--speed-time" in args, "但要保留真卡死判定"
+
+    def test_resumes_only_when_part_exists(self, tmp_path):
+        part = tmp_path / "a.part"
+        assert "-C" not in updater.download_curl_args("https://x/y", part)
+        part.write_bytes(b"half")
+        args = updater.download_curl_args("https://x/y", part)
+        assert "-C" in args
+
+    def test_mirror_is_applied_to_the_url(self, tmp_path):
+        args = updater.download_curl_args(
+            "https://github.com/a/b", tmp_path / "a.part", mirror="https://mirror.test/"
+        )
+        assert args[-1] == "https://mirror.test/https://github.com/a/b"
+
+
+class TestMirrorUrl:
+    def test_empty_is_passthrough(self):
+        assert updater.mirror_url("https://github.com/a", "") == "https://github.com/a"
+        assert updater.mirror_url("https://github.com/a", None) == "https://github.com/a"
+
+    def test_prefix_form(self):
+        assert updater.mirror_url("https://github.com/a", "https://m.test/") == (
+            "https://m.test/https://github.com/a"
+        )
+        assert updater.mirror_url("https://github.com/a", "https://m.test") == (
+            "https://m.test/https://github.com/a"
+        )
+
+    def test_placeholder_form(self):
+        assert updater.mirror_url("https://github.com/a", "https://m.test/?u={url}") == (
+            "https://m.test/?u=https://github.com/a"
+        )
+
+
+class TestDownloadStatusText:
+    def test_with_total_shows_progress_speed_and_eta(self):
+        text, determinate = updater.download_status_text(
+            10 * 1024 * 1024, 40 * 1024 * 1024, 20.0
+        )
+        assert determinate
+        assert "已下载 10.0 MB / 40.0 MB" in text
+        assert "512.0 KB/s" in text
+        assert "剩余约 1 分 0 秒" in text
+
+    def test_without_total_is_indeterminate(self):
+        text, determinate = updater.download_status_text(1024 * 1024, 0, 5.0)
+        assert not determinate, "总大小未知时不能假装有百分比"
+        assert "已下载 1.0 MB" in text
+
+    def test_no_speed_before_half_a_second(self):
+        text, _ = updater.download_status_text(1024, 2048, 0.1)
+        assert "/s" not in text, "刚开始不到半秒，速度没有意义"
+
+    def test_format_helpers(self):
+        assert updater.format_size(0) == "0 B"
+        assert updater.format_size(1536) == "1.5 KB"
+        assert updater.format_size(3 * 1024 * 1024) == "3.0 MB"
+        assert updater.format_duration(45) == "45 秒"
+        assert updater.format_duration(200) == "3 分 20 秒"
+        assert updater.format_duration(3900) == "1 小时 5 分"
 
 
 class TestLaunchInstaller:

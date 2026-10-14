@@ -29,13 +29,13 @@
 [Setup]
 AppId={{8F3C2A17-6D94-4E2B-9C51-7A0D3E68B412}
 AppName=AI 短剧智能分集器
-AppVersion=1.0.10
-AppVerName=AI 短剧智能分集器 1.0.10
+AppVersion=1.0.11
+AppVerName=AI 短剧智能分集器 1.0.11
 AppPublisher=ikun1946
 AppPublisherURL=https://github.com/ikun1946/drama-splitter
 AppSupportURL=https://github.com/ikun1946/drama-splitter/issues
 AppUpdatesURL=https://github.com/ikun1946/drama-splitter/releases
-VersionInfoVersion=1.0.10.0
+VersionInfoVersion=1.0.11.0
 VersionInfoDescription=AI 短剧智能分集器 安装程序
 
 ; 按用户安装，免管理员
@@ -54,7 +54,7 @@ CloseApplications=yes
 CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
-OutputBaseFilename=drama-splitter-1.0.10-setup
+OutputBaseFilename=drama-splitter-1.0.11-setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes

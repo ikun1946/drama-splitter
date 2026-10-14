@@ -3427,6 +3427,61 @@ class TestUpdateDialog:
         )
         assert not shown, "用户跳过的版本不该反复提示"
 
+    def test_download_progress_moves_bar_and_reports_speed(self, window, qapp):
+        """进度条必须跟着进度信号走，并把速度/剩余时间写出来。
+
+        以前这条线是断的（对话框没接 worker.progress、worker 没传 on_progress、
+        updater 又只在结束时回调一次），用户看到的就是"进度条一动不动"。
+        """
+        import time
+
+        dialog = window.build_update_dialog()
+        try:
+            dialog._state = "downloading"
+            dialog._info = self._info()
+            dialog._download_started = time.monotonic() - 20.0
+            dialog.progress.setVisible(True)
+            dialog._on_progress(10 * 1024 * 1024, 40 * 1024 * 1024)
+            assert dialog.progress.value() == 25
+            status = dialog.status.text()
+            assert "已下载 10.0 MB / 40.0 MB" in status
+            assert "剩余约" in status
+        finally:
+            dialog.close()
+
+    def test_unknown_total_uses_indeterminate_progress(self, window, qapp):
+        import time
+
+        dialog = window.build_update_dialog()
+        try:
+            dialog._info = self._info()
+            dialog._download_started = time.monotonic()
+            dialog._on_progress(1024 * 1024, 0)
+            assert dialog.progress.maximum() == 0, "总大小未知时不能假装有百分比"
+            assert "已下载" in dialog.status.text()
+        finally:
+            dialog.close()
+
+    def test_partial_failure_offers_resume(self, window, qapp):
+        """慢链路中断后按钮要能直接接着下，而不是又走一遍「检查更新」。"""
+        from app.core.updater import DownloadOutcome
+
+        dialog = window.build_update_dialog()
+        try:
+            dialog._info = self._info()
+            dialog._state = "downloading"
+            dialog._on_downloaded(
+                DownloadOutcome(
+                    ok=False,
+                    cancelled=True,
+                    partial_bytes=3 * 1024 * 1024,
+                    message="下载中断：已保留 3.0 MB，再点一次可继续。",
+                )
+            )
+            assert dialog.btn_primary.text() == "继续下载"
+        finally:
+            dialog.close()
+
 
     def test_skip_records_version_and_closes(self, window, qapp, monkeypatch):
         """跳过要落盘到 extra['update_dismissed']，否则下次启动还会弹同一个版本。"""

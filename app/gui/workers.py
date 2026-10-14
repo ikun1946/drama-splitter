@@ -876,10 +876,14 @@ class UpdateCheckWorker(BaseWorker):
 
 
 class UpdateDownloadWorker(BaseWorker):
-    """下载更新包（后台线程，可取消，校验 SHA-256）。
+    """下载更新包（后台线程，可取消，过程中回报进度，校验 SHA-256）。
 
     校验不通过时 ``download_asset`` 会把文件删掉再返回失败——这里不重复这个
     逻辑，只负责把结果转成信号。**绝不把校验失败的路径交出去。**
+
+    进度必须真的接出来：以前这里没给 ``download_asset`` 传 ``on_progress``，
+    而它自己又只在结束时回调一次，结果是「进度条一动不动、看着像卡死」
+    （用户实测反馈）。现在按 ~5Hz 把已下载字节透出去。
     """
 
     progress = Signal(int, int)  # 已下载字节, 总字节
@@ -894,15 +898,25 @@ class UpdateDownloadWorker(BaseWorker):
         self._size = size
 
     def work(self) -> None:  # noqa: D102
+        from app.core.app_config import AppConfig
         from app.core.updater import DownloadOutcome, download_asset
 
         try:
+            mirror = ""
+            try:
+                mirror = str(AppConfig.load().update_mirror or "")
+            except Exception:  # noqa: BLE001 - 配置读不出来就直连，不该挡住更新
+                mirror = ""
             outcome = download_asset(
                 self._url,
                 self._target,
                 digest=self._digest,
                 size=self._size,
+                mirror=mirror,
                 cancel_check=lambda: self.cancelled,
+                on_progress=lambda done, total, *_: self.progress.emit(
+                    int(done), int(total)
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             outcome = DownloadOutcome(ok=False, message=f"下载过程异常：{exc}")

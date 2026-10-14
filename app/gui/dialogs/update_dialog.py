@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import webbrowser
 from pathlib import Path
 
@@ -46,6 +47,9 @@ class UpdateDialog(DialogShell):
         self._version = current_version
         self._info = None
         self._downloaded: Path | None = None
+        #: 下载起点（算速度与剩余时间用）与当前镜像前缀（空 = 直连）
+        self._download_started = 0.0
+        self._mirror = ""
         #: 免安装版解压出来的目录（没有安装器可启动，只能让用户自己替换）
         self._extracted: Path | None = None
         self._worker = None
@@ -215,7 +219,10 @@ class UpdateDialog(DialogShell):
             self._apply_update()
         elif self._state == "available":
             self._start_download()
-        else:  # idle / up_to_date / failed —— 都是"再查一次"
+        elif self._state == "failed" and self._info is not None:
+            # 下载失败/中断后的「继续下载」：直接接着下
+            self._start_download()
+        else:  # idle / up_to_date / 检查失败 —— 都是"再查一次"
             self._downloaded = None
             self.start_check()
 
@@ -230,7 +237,19 @@ class UpdateDialog(DialogShell):
             target = target.with_suffix(".zip")
 
         self._state = "downloading"
-        self.status.setText(f"正在下载 {self._info.version}（{size / 1024 / 1024:.0f} MB）…")
+        self._download_started = time.monotonic()
+        self._mirror = ""
+        try:
+            from app.core.app_config import AppConfig
+
+            self._mirror = str(AppConfig.load().update_mirror or "")
+        except Exception:  # noqa: BLE001 - 配置读不出来就按直连处理
+            self._mirror = ""
+        from app.core.updater import format_size
+
+        self.status.setText(
+            f"正在下载 {self._info.version}（{format_size(size)}{"，经镜像" if self._mirror else ""}）…"
+        )
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
@@ -238,16 +257,42 @@ class UpdateDialog(DialogShell):
         self.btn_primary.setEnabled(False)
 
         worker = UpdateDownloadWorker(url, target, digest=digest, size=size, parent=self)
+        # 以前这条线是断的（worker 也没上报），进度条从头到尾不动——慢链路上
+        # 用户根本看不出是在跑还是卡死了。
+        worker.progress.connect(self._on_progress)
         worker.finished_with.connect(self._on_downloaded)
         self._worker = worker
         register_worker(self, "update_download", worker)
         worker.start()
+
+    def _on_progress(self, done: int, total: int) -> None:
+        """下载进度：进度条 + 「已下载 / 速度 / 剩余」文案。"""
+        from app.core.updater import download_status_text
+
+        elapsed = max(0.0, time.monotonic() - self._download_started)
+        text, determinate = download_status_text(done, total, elapsed)
+        if determinate and total > 0:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(min(100, int(done * 100 / total)))
+        else:
+            # 发布页没给大小时不假装有百分比：转不确定进度，只报已下载量
+            self.progress.setRange(0, 0)
+        hint = ""
+        speed = done / elapsed if elapsed > 3.0 and done else 0.0
+        if not self._mirror and 0 < speed < 300 * 1024:
+            hint = "\n直连较慢：可在 config.json 里填 update_mirror 走镜像加速（见 README）。"
+        version = self._info.version if self._info is not None else ""
+        self.status.setText(f"正在下载 {version}：{text}{hint}")
 
     def _on_downloaded(self, outcome) -> None:
         self._worker = None
         self.btn_cancel.setVisible(False)
         if not outcome.ok:
             self._set_failed(outcome.message or "下载失败。")
+            if outcome.partial_bytes:
+                # 慢链路一次下不完是常态：按钮要能直接接着下，
+                # 而不是又走一遍「检查更新 → 下载」
+                self.btn_primary.setText("继续下载")
             return
         self._downloaded = outcome.path
         self._state = "ready"
@@ -311,7 +356,8 @@ class UpdateDialog(DialogShell):
     def _cancel(self) -> None:
         if self._worker is not None:
             self._worker.cancel()
-        self.status.setText("已取消下载。")
+        # 取消不丢进度：worker 那边会保留 .part，再点「继续下载」即可接着下
+        self.status.setText("正在取消…已下载的部分会保留，可点「继续下载」接着下。")
 
     def _open_release(self) -> None:
         from app.core.updater import RELEASES_PAGE
