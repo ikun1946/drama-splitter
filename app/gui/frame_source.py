@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 import threading
@@ -30,6 +32,10 @@ from PySide6.QtGui import QImage
 __all__ = ["FrameDecoder", "FrameScrubber", "StreamPlayer", "DecodeError"]
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+# ffplay ``-stats`` 的进度行形如 ``   0.02 M-A:  0.000 fd=   0 ...``，
+# 第一列是**真实播放位置**（秒）。起播瞬间还会打 ``nan``，那不是位置。
+_AUDIO_STATS = re.compile(rb"^\s*(\d+(?:\.\d+)?)\s")
 
 
 class DecodeError(RuntimeError):
@@ -54,6 +60,8 @@ class FrameDecoder:
         self._max_width = max_width
         self._ffmpeg = str(_binaries().ffmpeg)
         self._size: tuple[int, int] = (0, 0)
+        # 已知的**源**分辨率（不是输出尺寸）：改宽度上限时要靠它重算
+        self._source_size: tuple[int, int] | None = None
 
     def set_source(self, path: str | Path | None,
                    size: tuple[int, int] | None = None) -> None:
@@ -64,6 +72,7 @@ class FrameDecoder:
         而调用方通常已经从媒体探测里拿到了分辨率。
         """
         self._path = Path(path) if path else None
+        self._source_size = size if size else None
         self._size = self._scaled(size) if size else (0, 0)
 
     def _scaled(self, size: tuple[int, int]) -> tuple[int, int]:
@@ -75,6 +84,14 @@ class FrameDecoder:
         if out_height % 2:
             out_height += 1
         return (out_width, out_height)
+
+    def set_max_width(self, width: int) -> None:
+        """改输出宽度上限；已知源分辨率时立刻重算输出尺寸。"""
+        width = max(160, int(width))
+        if width == self._max_width:
+            return
+        self._max_width = width
+        self._size = self._scaled(self._source_size) if self._source_size else (0, 0)
 
     @property
     def source(self) -> Path | None:
@@ -247,6 +264,7 @@ class StreamPlayer(QObject):
     error = Signal(str)
 
     MAX_QUEUE = 48  # 预解码上限，避免长片段一次性吃掉内存
+    QUEUE_BUDGET_BYTES = 96 * 1024 * 1024   # 预解码队列的内存预算
 
     def __init__(self, source: str | Path | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -255,6 +273,7 @@ class StreamPlayer(QObject):
         self._ffplay = binaries.ffplay      # None = 这套 FFmpeg 没带 ffplay，只能无声
         self._source: Path | None = Path(source) if source else None
         self._max_width = 960
+        self._source_size: tuple[int, int] | None = None   # 已知源分辨率（宽, 高）
         self._fps = Fraction(25)
 
         self._start = 0.0
@@ -276,6 +295,11 @@ class StreamPlayer(QObject):
         self._audio: subprocess.Popen | None = None
         self._audio_track: int | None = None
         self._audio_enabled = True
+        # 音频通道的「真实起点」：从 ffplay 进度行读到的 (位置, 墙钟)。
+        # 只用来校正**一次**画面时钟，用完即清（见 _apply_audio_sync）。
+        self._audio_sync: tuple[float, float] | None = None
+        self._audio_session = 0
+        self._audio_reader: threading.Thread | None = None
 
         # 画面时钟：跟墙钟走，不跟"送达的帧数"走。
         #
@@ -315,6 +339,7 @@ class StreamPlayer(QObject):
         """
         self.stop()
         self._source = Path(path) if path else None
+        self._source_size = size if size else None
         self._cached_size = self._scaled(size) if size else (0, 0)
 
     def _scaled(self, size: tuple[int, int]) -> tuple[int, int]:
@@ -328,10 +353,27 @@ class StreamPlayer(QObject):
         return (out_width, out_height)
 
     def set_max_width(self, width: int) -> None:
-        self._max_width = max(160, width)
+        """改预览解码宽度上限（调用方按画面区需要的物理像素给）。
+
+        改动只在**没有活动解码线程**时立刻生效：读者线程正按旧尺寸出帧，
+        这时换尺寸会让那些帧被按新尺寸解读（花屏/错位）。播放中的改动留给
+        下一次起播，画面先按原尺寸继续。
+        """
+        width = max(160, int(width))
+        if width == self._max_width:
+            return
+        self._max_width = width
+        reader = self._reader
+        if reader is None or not reader.is_alive():
+            self._cached_size = (
+                self._scaled(self._source_size) if self._source_size else (0, 0)
+            )
 
     def set_fps(self, fps: Fraction) -> None:
-        self._fps = fps if fps and fps > 0 else Fraction(25)
+        # 帧率同时决定定时器节奏与解码网格（-r），坏文件会把 avg_frame_rate
+        # 报成天文数字，上限兜一下，免得两者一起被带偏。
+        fps = fps if fps and fps > 0 else Fraction(25)
+        self._fps = min(fps, Fraction(240))
         if self._playing:
             self._timer.setInterval(self._interval_ms())
 
@@ -386,8 +428,10 @@ class StreamPlayer(QObject):
     # 画面是"FFmpeg 解帧 → QImage"，音频则交给一个只放声音的 ffplay 进程，两者
     # 用同一份文件、同一个起点并行起播，一起启停。为什么不走 QtMultimedia：
     # 它在 160MB+ 的 PySide6-Addons 里，本项目只装 Essentials（见模块开头）。
-    # 代价是两条独立时钟，起播时声音会比画面晚半秒左右（ffplay 启动开销），
-    # 逐帧审核够用；要严格同步只能换 QAudioSink 那条路。
+    # 代价是两条独立时钟：ffplay 要创建进程、打开声卡、填好缓冲才出声，而画面
+    # 第一帧到手就起表——于是「一开播声音就晚一点」，此前没有任何校正。
+    # 现在用 ffplay 自己的进度行（``-stats``）把这点差值量出来，一次性修进画面
+    # 时钟（见 ``_apply_audio_sync``），不再依赖任何写死的经验值。
 
     def set_audio_track(self, index: int | None) -> None:
         """指定预览放哪条音轨（ffprobe 的全局流序号，与导入页选中项一致）。"""
@@ -412,6 +456,7 @@ class StreamPlayer(QObject):
             "-vn",
             "-sn",              # 只解码音频，不浪费 CPU 在画面上
             "-autoexit",        # 播完自己退出，不留孤儿进程
+            "-stats",           # 往 stderr 报进度行：画面时钟靠它对齐
         ]
         if self._audio_track is not None:
             args += ["-ast", str(self._audio_track)]
@@ -426,26 +471,71 @@ class StreamPlayer(QObject):
         command = self._audio_command(self._position)
         if command is None:
             return
+        self._audio_session += 1
+        session = self._audio_session
+        self._audio_sync = None
         try:
             self._audio = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                # 进度行走 stderr：原来丢给 DEVNULL 就永远看不到它。
+                # 注意管道**必须一直读**，写满时 ffplay 会卡在写 stderr 上。
+                stderr=subprocess.PIPE,
                 creationflags=_NO_WINDOW,
             )
         except OSError:
             # 放不出声音不该影响画面：静默降级（ffplay 被删、被策略拦住等）
             self._audio = None
+            return
+        reader = threading.Thread(
+            target=self._drain_audio_stats, args=(self._audio, session), daemon=True
+        )
+        self._audio_reader = reader
+        reader.start()
+
+    def _drain_audio_stats(self, proc: subprocess.Popen, session: int) -> None:
+        """读 ffplay 的进度行，取第一条真实位置；之后只为读空管道。
+
+        取到的 ``(位置, 墙钟)`` 交给 ``_apply_audio_sync`` 折成画面时钟的修正量。
+        读完第一行也要继续读：管道写满时 ffplay 会卡在写 stderr 上，声音就停了。
+        换了一轮播放（session 变了）之后到达的旧行直接丢弃。
+        """
+        stream = getattr(proc, "stderr", None)
+        if stream is None:
+            return
+        buffer = b""
+        while True:
+            try:
+                chunk = os.read(stream.fileno(), 4096)
+            except (OSError, ValueError, AttributeError):
+                return                     # 进程被收掉 → 管道关了
+            if not chunk:
+                return                     # 进程正常收尾
+            if self._audio_sync is not None or self._audio_session != session:
+                continue                   # 已经拿到需要的行：只为读空管道
+            buffer += chunk
+            lines = re.split(rb"[\r\n]", buffer)
+            buffer = lines.pop()           # 末段可能不完整，留到下一轮
+            for line in lines:
+                match = _AUDIO_STATS.match(line)
+                if match is not None:
+                    self._audio_sync = (float(match.group(1)), time.perf_counter())
+                    break
+            if len(buffer) > 65536:        # 一直不给换行的怪输出兜底
+                buffer = buffer[-65536:]
 
     def _stop_audio(self) -> None:
         proc, self._audio = self._audio, None
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        self._audio_sync = None            # 停下就作废，免得下次用它校钟
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        reader, self._audio_reader = self._audio_reader, None
+        if reader is not None and reader.is_alive():
+            reader.join(timeout=0.5)       # 进程没了管道就断，读线程随即退出
 
     def stop(self) -> None:
         self.pause()
@@ -513,8 +603,14 @@ class StreamPlayer(QObject):
             "-i",
             str(self._source),
             "-an",
+            # 恒定帧率输出：播放器按「第 k 帧 = k/fps 时刻」取帧，源若是变帧率
+            # （手机拍摄很常见），逐帧的「序号 ÷ 帧率」与真实时间戳对不上，画面
+            # 就会相对音频忽前忽后。让 ffmpeg 先补/丢成恒定网格，并且用**同一个**
+            # fps 值，播放器的换算才成立。
             "-fps_mode",
-            "passthrough",
+            "cfr",
+            "-r",
+            f"{float(self._fps):.6f}",
             "-vf",
             f"scale={width}:{height}",
         ]
@@ -553,8 +649,18 @@ class StreamPlayer(QObject):
         self._reader = threading.Thread(target=self._read_loop, args=(size,), daemon=True)
         self._reader.start()
 
+    def _queue_limit(self, size: tuple[int, int]) -> int:
+        """队列上限按帧字节数换算：内存预算固定，别让高分辨率把内存吃光。
+
+        40 帧 960x540 的原始帧约 60MB；同样的帧数在 1920x1080 下就是 240MB，
+        所以上限要跟着帧字节数走（下限 4 帧，够吸收调度抖动）。
+        """
+        frame_bytes = max(1, size[0] * size[1] * 3)
+        return max(4, min(self.MAX_QUEUE, self.QUEUE_BUDGET_BYTES // frame_bytes))
+
     def _read_loop(self, size: tuple[int, int]) -> None:
         frame_bytes = size[0] * size[1] * 3
+        limit = self._queue_limit(size)
         proc = self._proc
         if proc is None or proc.stdout is None:
             return
@@ -570,7 +676,7 @@ class StreamPlayer(QObject):
             #   放开锁再睡  → 24.7fps，tick 95 分位 0.6ms、最坏 1ms
             # 锁只用于保护队列本身，睡眠不属于临界区。
             with self._lock:
-                full = len(self._queue) >= self.MAX_QUEUE
+                full = len(self._queue) >= limit
             if full:
                 time.sleep(0.005)
                 continue
@@ -597,6 +703,27 @@ class StreamPlayer(QObject):
         if reader and reader.is_alive():
             reader.join(timeout=1.0)
 
+    def _apply_audio_sync(self, now: float) -> None:
+        """把音频通道量到的真实起点折成画面时钟的**一次性**修正。
+
+        进度行里的位置是「声音已经走到哪里」，加上读到之后经过的墙钟时间，就是
+        此刻声音的真实位置。画面时钟比它快就把表往后挪一点（画面停一下等它），
+        慢就往前挪——后者会让这一拍直接跳帧，走的是已有的丢帧追赶逻辑。
+
+        只校正一次（读完即清）；差值在 30ms 以内视为已经在同一处，超过 1 秒则
+        说明读到的是别的起点的行，两种情况都不动——宁可不同步也不要乱甩。
+        """
+        sync, self._audio_sync = self._audio_sync, None
+        if sync is None or self._clock_start is None:
+            return
+        position_then, wall_then = sync
+        audio_now = position_then + (now - wall_then)
+        video_now = self._clock_origin + (now - self._clock_start)
+        delta = audio_now - video_now
+        if abs(delta) < 0.03 or abs(delta) > 1.0:
+            return
+        self._clock_start -= delta
+
     def _on_tick(self) -> None:
         size = self._frame_size()
         frame_duration = 1.0 / float(self._fps)
@@ -616,7 +743,10 @@ class StreamPlayer(QObject):
 
         # 位置由墙钟决定，而不是"取了几帧"。clock_origin 是本段起点，加上真实
         # 经过的时间就是此刻应处的位置——解码慢了也是这个值，不会被拖住。
-        elapsed = time.perf_counter() - self._clock_start
+        now = time.perf_counter()
+        # 声音真正开始走之前别让画面抢跑：拿到音频通道的量测值就修一次钟
+        self._apply_audio_sync(now)
+        elapsed = now - self._clock_start
         self._position = self._clock_origin + elapsed
 
         # 这一段播完了就给个小余量收尾（余量是为了别把正好落在 end 上的最后一帧切掉）

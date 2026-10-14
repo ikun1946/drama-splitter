@@ -183,6 +183,100 @@ class TestPlayback:
         player.set_source(None)
         assert player._frame_size() == (0, 0)
 
+    def test_stream_command_pins_a_constant_frame_grid(self, qapp):
+        """变帧率素材也要按恒定网格出帧：序号 ÷ 帧率的换算与音频共用同一把尺。"""
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("phone.mp4", size=(1280, 720))
+        player.set_fps(Fraction(71575, 2999))      # 变帧率素材的 avg_frame_rate
+
+        cmd = player._build_stream_command(3.0)
+        assert cmd[cmd.index("-fps_mode") + 1] == "cfr", (
+            "变帧率素材要转成恒定网格，否则画面相对音频忽前忽后"
+        )
+        assert float(cmd[cmd.index("-r") + 1]) == pytest.approx(23.866, abs=0.001), (
+            "网格帧率必须与播放器计时用的帧率是同一个值"
+        )
+        assert cmd[cmd.index("-ss") + 1] == "3.000000"
+
+    def test_queue_limit_follows_frame_bytes(self, qapp):
+        """队列上限按帧字节数换算：高分辨率不能把内存吃光。"""
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        assert player._queue_limit((960, 540)) == player.MAX_QUEUE, "原尺寸保持原上限"
+        limit = player._queue_limit((1920, 1080))
+        assert 4 <= limit < player.MAX_QUEUE
+        assert limit * 1920 * 1080 * 3 <= player.QUEUE_BUDGET_BYTES
+
+    def test_decode_width_follows_the_canvas(self, qapp):
+        """解码宽度跟着画面区走：固定 960 在缩放屏幕上要被放大一遍。"""
+        from app.gui.frame_source import FrameDecoder, StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("a.mp4", size=(1920, 1080))
+        assert player._frame_size() == (960, 540)
+
+        player.set_max_width(1440)
+        assert player._frame_size() == (1440, 810), "改了上限要立刻重算输出尺寸"
+
+        player.set_max_width(960)
+        assert player._frame_size() == (960, 540)
+
+        decoder = FrameDecoder()
+        decoder.set_source("a.mp4", size=(3840, 2160))
+        assert decoder.output_size() == (1280, 720)
+        decoder.set_max_width(1920)
+        assert decoder.output_size() == (1920, 1080)
+
+    def test_width_change_while_playing_waits_for_the_next_take(
+        self, qapp, monkeypatch
+    ):
+        """播放中改宽度不能立刻生效：读者线程还在按旧尺寸出帧，画面会花。"""
+        import threading
+
+        from app.gui import frame_source
+
+        player = frame_source.StreamPlayer()
+        player.set_audio_enabled(False)
+        release = threading.Event()
+
+        class _Stream:
+            def read(self, n):
+                release.wait(5.0)
+                return b""
+
+        class _Proc:
+            stdout = _Stream()
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(frame_source.subprocess, "Popen", lambda cmd, **kw: _Proc())
+        player._ffmpeg = "ffmpeg.exe"
+        player.set_source("drama.mp4", size=(1920, 1080))
+        assert player._frame_size() == (960, 540)
+
+        player.play()
+        try:
+            player.set_max_width(1440)
+            assert player._frame_size() == (960, 540), (
+                "读者线程还在按旧尺寸出帧，这时换尺寸会花屏"
+            )
+        finally:
+            release.set()
+            player.stop()
+
     def test_play_streams_frames_and_advances(self, qapp, binaries, assets):
         """真播放 1.2 秒：必须产出画面且位置推进（不靠目测）。"""
         from PySide6.QtCore import QTimer
@@ -500,6 +594,187 @@ class TestPreviewAudio:
         assert not player.is_playing
         assert audio[0].terminated, "播完必须收声"
         assert player._audio is None
+
+    def test_audio_command_asks_ffplay_for_its_progress_line(self, qapp):
+        """画面时钟要靠 ffplay 自己报的进度行对齐，命令里必须带 -stats。"""
+        from pathlib import Path
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("drama.mp4", size=(320, 180))
+        player._ffplay = Path("ffplay.exe")
+        cmd = player._audio_command(0.0)
+        assert cmd is not None and "-stats" in cmd
+
+    def test_audio_progress_line_becomes_the_sync_point(self, qapp):
+        """ffplay 的第一条真实进度行要记成 (位置, 墙钟)；起播的 nan 行不算。"""
+        import os
+        import threading
+        import time as _time
+
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player.set_source("drama.mp4", size=(320, 180))
+
+        read_fd, write_fd = os.pipe()
+
+        class _Stream:
+            def fileno(self):
+                return read_fd
+
+        class _Proc:
+            stderr = _Stream()
+
+        os.write(write_fd, b"    nan M-A:    nan fd=   0 aq=    0KB\r")
+        os.write(write_fd, b"   0.25 M-A:  0.000 fd=   0 aq=    0KB\r")
+        thread = threading.Thread(
+            target=player._drain_audio_stats, args=(_Proc(), 0), daemon=True
+        )
+        thread.start()
+        deadline = _time.time() + 3.0
+        while player._audio_sync is None and _time.time() < deadline:
+            _time.sleep(0.01)
+        os.close(write_fd)          # 写端一关，读线程就收到 EOF 自己退出
+        thread.join(timeout=2.0)
+        os.close(read_fd)
+
+        assert player._audio_sync is not None, (
+            "读到第一条真实进度行就该记下来；起播的 nan 行不是位置"
+        )
+        position, wall = player._audio_sync
+        assert position == pytest.approx(0.25)
+        assert wall <= _time.perf_counter()
+        assert not thread.is_alive(), (
+            "进程收尾后读线程必须退出：管道没人读会把 ffplay 堵死"
+        )
+
+    def test_audio_sync_waits_for_the_sound_once(self, qapp):
+        """声音晚 0.3 秒：画面时钟挪到声音起步那一刻，并且只挪一次。"""
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player._clock_origin = 0.0
+        player._clock_start = 100.0
+        # 读到这行时音频才走到 0.0，而那一刻墙钟已经是 100.3
+        player._audio_sync = (0.0, 100.3)
+
+        player._apply_audio_sync(100.3)
+
+        assert player._clock_start == pytest.approx(100.3), (
+            "画面比声音早跑了 0.3 秒，时钟要挪到声音起步的那一刻"
+        )
+        assert player._audio_sync is None, "只校正一次，用完即清"
+        player._apply_audio_sync(100.4)
+        assert player._clock_start == pytest.approx(100.3)
+
+    def test_audio_sync_ignores_absurd_offsets(self, qapp):
+        """差 5 秒是别的起点的行、差 0 本来就同步——两种情况都不许动时钟。"""
+        from app.gui.frame_source import StreamPlayer
+
+        player = StreamPlayer()
+        player._clock_origin = 0.0
+        player._clock_start = 100.0
+
+        player._audio_sync = (5.0, 100.0)
+        player._apply_audio_sync(100.0)
+        assert player._clock_start == pytest.approx(100.0)
+
+        player._audio_sync = (0.0, 100.0)
+        player._apply_audio_sync(100.0)
+        assert player._clock_start == pytest.approx(100.0)
+
+    def test_pause_drops_a_pending_sync_point(self, qapp, monkeypatch):
+        """停下就作废量测值，免得下一段播放拿上一段的行进钟。"""
+        player, _spawned, _procs = self._player(monkeypatch)
+        player.set_source("drama.mp4", size=(320, 180))
+        player.play()
+        player._audio_sync = (0.4, 50.0)      # 假装读线程刚好读过
+        player.pause()
+        assert player._audio_sync is None
+        assert not player.is_playing
+
+
+class TestPreviewSharpness:
+    """回归：预览画面在高缩放屏幕上发虚（按逻辑尺寸建位图，Qt 又放大一次）。"""
+
+    def test_preview_paints_at_full_physical_resolution(self, qapp):
+        """画面要按物理像素贴上去：按逻辑尺寸建位图，Qt 还得再放大一遍（发虚）。"""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QImage, QPainter
+
+        from app.gui.widgets.media_preview import MediaPreview
+
+        preview = MediaPreview()
+        preview._device_pixel_ratio = lambda: 2.0      # 模拟 200% 缩放的屏幕
+        preview.resize(1280, 800)
+        preview.layout().activate()
+        view = preview.view.size()
+        assert view.width() >= 400 and view.height() >= 240, view
+
+        # 画面按「画面区 x 缩放比」给足像素。2 像素宽的竖条就是分辨率标尺：
+        # 只要被放大过一遍，屏幕上就会变成 4 像素宽。
+        physical_w, physical_h = view.width() * 2, view.height() * 2
+        image = QImage(physical_w, physical_h, QImage.Format.Format_RGB888)
+        painter = QPainter(image)
+        for x in range(0, physical_w, 2):
+            color = QColor("#ff0000") if (x // 2) % 2 == 0 else QColor("#0000ff")
+            painter.fillRect(QRect(x, 0, 2, physical_h), color)
+        painter.end()
+
+        preview.set_image(image)
+
+        target = QImage(physical_w, physical_h, QImage.Format.Format_RGB888)
+        target.setDevicePixelRatio(2.0)
+        target.fill(QColor("#000000"))
+        preview.view.render(target)
+
+        row = [target.pixelColor(x, physical_h // 2).name() for x in range(physical_w)]
+        runs: list[list] = []
+        for color in row:
+            if runs and runs[-1][0] == color:
+                runs[-1][1] += 1
+            else:
+                runs.append([color, 1])
+
+        band_widths = [width for color, width in runs if color in ("#ff0000", "#0000ff")]
+        assert band_widths.count(2) >= 8, (
+            f"屏幕上应是 2 像素宽的原始条带（按物理像素贴图）；实际 {runs[:8]}"
+        )
+        assert set(band_widths) <= {1, 2}, (
+            f"出现超过 2 像素的条带，说明画面被放大过：{runs[:8]}"
+        )
+        assert len(set(row)) <= 3, (
+            f"除红/蓝/底色外还混出别的颜色，说明被重新采样过：{sorted(set(row))}"
+        )
+
+    def test_preview_decode_width_follows_canvas_and_dpr(self):
+        """解码宽度 = 画面区逻辑宽度 × 屏幕缩放比，夹在 960–1920 之间。"""
+        from app.gui.widgets.stage_view import preview_decode_width
+
+        assert preview_decode_width(640, 1.0) == 960, "小画面保持原下限"
+        assert preview_decode_width(1200, 1.25) == 1500, "要按物理像素算，别只算逻辑像素"
+        assert preview_decode_width(4000, 2.0) == 1920, "上限护栏：4K 素材不能把内存吃光"
+
+    def test_stage_view_decodes_at_the_canvas_width(self, window, qapp, assets):
+        """取帧解码器与播放器必须吃同一个宽度，且跟着画面区（物理像素）走。"""
+        from app.gui.widgets.stage_view import preview_decode_width
+
+        _import_and_wait(window, qapp, assets["cfr"])
+        stage = window.workbench.stage_view
+        view = stage.preview.view
+        original = view.size()
+        view.resize(1400, 800)          # 离屏窗口不会再被布局掰回去
+        try:
+            stage.set_project()
+            expected = preview_decode_width(view.width(), view.devicePixelRatioF())
+            assert expected > 960, "画面区比 960 物理像素宽时解码宽度要跟上"
+            assert stage.player._max_width == expected
+            assert stage.decoder._max_width == expected
+        finally:
+            view.resize(original)
+            stage.set_project()
 
 
 def _import_and_wait(window, qapp, path, timeout: float = 30.0) -> None:

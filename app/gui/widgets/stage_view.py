@@ -27,6 +27,22 @@ from .timeline import TimelineRuler
 
 __all__ = ["StageView"]
 
+# 预览解码宽度的下限与上限：
+#   下限 960 —— 原来写死的值，画面再小也别比原来更糊；
+#   上限 1920 —— 内存与解码成本的护栏（原始帧进队列，4K 会按百兆算）。
+PREVIEW_MIN_WIDTH = 960
+PREVIEW_MAX_WIDTH = 1920
+
+
+def preview_decode_width(view_width: int, dpr: float) -> int:
+    """画面区真正需要的解码宽度：按**物理像素**算，再夹到上下限之间。
+
+    解码宽度以前是写死的 960：在 125% / 150% 缩放的屏幕上，画面区要的物理
+    像素比这多，每一帧都得先「解码 → 放大」一遍，看起来发虚。
+    """
+    needed = int(round(max(0, int(view_width)) * max(1.0, float(dpr))))
+    return max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, needed))
+
 
 class StageView(QWidget):
     position_changed = Signal(object)          # Fraction
@@ -109,6 +125,8 @@ class StageView(QWidget):
         # 换源时停掉后台取帧线程：它持有旧 decoder，继续跑会读到旧文件。
         # 紧接着的 goto() 会用新源做一次同步取帧，画面不会空着。
         self.scrubber.stop()
+        # 预览解码宽度跟着画面区走（屏幕缩放比与窗口尺寸都会变）
+        self._sync_preview_resolution()
         # 把已探测到的分辨率交给解码器：否则第一次取帧会在 GUI 线程里同步跑
         # 一次 ffprobe（大文件上可见卡顿）
         self.decoder.set_source(
@@ -131,6 +149,21 @@ class StageView(QWidget):
         # 是「尚未选择源文件」的占位文字），要等用户点「下一帧」「−1s」或
         # 拖时间轴触发 goto() 才会出图——看起来像"导入后没有画面"。
         self.goto(self.position)
+
+    def _sync_preview_resolution(self) -> None:
+        """把预览解码宽度对齐到画面区实际需要的物理像素。
+
+        取帧解码器与流式播放器吃同一个值：两边宽度不一致的话，拖时间轴看到的
+        画面和播放时看到的会不一样清晰。
+        """
+        view = self.preview.view
+        width = preview_decode_width(view.width(), view.devicePixelRatioF())
+        self.player.set_max_width(width)
+        self.decoder.set_max_width(width)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._sync_preview_resolution()
 
     def refresh_theme(self) -> None:
         """主题切换后自绘控件需要重绘（时间轴静态层带主题色）。"""

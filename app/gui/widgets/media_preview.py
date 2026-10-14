@@ -17,7 +17,7 @@ btn_play 是播放与暂停**共用**的一个键：由 set_playing() 在「▶ 
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -135,16 +135,34 @@ class MediaPreview(QWidget):
         self.view.setPixmap(QPixmap())
         self.view.setText(text)
 
+    def _device_pixel_ratio(self) -> float:
+        """画面区所在屏幕的缩放比。
+
+        位图要按**物理像素**建、再标上缩放比：按逻辑尺寸建的话，Qt 把它贴到
+        高缩放屏幕上时还得再放大一次，画面就发虚（时间轴文字此前是同一种病）。
+        """
+        try:
+            return max(1.0, float(self.view.devicePixelRatioF()))
+        except AttributeError:      # 没有该接口的旧 Qt
+            return 1.0
+
     def _repaint(self) -> None:
         if self._image is None:
             return
         self.view.setText("")
         pixmap = QPixmap.fromImage(self._image)
+        dpr = self._device_pixel_ratio()
+        size = self.view.size()
+        target = QSize(
+            max(1, int(round(size.width() * dpr))),
+            max(1, int(round(size.height() * dpr))),
+        )
         scaled_pix = pixmap.scaled(
-            self.view.size(),
+            target,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        scaled_pix.setDevicePixelRatio(dpr)
         # 在画面右下角绘制 HUD（帧号 / PTS）
         if self._frame_index is not None:
             self._overlay_hud(scaled_pix)
@@ -163,8 +181,11 @@ class MediaPreview(QWidget):
         metrics = painter.fontMetrics()
         w = metrics.horizontalAdvance(text) + 12
         h = metrics.height() + 6
-        x = pixmap.width() - w - 8
-        y = pixmap.height() - h - 8
+        # 画笔坐标是**逻辑**坐标（位图按逻辑画、按物理存），所以定位要用
+        # 逻辑尺寸，不能拿 width()/height() 那对物理像素值来算
+        dpr = max(1.0, float(pixmap.devicePixelRatio()))
+        x = pixmap.width() / dpr - w - 8
+        y = pixmap.height() / dpr - h - 8
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(0, 0, 0, 160))
         painter.drawRoundedRect(x, y, w, h, 4, 4)

@@ -70,7 +70,8 @@
 以及**用已导出的成片连看相邻两集**（后者能发现编码层面的衔接问题，前者只能验证规划）。
 播放时能听到原声：画面是 FFmpeg 解帧直出（逐帧准确），声音由并行的 `ffplay`
 只放音频，与画面一起启停；放的是左栏选中的那条主对白轨。这套 FFmpeg 若没带
-`ffplay`（精简构建），预览会自动退回无声，不影响画面与导出。
+`ffplay`（精简构建），预览会自动退回无声，不影响画面与导出。两条时钟的起播差
+用 `ffplay` 自己报的进度行做一次性对齐，画面解码宽度跟着画面区走——见下面第 13、14 条。
 
 ## 模型下载（界面内完成）
 
@@ -699,6 +700,34 @@ testdata/          合成素材（不入版本库）
     时间轴当初漏了。现在静态层按 DPR 建图、DPR 也进缓存键（换屏会重建），并把两端
     时间码从 `TEXT_MUTED` 换成正常文字色——浅灰压浅底本身就发虚。回归测试：
     `test_static_layer_is_dpi_aware`、`test_dpi_change_rebuilds_static_layer`。
+
+
+13. **预览画面「发虚」：解码宽度写死 960，贴图又按逻辑像素建。**
+    两处叠在一起：① `StreamPlayer._max_width` 固定 960，而 `set_max_width()` 从没有
+    人调用——125% / 150% 缩放的屏幕上画面区要的物理像素比这多，每一帧都得先
+    「解码 → 放大」一遍；② `MediaPreview._repaint()` 把位图按**逻辑**尺寸建、DPR 恒为 1，
+    Qt 贴到高缩放屏幕上时还要再放大一次（与第 12 条的时间轴是同一种病）。
+    现在解码宽度按「画面区逻辑宽度 × 屏幕缩放比」给（夹在 960–1920 之间，换窗口尺寸
+    时跟着变，播放中不换以免按旧尺寸出的帧被新尺寸解读），位图按物理像素建并标上
+    DPR；队列上限改成按帧字节数换算（96MB 预算），否则 1920 宽的原始帧按 48 帧堆起来
+    会吃掉几百兆内存。回归测试：`test_preview_paints_at_full_physical_resolution`
+    （按条带宽度断言：被放大过一遍就会从 2 像素变成 4 像素宽）、
+    `test_preview_decode_width_follows_canvas_and_dpr`、`test_decode_width_follows_the_canvas`、
+    `test_queue_limit_follows_frame_bytes`。
+
+
+14. **起播时声音总是晚半拍：画面时钟与 ffplay 各起各的表。**
+    画面第一帧到手就起表（本机实测 55–68ms），而 ffplay 还要创建进程、打开声卡、
+    填好缓冲才出声（同机上第一条进度行出现在 ~139ms）——两条时钟从起播那一刻就差
+    了这一截，且此后不再校正；暂停 / 继续 / 拖动后重新起播都会再造一次。
+    现在让 ffplay 用 `-stats` 把自己的真实位置报告到 stderr，读到第一条就折成画面
+    时钟的一次性修正（差 30ms 以内不动，超过 1 秒视为别的起点的行也不动）；读线程会
+    一直把管道读空——不读的话 ffplay 写满 stderr 缓冲会卡住不出声。
+    同批还改了取帧网格：`-fps_mode cfr -r <名义帧率>`。播放器按「第 k 帧 = k/fps 时刻」
+    取帧，源若是变帧率（手机拍摄常见），「序号 ÷ 帧率」与真实时间戳对不上，画面就会
+    相对音频忽前忽后（本仓库的 `vfr_120s.mp4` 实测最大偏差 ≈ 77ms）。回归测试：
+    `test_audio_sync_waits_for_the_sound_once`、`test_audio_sync_ignores_absurd_offsets`、
+    `test_audio_progress_line_becomes_the_sync_point`、`test_stream_command_pins_a_constant_frame_grid`。
 
 ## 验收证据
 
