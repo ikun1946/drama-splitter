@@ -631,6 +631,9 @@ class AnalysisWorker(BaseWorker):
         try:
             outcome = judge_candidates(
                 candidates, index, judge, strategy=strategy, budget_requests=24,
+                # 点了「结束解析」就别再把剩下的候选判完（一次判定好几秒，
+                # 用户实测干等了一分钟）
+                cancel_check=lambda: self.cancelled,
                 on_progress=lambda done, total: self.stage_progress.emit(
                     f"语义判断 {done}/{total}", 0.05 + 0.8 * done / max(1, total)
                 ),
@@ -642,6 +645,11 @@ class AnalysisWorker(BaseWorker):
         self.stage_log.emit(outcome.describe())
         for note in outcome.notes:
             self.stage_log.emit(f"  {note}")
+        if self.cancelled:
+            # 语义判断期间被取消：不要再往下求解/落盘，按取消收尾
+            self.finish_cancelled()
+            self.failed.emit("已取消")
+            return
 
         def baseline():
             """§20.3 的规则基线（等分），用于与 DP 结果对照。"""

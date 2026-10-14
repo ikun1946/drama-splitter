@@ -862,3 +862,22 @@ testdata/          合成素材（不入版本库）
     正则带偏；没有内嵌 chat 模板的 GGUF 自动退回裸补全。输出预算 160 → 256（思考要占
     额度，太紧会把结论挤掉）。回归测试：``test_local_judge_prefers_the_chat_template``、
     ``test_thinking_block_is_stripped_before_parsing``。
+
+
+21. **点了「结束解析」还要等一分多钟：语义判断阶段没有中途取消点。**
+    语义判断是**逐个候选**跑的（最多 24 次），而 ``judge_candidates`` 此前没有任何取消检查
+    ——用户点了停止之后，剩下的二十来次推理照样跑完（实测干等约一分钟；本地 2B 模型一次
+    判定 4–9 秒，数量正好对得上）。
+    现在每个候选之前问一次 ``cancel_check``，取消即收手，并把「已取消：语义判断在完成 N 次后
+    提前结束（还剩 M 个候选没判）」写进日志；worker 在语义阶段之后也会再检查一次，不再往下
+    求解/落盘。正在跑的那一次推理是原生阻塞调用、无法打断，所以最多还会多等**一次**判定的
+    时间。回归测试：
+    ``tests/test_semantic.py::TestJudgeCandidates::test_cancel_stops_before_spending_more_requests``。
+
+22. **本地语义判断跑在 CPU（GPU 占用与显存都很低）——这不是配置错。**
+    应用内装的 ``llama-cpp-python`` 是**CPU-only 预编译轮子**（``llama_supports_gpu_offload()``
+    为 False，包里只有 ``ggml-cpu.dll``），代码也没传显卡卸载层数，所以语义判断必然跑在 CPU；
+    GPU 那条链路只服务**语音转写**（CTranslate2），而转写命中缓存时 GPU 自然是闲的。
+    想让语义判断也上显卡，得换 CUDA 版轮子（abetlen 官方索引，体积大得多）并传
+    ``n_gpu_layers=-1``，或改用 Ollama（它自己会用显卡）。这是个**下载体积 vs 速度**的取舍，
+    要用户拍板，不做默认切换。

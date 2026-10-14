@@ -1023,6 +1023,7 @@ def judge_candidates(
     budget_requests: int = 24,
     top_k: int | None = None,
     on_progress: "Callable[[int, int], None] | None" = None,
+    cancel_check: "Callable[[], bool] | None" = None,
 ) -> JudgeOutcome:
     """对候选点执行语义判断，并**就地**更新候选的评分与审核状态。
 
@@ -1031,6 +1032,11 @@ def judge_candidates(
     - 模型不可用时整体降级，**不给出任何结论**；
     - 判定为 poor_cut 的候选会被扣分，好切点加分——调整量是等级到排序分的
       映射（§11.3），不是概率。
+
+    ``cancel_check()`` 在**每个候选之前**问一次：用户点了「结束解析」就立刻收手，
+    不再发下一次昂贵推理。正在跑的那一次调用是原生阻塞、没法打断，所以最多还会
+    多等一次判定的时间（实测本地 2B 模型 4–9 秒）——总比把剩下二十来次全跑完
+    好得多（用户实测点了停止还等了一分钟）。
 
     ``on_progress(done, total)`` 在每处理完一个候选（含被跳过的）后回调一次。
     语义判断是「整体规划」里唯一的长耗时子步骤（云端一次请求数秒），不给进度
@@ -1058,6 +1064,12 @@ def judge_candidates(
     processed = [0]
     judged_scores: dict[int, float] = {}
     for point in ordered:
+        if cancel_check is not None and cancel_check():
+            outcome.notes.append(
+                f"已取消：语义判断在完成 {outcome.judged} 次后提前结束"
+                f"（还剩 {total - processed[0]} 个候选没判）"
+            )
+            break
         if budget.remaining() <= 0:
             outcome.skipped_by_budget += 1
             processed[0] += 1

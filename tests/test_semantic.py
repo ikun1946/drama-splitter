@@ -498,6 +498,38 @@ class TestJudgeCandidates:
         )
         return candidates, index
 
+    def test_cancel_stops_before_spending_more_requests(self):
+        """点了「结束解析」就不该再发下一次推理。
+
+        回归：语义判断是逐个候选跑的（最多 24 次），此前**没有中途取消点**——用户实测
+        点了停止还干等了一分钟左右。现在每个候选之前问一次取消标志。
+        """
+        from app.core.semantic import JudgmentVerdict
+
+        candidates, index = self.build(count=6)
+        calls: list[int] = []
+
+        class _CountingJudge:
+            def available(self):
+                return True
+
+            def describe(self):
+                return "计数判定"
+
+            def judge(self, request):
+                calls.append(1)
+                return JudgmentVerdict(
+                    verdict=VERDICT_GOOD, evidence=["固定"], judge_id="counting"
+                )
+
+        outcome = judge_candidates(
+            candidates, index, _CountingJudge(), strategy="story",
+            cancel_check=lambda: len(calls) >= 2,
+        )
+
+        assert len(calls) == 2, f"取消后不该再发推理（实际发了 {len(calls)} 次）"
+        assert any("已取消" in note for note in outcome.notes), outcome.notes
+
     def test_degraded_mode_leaves_everything_pending(self):
         """降级 = 没有判断：分数不变、状态保持 pending、留下记录。"""
         candidates, index = self.build()
