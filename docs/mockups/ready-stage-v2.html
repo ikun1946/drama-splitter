@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>素材就绪页 · 布局改版模型 v2</title>
+<style>
+  :root {
+    --primary:#3b6cb8; --primary-hover:#4a7bc6; --primary-soft:#e8f0fc;
+    --danger:#b3261e; --danger-soft:#fbe6e4; --warn:#9a6700; --warn-soft:#fbf2dd;
+    --success:#2e7d32; --success-soft:#e7f4ea; --neutral:#5f6672; --neutral-soft:#eef0f4;
+    --bg:#f4f5f9; --bg-alt:#ffffff; --bg-hover:#eef1f7; --bg-selected:#e8f0fc; --bg-log:#fafbfd;
+    --border:#e2e5ec; --border-strong:#c6cbd6; --text:#1c1f26; --text-muted:#5f6672;
+    --text-disabled:#a2a8b4; --tl-track:#e4e7ef; --tl-segment:#f8f9fc; --tl-segment-alt:#eef1f7;
+    --video-bg:#0e0f13; --video-border:#1a1c22; --video-text:#bbbbbb; --hud-bg:#1a1c22; --hud-text:#cfd2d8;
+    --card-shadow:0 1px 2px rgba(20,24,32,.05);
+    --frame-bg:#e9ebf1;
+  }
+  body.dark {
+    --primary:#4aa6ff; --primary-hover:#6bb7ff; --primary-soft:#1c2c3d;
+    --danger:#f4685c; --danger-soft:#3a2222; --warn:#e0b355; --warn-soft:#3a3320;
+    --success:#6cc47a; --success-soft:#1f3325; --neutral:#8a8f98; --neutral-soft:#2a2d32;
+    --bg:#181a1d; --bg-alt:#202226; --bg-hover:#2a2d32; --bg-selected:#2a3644; --bg-log:#1b1d21;
+    --border:#33373d; --border-strong:#4a4f57; --text:#e6e8ec; --text-muted:#9aa0a8;
+    --text-disabled:#5c6169; --tl-track:#2a2d32; --tl-segment:#23262b; --tl-segment-alt:#1e2126;
+    --video-bg:#0e0f13; --video-border:#26292f; --video-text:#bbbbbb; --hud-bg:#1a1c22; --hud-text:#cfd2d8;
+    --card-shadow:0 1px 2px rgba(0,0,0,.35);
+    --frame-bg:#101215;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; }
+  body {
+    background:#5d6472; font-family:"Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;
+    color:var(--text); padding:18px; display:flex; flex-direction:column; align-items:center; gap:14px;
+  }
+  body.dark { background:#0b0c0e; }
+  .page-head { width:1440px; color:#fff; display:flex; align-items:baseline; gap:12px; }
+  body.dark .page-head { color:#e6e8ec; }
+  .page-head h1 { font-size:15px; font-weight:600; margin:0; }
+  .page-head .sub { font-size:12px; opacity:.75; }
+  .page-head .spacer { flex:1; }
+  .tools { display:flex; gap:8px; }
+
+  .window {
+    width:1440px; height:900px; background:var(--bg); border-radius:10px; overflow:hidden;
+    display:flex; flex-direction:column; box-shadow:0 18px 50px rgba(0,0,0,.35);
+    border:1px solid rgba(0,0,0,.25);
+  }
+  .menubar { height:30px; display:flex; align-items:center; gap:14px; padding:0 12px;
+             background:var(--bg-alt); border-bottom:1px solid var(--border); font-size:12px; }
+  .menubar .brand { font-weight:600; }
+  .menubar .menu { color:var(--text-muted); }
+  .docbar { height:46px; display:flex; align-items:center; gap:10px; padding:0 14px;
+            background:var(--bg-alt); border-bottom:1px solid var(--border); }
+  .badge-type { font-size:10px; font-weight:700; letter-spacing:.4px; color:var(--primary);
+                background:var(--primary-soft); border-radius:5px; padding:2px 6px; }
+  .doc-name { font-size:15px; font-weight:600; }
+  .doc-meta { font-size:12px; color:var(--text-muted); }
+  .saved { font-size:12px; color:var(--text-muted); }
+  .spacer { flex:1; }
+
+  .body { flex:1; display:flex; gap:12px; padding:12px 14px; min-height:0; }
+  .col { display:flex; flex-direction:column; gap:12px; min-height:0; }
+  .left { width:300px; flex:0 0 300px; }
+  .right { width:288px; flex:0 0 288px; }
+  .center { flex:1; min-width:0; }
+
+  .card { background:var(--bg-alt); border:1px solid var(--border); border-radius:12px;
+          box-shadow:var(--card-shadow); padding:12px 14px; }
+  .card > h2 { margin:0 0 10px; font-size:13px; font-weight:600; }
+  .card-h { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .card-h .bar { width:3px; height:13px; border-radius:2px; background:var(--primary); }
+  .card-h h2 { margin:0; font-size:13px; font-weight:600; }
+
+  .kv { display:grid; grid-template-columns:52px 1fr; gap:6px 10px; align-items:start; }
+  .kv dt { color:var(--text-muted); font-size:12px; line-height:19px; }
+  .kv dd { margin:0; font-size:12.5px; line-height:19px; }
+  .kv dd.mono { font-family:Consolas,"Cascadia Mono",monospace; }
+  .wrap { word-break:break-all; color:var(--text-muted); font-size:12px; }
+
+  .steps { display:flex; flex-direction:column; gap:8px; }
+  .step { display:flex; align-items:flex-start; gap:8px; font-size:12.5px; color:var(--text-muted); line-height:18px; }
+  .step .n { flex:0 0 18px; height:18px; border-radius:50%; background:var(--neutral-soft); color:var(--text-muted);
+             font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .step.done .n { background:var(--success-soft); color:var(--success); }
+  .step.cur { color:var(--text); font-weight:600; }
+  .step.cur .n { background:var(--primary); color:#fff; }
+  .step em { font-style:normal; color:var(--success); font-weight:600; font-size:11.5px; }
+  .select { display:flex; align-items:center; justify-content:space-between; gap:8px;
+            border:1px solid var(--border-strong); border-radius:8px; padding:7px 10px;
+            font-size:12.5px; background:var(--bg-alt); }
+  .select .caret { color:var(--text-muted); font-size:11px; }
+  .hint { margin:8px 0 0; font-size:11.5px; color:var(--text-muted); line-height:17px; }
+
+  .frame { position:relative; flex:1; min-height:0; border-radius:12px; overflow:hidden;
+           background:var(--video-bg); border:1px solid var(--video-border);
+           display:flex; align-items:center; justify-content:center; }
+  .frame .placeholder { color:var(--video-text); font-size:13px; opacity:.55; }
+  .chip { position:absolute; background:rgba(255,255,255,.10); color:#e7e9ee;
+          border:1px solid rgba(255,255,255,.16); backdrop-filter:blur(2px);
+          font-family:Consolas,monospace; font-size:11px; padding:3px 8px; border-radius:999px; }
+  .chip.tl { top:10px; left:10px; }
+  .chip.br { bottom:10px; right:10px; }
+  .chip.bl { bottom:10px; left:10px; }
+
+  .tl-head { display:flex; align-items:baseline; gap:8px; margin:10px 2px 6px; }
+  .tl-head .now { font-family:Consolas,monospace; font-size:16px; font-weight:600; }
+  .tl-head .total { font-family:Consolas,monospace; font-size:12px; color:var(--text-muted); }
+  .tl-head .frame-no { font-family:Consolas,monospace; font-size:12px; color:var(--text-muted); }
+
+  .timeline { background:var(--bg-alt); border:1px solid var(--border); border-radius:12px;
+              box-shadow:var(--card-shadow); padding:10px 12px 8px; }
+  .tl-track { position:relative; height:30px; border-radius:6px; background:var(--tl-track); overflow:visible; }
+  .tl-seg { position:absolute; inset:0; border-radius:6px; background:var(--tl-segment); }
+  .tl-ticks { position:absolute; inset:0; border-radius:6px; overflow:hidden;
+              background-image:linear-gradient(90deg, rgba(120,130,150,.35) 1px, transparent 1px);
+              background-size:60px 100%; opacity:.5; }
+  .playhead { position:absolute; top:-8px; bottom:-8px; width:2px; background:var(--primary); }
+  .playhead .knob { position:absolute; top:-6px; left:-4px; width:10px; height:10px; border-radius:50%;
+                    background:var(--primary); box-shadow:0 0 0 2px var(--bg-alt); }
+  .bubble { position:absolute; top:50%; left:8px; transform:translateY(-50%);
+            background:var(--primary); color:#fff; font-family:Consolas,monospace; font-size:11px;
+            padding:2px 7px; border-radius:999px; white-space:nowrap; }
+  .tl-labels { display:flex; justify-content:space-between; margin-top:6px;
+               font-family:Consolas,monospace; font-size:10.5px; color:var(--text-disabled); }
+
+  .controls { display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .group { display:flex; gap:8px; }
+  .divider { width:1px; height:22px; background:var(--border); }
+  .btn { border:1px solid var(--border-strong); background:var(--bg-alt); color:var(--text);
+         border-radius:10px; padding:8px 13px; font-size:12.5px; font-family:inherit; }
+  .btn.primary { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
+  .btn.lg { padding:9px 18px; font-size:13.5px; border-radius:10px; }
+  .btn.sm { padding:5px 10px; font-size:12px; }
+  .btn.ghost { background:transparent; }
+  .btn.micro { padding:6px 11px; font-family:Consolas,monospace; font-size:12px; color:var(--text-muted); }
+
+  .tabs { display:flex; gap:16px; padding:0 2px 8px; border-bottom:1px solid var(--border); }
+  .tab { font-size:12.5px; color:var(--text-muted); padding-bottom:6px; display:flex; align-items:center; gap:6px; }
+  .tab.active { color:var(--primary); font-weight:600; border-bottom:2px solid var(--primary); margin-bottom:-9px; }
+  .count { font-size:10.5px; background:var(--neutral-soft); color:var(--text-muted);
+           border-radius:999px; padding:1px 6px; font-weight:600; }
+  .ok-card { display:flex; flex-direction:column; align-items:center; text-align:center; gap:6px; padding:18px 14px; }
+  .ok-icon { width:34px; height:34px; border-radius:50%; background:var(--success-soft); color:var(--success);
+             display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:700; }
+  .ok-title { font-size:13.5px; font-weight:600; }
+  .ok-card .hint { margin:0; }
+  .next-step { background:var(--bg-alt); border:1px dashed var(--border-strong); border-radius:12px; padding:12px 14px; }
+  .next-step .ns-h { font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:6px; }
+  .next-step p { margin:0; font-size:12px; line-height:18px; color:var(--text-muted); }
+
+  .statusbar { height:56px; display:flex; align-items:center; gap:10px; padding:0 14px;
+               background:var(--bg-alt); border-top:1px solid var(--border); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--success); }
+  .statusbar .mono { font-family:Consolas,monospace; }
+  .sep { color:var(--text-disabled); }
+  .muted { color:var(--text-muted); font-size:12px; }
+
+  .badge { position:absolute; width:16px; height:16px; border-radius:50%; background:#e5484d; color:#fff;
+           font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;
+           box-shadow:0 1px 3px rgba(0,0,0,.35); z-index:5; }
+  .rel { position:relative; }
+  body.no-notes .badge { display:none; }
+
+  body.window-only { padding:0; gap:0; background:#5d6472; }
+  body.window-only .page-head, body.window-only .notes { display:none; }
+  body.window-only .window { border-radius:0; border:0; box-shadow:none; }
+  .notes { width:1440px; display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .note-card { background:var(--bg-alt); border-radius:12px; padding:14px 16px; border:1px solid var(--border);
+               box-shadow:var(--card-shadow); }
+  body.dark .note-card { background:#202226; }
+  .note-card h3 { margin:0 0 10px; font-size:13px; }
+  .note-card ol { margin:0; padding-left:20px; }
+  .note-card li { font-size:12.5px; line-height:1.75; margin-bottom:4px; }
+  .note-card li b { color:var(--primary); }
+</style>
+</head>
+<body>
+  <div class="page-head">
+    <h1>素材就绪页 · 布局改版模型 v2</h1>
+    <span class="sub">（静态示意图，1440 × 900，与真实界面同一套配色/字号；右上角可切深色、可关标注）</span>
+    <span class="spacer"></span>
+    <span class="tools">
+      <button class="btn sm" id="notesBtn">隐藏标注</button>
+      <button class="btn sm" id="themeBtn">切换深色主题</button>
+    </span>
+  </div>
+
+  <div class="window">
+    <div class="menubar">
+      <span class="brand">🎬 AI 短剧智能分集器</span>
+      <span class="menu">文件</span><span class="menu">工具</span><span class="menu">视图</span><span class="menu">帮助</span>
+    </div>
+
+    <div class="docbar rel">
+      <span class="badge" style="left:-9px; top:14px;">1</span>
+      <span class="badge-type">MP4</span>
+      <span class="doc-name">第3段.mp4</span>
+      <span class="doc-meta">1920×1080 · 30.000 fps · H.264</span>
+      <span class="spacer"></span>
+      <span class="saved">已自动保存 14:33</span>
+      <button class="btn ghost sm">重新解析</button>
+      <button class="btn ghost sm">更换视频</button>
+    </div>
+
+    <div class="body">
+      <aside class="col left">
+        <section class="card rel">
+          <span class="badge" style="left:-9px; top:12px;">2</span>
+          <div class="card-h"><span class="bar"></span><h2>素材</h2></div>
+          <dl class="kv">
+            <dt>文件</dt><dd>第3段.mp4</dd>
+            <dt>路径</dt><dd class="wrap" title="C:\Users\24123\Videos\萌宝导出\第3段.mp4">C:\Users\24123\Videos\萌宝导出\第3段.mp4</dd>
+            <dt>画面</dt><dd>1920 × 1080</dd>
+            <dt>帧率</dt><dd>30.000 fps</dd>
+            <dt>编码</dt><dd>H.264 · yuv420p</dd>
+            <dt>时长</dt><dd class="mono">00:10:14.700</dd>
+            <dt>大小</dt><dd>358 MB</dd>
+            <dt>音轨</dt><dd>1 条</dd>
+          </dl>
+        </section>
+
+        <section class="card rel">
+          <span class="badge" style="left:-9px; top:12px;">3</span>
+          <div class="card-h"><span class="bar" style="background:var(--neutral)"></span><h2>主对白音轨</h2></div>
+          <div class="select"><span>音轨 1 · aac · 44100 Hz · stereo</span><span class="caret">▾</span></div>
+          <p class="hint">只有一条音轨，已自动选择。</p>
+        </section>
+
+        <section class="card rel">
+          <span class="badge" style="left:-9px; top:12px;">10</span>
+          <div class="card-h"><span class="bar" style="background:var(--success)"></span><h2>接下来</h2></div>
+          <div class="steps">
+            <div class="step done"><span class="n">1</span><span>选定源片 <em>已完成</em></span></div>
+            <div class="step cur"><span class="n">2</span><span>点右下角「开始分析」，AI 找切点候选</span></div>
+            <div class="step"><span class="n">3</span><span>在预览里逐条核对、锁定切点</span></div>
+          </div>
+        </section>
+
+      </aside>
+
+      <main class="col center">
+        <div class="frame rel">
+          <span class="badge" style="left:-9px; top:-9px;">5</span>
+          <div class="placeholder">预览画面 · 逐帧检视（导入后此处显示真实帧）</div>
+          <div class="chip tl">1920×1080 · 30.000 fps</div>
+          <div class="chip br">帧 #417</div>
+        </div>
+
+        <div class="tl-head rel">
+          <span class="badge" style="left:-18px; top:0;">6</span>
+          <span class="now">00:00:13.909</span>
+          <span class="total">/ 00:10:14.700</span>
+          <span class="spacer"></span>
+          <span class="frame-no">帧 417 / 18441</span>
+        </div>
+
+        <div class="timeline">
+          <div class="tl-track">
+            <div class="tl-seg"></div>
+            <div class="tl-ticks"></div>
+            <div class="playhead" style="left:2.26%;">
+              <div class="bubble">00:00:13.909</div>
+              <div class="knob"></div>
+            </div>
+          </div>
+          <div class="tl-labels"><span>00:00:00.000</span><span>00:05:07.350</span><span>00:10:14.700</span></div>
+        </div>
+
+        <div class="controls rel">
+          <span class="badge" style="left:-18px; top:12px;">7</span>
+          <div class="group">
+            <button class="btn ghost">◀| 上一帧</button>
+            <button class="btn primary">▶ 播放</button>
+            <button class="btn ghost">|▶ 下一帧</button>
+          </div>
+          <div class="divider"></div>
+          <div class="group">
+            <button class="btn ghost">⊞ 切点前后</button>
+            <button class="btn ghost">⟳ 成片连看</button>
+          </div>
+          <span class="spacer"></span>
+          <div class="group">
+            <button class="btn micro">−5s</button>
+            <button class="btn micro">−1s</button>
+            <button class="btn micro">+1s</button>
+            <button class="btn micro">+5s</button>
+          </div>
+        </div>
+      </main>
+
+      <aside class="col right">
+        <div class="tabs rel">
+          <span class="badge" style="left:-18px; top:2px;">8</span>
+          <span class="tab active">问题 <b class="count">0</b></span>
+          <span class="tab">建议 <b class="count">0</b></span>
+          <span class="tab">日志</span>
+        </div>
+        <div class="card ok-card">
+          <div class="ok-icon">✓</div>
+          <div class="ok-title">没有问题</div>
+          <p class="hint">导入源片后，兼容性问题与方案校验结果会列在这里。</p>
+        </div>
+        <div class="next-step">
+          <div class="ns-h">下一步</div>
+          <p>点右下角「开始分析」：AI 按对白停顿给出切点候选，再回到这里逐条核对。</p>
+        </div>
+      </aside>
+    </div>
+
+    <div class="statusbar rel">
+      <span class="badge" style="left:-9px; top:19px;">9</span>
+      <span class="dot"></span>
+      <span>源片就绪</span>
+      <span class="sep">·</span><span class="mono">614.700 秒</span>
+      <span class="sep">·</span><span class="mono">30.000 fps</span>
+      <span class="sep">·</span><span>待分析</span>
+      <span class="spacer"></span>
+      <span class="muted">分集目标：默认（工具 → 分集设置）</span>
+      <button class="btn primary lg">▶ 开始分析</button>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note-card">
+      <h3>现在的问题（你在截图里能看到的）</h3>
+      <ol>
+        <li>左栏三张卡片各占一大块，<b>上下大片空白</b>，信息却挤成一行被裁掉。</li>
+        <li>文件路径被硬截断（<code>第3段.mp</code>），提示文案也被裁掉半句。</li>
+        <li>媒体信息一长串竖线分隔，<b>分辨率/帧率/编码要看半天</b>。</li>
+        <li>同一份信息在左栏、时间轴两端、底部状态栏<b>重复出现三次</b>。</li>
+        <li>九个控制按钮平均用力，<b>看不出哪个是主操作</b>。</li>
+        <li>时间轴又扁又空，播放头只是一根细线，<b>看不出当前位置</b>。</li>
+        <li>右栏空态拉满整列，一大片空白<b>没有告诉用户下一步该干什么</b>。</li>
+      </ol>
+    </div>
+    <div class="note-card">
+      <h3>这次的改动（按图上的编号）</h3>
+      <ol>
+        <li><b>顶栏收成一条</b>：文件名 + 规格 + 保存状态 + 两个次要操作，与正文之间加分隔线。</li>
+        <li><b>左栏三卡合一</b>：改成「标签 / 值」两列网格，去掉卡片里的空白。</li>
+        <li><b>音轨做成下拉</b>：一眼看到可选音轨，选中即生效（只有一条时自动选）。</li>
+        <li>路径单独一行、折行显示，鼠标悬停可看全（不再硬截断）。</li>
+        <li><b>预览成为绝对主体</b>：圆角深色画布，左上角规格、左下时长、右下帧号。</li>
+        <li><b>时间轴加高</b> + 刻度带 + 播放头气泡；当前时间 / 总时长 / 帧号集中在轴上方一行。</li>
+        <li><b>控制条分三组</b>：逐帧 · 检视 · 微调，只有「播放」是主色。</li>
+        <li><b>右栏空态紧凑化</b>：不再拉满整列，空态下方直接给「下一步」；导入后这里列问题。</li>
+        <li><b>底部只留状态 + 主按钮</b>，重复的规格信息移出，入口提示放在按钮左边。</li>
+        <li><b>左栏补一张「接下来」三步卡</b>：填掉原来的一片空白，第一次用的人也知道该点哪里。</li>
+      </ol>
+    </div>
+  </div>
+
+<script>
+  var hash = location.hash.replace('#', '').split(',');
+  if (hash.indexOf('dark') >= 0) { document.body.classList.add('dark'); }
+  if (hash.indexOf('bare') >= 0) { document.body.classList.add('no-notes'); }
+  if (hash.indexOf('window') >= 0) { document.body.classList.add('window-only'); }
+  var notesBtn = document.getElementById('notesBtn');
+  notesBtn.addEventListener('click', function () {
+    document.body.classList.toggle('no-notes');
+    notesBtn.textContent = document.body.classList.contains('no-notes') ? '显示标注' : '隐藏标注';
+  });
+  var themeBtn = document.getElementById('themeBtn');
+  themeBtn.addEventListener('click', function () {
+    document.body.classList.toggle('dark');
+    themeBtn.textContent = document.body.classList.contains('dark') ? '切换浅色主题' : '切换深色主题';
+  });
+</script>
+</body>
+</html>
