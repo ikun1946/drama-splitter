@@ -690,6 +690,16 @@ testdata/          合成素材（不入版本库）
     ``test_playback_keeps_up_with_source_frame_rate``（实测帧率须 ≥ 90% 源帧率；
     旧实现 19.0fps，会被判失败）。
 
+
+12. **时间轴上的时间码「发糊」：静态层位图没按屏幕缩放比建。**
+    `_rebuild_static()` 里写的是 `QPixmap(self.size())`——位图 DPR 恒为 1，而在 125% /
+    150% 缩放的屏幕上这个控件要被放大 1.25 / 1.5 倍：整张位图（时间码文字、刻度线、
+    集段边界）都被**插值放大**，于是"数字看着很模糊"。同一份代码里 `analysis_pane`
+    的缩略图一直是对的（`dpr = devicePixelRatioF(); pixmap.setDevicePixelRatio(dpr)`），
+    时间轴当初漏了。现在静态层按 DPR 建图、DPR 也进缓存键（换屏会重建），并把两端
+    时间码从 `TEXT_MUTED` 换成正常文字色——浅灰压浅底本身就发虚。回归测试：
+    `test_static_layer_is_dpi_aware`、`test_dpi_change_rebuilds_static_layer`。
+
 ## 验收证据
 
 在 120 秒 / 25fps / 3000 帧的合成素材上，切 4 集（每集 750 帧）：

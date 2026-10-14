@@ -143,6 +143,29 @@ class TestStaticLayerCache:
         _paint(ruler)
         assert ruler._static_rebuild_count == baseline + 1
 
+    def test_static_layer_is_dpi_aware(self, ruler, monkeypatch):
+        """静态层位图必须按 devicePixelRatio 建。
+
+        不设 DPR 的话，125%/150% 缩放的屏幕上这张位图会被插值放大——
+        时间码与刻度线全部发虚（用户报「数字看着很模糊」就是这个）。
+        """
+        monkeypatch.setattr(type(ruler), "devicePixelRatioF", lambda self: 2.0)
+        pixmap = ruler._rebuild_static()
+        assert pixmap.devicePixelRatio() == pytest.approx(2.0)
+        assert pixmap.width() == ruler.width() * 2
+        assert pixmap.height() == ruler.height() * 2
+
+    def test_dpi_change_rebuilds_static_layer(self, ruler, monkeypatch):
+        """换到缩放比不同的屏幕要重建，否则位图分辨率对不上。"""
+        ruler.set_project(_Media(), None, {}, None)
+        _paint(ruler)
+        before = ruler._static_rebuild_count
+        monkeypatch.setattr(type(ruler), "devicePixelRatioF", lambda self: 2.0)
+        _paint(ruler)
+        assert ruler._static_rebuild_count > before, (
+            "DPR 变了却没重建静态层，字会发虚"
+        )
+
     def test_error_marker_rebuilds_and_clears(self, ruler):
         ruler.set_project(_Media(), _plan(), {}, 1)
         _paint(ruler)

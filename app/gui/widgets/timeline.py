@@ -191,6 +191,9 @@ class TimelineRuler(QWidget):
         key = (
             self.width(),
             self.height(),
+            # 屏幕缩放比也是关键：换到另一块缩放不同的屏幕时必须重建，
+            # 否则那张位图的分辨率对不上，字会发虚。
+            self.devicePixelRatioF(),
             current_mode(),
             self._structure_key(),
             self._selected,
@@ -219,7 +222,13 @@ class TimelineRuler(QWidget):
 
     def _rebuild_static(self) -> QPixmap:
         mode = current_mode()
-        pixmap = QPixmap(self.size())
+        # 位图必须按屏幕缩放比建：不设 devicePixelRatio 的话，在 125% / 150%
+        # 缩放的屏幕上这张图会被**插值放大**——里面的时间码与刻度线全部发虚
+        # （用户报「这几个数字看着很模糊」）。analysis_pane 的缩略图一直是对的，
+        # 这里当初漏了。
+        dpr = max(1.0, self.devicePixelRatioF())
+        pixmap = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+        pixmap.setDevicePixelRatio(dpr)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -299,7 +308,9 @@ class TimelineRuler(QWidget):
         # 两端统一用 format_timecode（HH:MM:SS.mmm）——这是本项目时间码的规范
         # 格式，与预览 HUD、审核卡片一致。原先左端写死 "00:00.000"、右端是
         # "600.067s"，一边像时间码一边像秒表读数，看着像 bug（用户就是这么报的）。
-        painter.setPen(QColor(qcolor(mode, "TEXT_MUTED")))
+        # 时间码用正常文字色而不是 TEXT_MUTED：浅灰压浅底本身就发虚，
+        # 加上缩放屏的插值就变成用户说的「看着很模糊」。
+        painter.setPen(QColor(qcolor(mode, "TEXT")))
         font = QFont(FONT_MONO.split(",")[0].strip("'"))
         font.setPointSize(FONT_SIZE_CAPTION)
         painter.setFont(font)
