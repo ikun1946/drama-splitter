@@ -799,3 +799,14 @@ testdata/          合成素材（不入版本库）
     回归测试：``tests/test_asr.py::TestTranscriptionDevice``、
     ``tests/test_semantic.py::TestJudgeRelease``、``tests/test_env_check.py::TestInferenceDeviceItem``、
     ``tests/test_gui_smoke.py::TestModelFormChoices::test_device_choice_is_exposed_and_saved``。
+
+
+16. **『检查更新』窗口下方一大片空白：说明区有高度上限，窗口却是固定 760×560。**
+    说明区是个有上限的滚动区（原来折叠 108px / 展开 360px），而对话框在
+    ``DialogShell`` 里被固定成 760×560——折叠时就多出三百来像素空白，用户看到的是
+    「上面一小块字、下面全空」。上一版还把基类的最小高度（520）继承了过来，导致
+    高度根本收不下去。
+    现在：高度跟着内容走（``_fit_to_content``，用布局的最小高度算，并夹在屏幕可用
+    高度内），折叠时 560 → **263**、展开时按说明区上限长到 **591**；说明比上限短时
+    按实际高度来，不留空白。回归测试：
+    ``test_window_shrinks_to_fit_collapsed_notes``、``test_height_never_exceeds_the_screen``。

@@ -42,12 +42,17 @@ __all__ = ["UpdateDialog"]
 
 
 class UpdateDialog(DialogShell):
-    #: 说明区默认折叠高度（约 5 行）与展开高度——整篇 Markdown 糊一屏体验很差
-    NOTES_COLLAPSED = 108
-    NOTES_EXPANDED = 360
+    #: 说明区默认折叠高度（约 7 行）与展开高度——整篇 Markdown 糊一屏体验很差。
+    #: 窗口高度会跟着这两个值收放（见 ``_fit_to_content``），所以折叠时不会
+    #: 在说明下方留一大片空白。
+    NOTES_COLLAPSED = 132
+    NOTES_EXPANDED = 460
 
     def __init__(self, parent: QWidget | None = None, *, current_version: str = "") -> None:
         super().__init__("检查更新", parent, width=760, height=560)
+        # 高度跟着内容收放（见 _fit_to_content）：基类的最小高度 520 是给「内容多的
+        # 对话框」兜底的，在这里会把折叠态的窗口卡在 560 不动、下方留一大片空白。
+        self.setMinimumHeight(min(self.MIN_HEIGHT, 220))
         self._version = current_version
         self._info = None
         self._downloaded: Path | None = None
@@ -134,6 +139,7 @@ class UpdateDialog(DialogShell):
         self.notes.setVisible(False)
         self.btn_notes.setVisible(False)
         self.btn_skip.setVisible(False)
+        self._fit_to_content()
 
     def _skip_version(self) -> None:
         """记下"这一版不要再提"，写进 config.json 的 extra。
@@ -160,6 +166,7 @@ class UpdateDialog(DialogShell):
         self.btn_primary.setText("检查中…")
         self.progress.setRange(0, 0)  # 不确定进度
         self.progress.setVisible(True)
+        self._fit_to_content()
 
     def _set_failed(self, why: str) -> None:
         self._state = "failed"
@@ -170,6 +177,7 @@ class UpdateDialog(DialogShell):
         self.btn_cancel.setVisible(False)
         self.btn_skip.setVisible(False)
         self.btn_notes.setVisible(False)
+        self._fit_to_content()
 
     def _set_available(self) -> None:
         from app.core.updater import release_headline
@@ -194,20 +202,50 @@ class UpdateDialog(DialogShell):
         self.progress.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_skip.setVisible(True)
+        self._fit_to_content()
 
     def _set_notes_expanded(self, expanded: bool) -> None:
         """说明区默认只露几行，想看细节再展开——避免一屏全是字。"""
         self._notes_expanded = expanded
-        self.notes.setMaximumHeight(
-            self.NOTES_EXPANDED if expanded else self.NOTES_COLLAPSED
-        )
+        cap = self.NOTES_EXPANDED if expanded else self.NOTES_COLLAPSED
+        self.notes.setMaximumHeight(cap)
+        # 再给一个最小高度：窗口高度按「内容需要多少」算（见 _fit_to_content），
+        # 说明区得确保自己真的占到那个高度，否则窗口算矮、只能露两三行。
+        # 说明本身比上限短时（发布说明只写两行）就按实际高度来，不留空白。
+        width = self.notes.viewport().width() or self.notes.width() or 640
+        content = self.notes_body.heightForWidth(max(160, width))
+        self.notes.setMinimumHeight(min(cap, content) if content > 0 else 0)
         self.btn_notes.setText("收起说明" if expanded else "展开完整说明")
         # 用 isHidden() 而不是 isVisible()：对话框还没 show 时 isVisible() 恒为假，
         # 会把按钮错误地藏起来（离屏测试与延迟显示都会踩到）。
         self.btn_notes.setVisible(not self.notes.isHidden())
+        self._fit_to_content()
 
     def _toggle_notes(self) -> None:
         self._set_notes_expanded(not self._notes_expanded)
+
+    def _fit_to_content(self) -> None:
+        """按当前内容收放窗口高度——不在说明区下方留一大片空白。
+
+        说明区是**有上限的滚动区**（折叠 132 / 展开 460），而窗口初值是固定的
+        760×560：折叠时就多出三百来像素空白（用户截图里那块「下边全空」）。
+        这里把高度贴到内容上，并夹在屏幕可用高度之内——小屏上也不会长到按钮
+        点不到。宽度保持不变：说明是按窗口宽换行的，跟着内容改宽会来回抖。
+        """
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+
+        # 让排队的布局请求**立刻**生效：刚改过说明区的高度上限，若等事件循环再算，
+        # sizeHint() 读到的还是旧值——展开时会表现为"点了没反应"。
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        wanted = self.minimumSizeHint().height()
+        limit = 900
+        screen = self.screen()
+        if screen is not None:
+            limit = max(420, screen.availableGeometry().height() - 90)
+        target = max(self.minimumSizeHint().height(), min(wanted, limit))
+        if self.height() != target:
+            self.resize(self.width(), target)
 
     def _set_up_to_date(self, why: str) -> None:
         self._state = "up_to_date"
@@ -216,6 +254,7 @@ class UpdateDialog(DialogShell):
         self.btn_primary.setEnabled(True)
         self.progress.setVisible(False)
         self.btn_cancel.setVisible(False)
+        self._fit_to_content()
 
     @property
     def _installed(self) -> bool:
@@ -294,6 +333,7 @@ class UpdateDialog(DialogShell):
         self.progress.setVisible(True)
         self.btn_cancel.setVisible(True)
         self.btn_primary.setEnabled(False)
+        self._fit_to_content()
 
         worker = UpdateDownloadWorker(urls, target, digest=digest, size=size, parent=self)
         # 以前这条线是断的（worker 也没上报），进度条从头到尾不动——慢链路上
@@ -368,6 +408,7 @@ class UpdateDialog(DialogShell):
                 )
                 self.btn_primary.setText("打开所在目录")
         self.btn_primary.setEnabled(True)
+        self._fit_to_content()
 
     def _apply_update(self) -> None:
         from app.core.updater import launch_installer

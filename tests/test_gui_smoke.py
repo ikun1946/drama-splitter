@@ -3670,6 +3670,46 @@ class TestUpdateDialog:
             zip_size=200, zip_digest="sha256:" + "b" * 64,
         )
 
+    def test_window_shrinks_to_fit_collapsed_notes(self, window, qapp):
+        """折叠时窗口跟着内容收——不在说明区下方留一大片空白（用户截图那块）。"""
+        import dataclasses
+
+        dialog = self._dialog(window, qapp)
+        try:
+            # 说明要足够长：内容比折叠高度高，才谈得上"窗口跟内容收放"
+            long_note = "\n\n".join(f"第 {i} 段说明，用来把说明撑长。" for i in range(40))
+            dialog._info = dataclasses.replace(self._info(), notes=long_note)
+            dialog._set_available()
+            qapp.processEvents()
+
+            slack = dialog.height() - dialog.sizeHint().height()
+            assert slack <= 12, f"折叠时窗口比内容高了 {slack}px（那块空白）"
+            assert dialog.notes.maximumHeight() == dialog.NOTES_COLLAPSED
+
+            collapsed = dialog.height()
+            dialog._toggle_notes()
+            qapp.processEvents()
+            assert dialog.height() > collapsed, "展开说明应当让窗口一起长高"
+            assert dialog.notes.maximumHeight() == dialog.NOTES_EXPANDED
+        finally:
+            dialog.close()
+
+    def test_height_never_exceeds_the_screen(self, window, qapp):
+        """再长的说明也不能把窗口撑出屏幕——按钮必须点得到。"""
+        import dataclasses
+
+        dialog = self._dialog(window, qapp)
+        try:
+            long_notes = "\n\n".join(f"第 {i} 段说明" for i in range(300))
+            dialog._info = dataclasses.replace(self._info(), notes=long_notes)
+            dialog._set_available()
+            dialog._toggle_notes()
+            qapp.processEvents()
+            available = dialog.screen().availableGeometry()
+            assert dialog.height() <= available.height() - 60
+        finally:
+            dialog.close()
+
     def _dialog(self, window, qapp):
         dialog = window.build_update_dialog()
         dialog.show()
