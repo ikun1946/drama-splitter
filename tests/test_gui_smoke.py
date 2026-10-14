@@ -2261,6 +2261,25 @@ class TestModelFormChoices:
         dialog.close()
         qapp.processEvents()
 
+    def test_device_choice_is_exposed_and_saved(self, model_form, qapp):
+        """转写设备要能选、要落盘：auto = 有显卡就用（失败自动回退 CPU）。"""
+        from app.core.app_config import AppConfig
+
+        values = [
+            model_form.device_combo.itemData(i)
+            for i in range(model_form.device_combo.count())
+        ]
+        assert values == ["auto", "cpu", "cuda"]
+        assert model_form.device_combo.currentData() == "auto", "默认自动"
+        assert model_form.device_state.text(), "要说明现在会走 CPU 还是 GPU"
+        assert "自动释放" in model_form.device_state.text() or "释放" in model_form.device_state.text()
+
+        model_form.device_combo.setCurrentIndex(model_form.device_combo.findData("cuda"))
+        qapp.processEvents()
+
+        assert model_form._config.asr_device == "cuda"
+        assert AppConfig.load(model_form._config_path).asr_device == "cuda", "选择要落盘"
+
     def test_two_group_cards_with_explicit_actions(self, model_form):
         """两组卡片；每行都有行内动作与状态徽章，不再靠"选中态"猜。"""
         assert model_form.asr_card.title() == "语音转写"

@@ -70,7 +70,7 @@ class TestCheckEnvironmentRuns:
         keys = {i.key for i in report.items}
         for expected in (
             "ffmpeg", "ffplay", "asr_engine", "whisper_model",
-            "llm_model", "llm_stack", "models_dir",
+            "llm_model", "llm_stack", "inference_device", "models_dir",
             "scenedetect", "zhconv", "pysubs2",
         ):
             assert expected in keys, f"自检缺少项：{expected}"
@@ -238,3 +238,40 @@ class TestModelDownloadOffered:
             "引擎装不上时给了模型下载按钮——用户会白等"
         )
         assert "引擎" in item.summary or "引擎" in item.detail
+
+
+class TestInferenceDeviceItem:
+    """自检要说清「现在跑在 CPU 还是 GPU」——用户最关心的性能问题。"""
+
+    def test_reports_which_device_transcription_will_use(self):
+        from app.core.env_check import LEVEL_OK, check_environment
+
+        report = check_environment()
+        item = report.by_key("inference_device")
+        assert item is not None, "缺少「推理设备」一项"
+        assert item.level == LEVEL_OK, "它是说明项，不该阻断流程"
+        assert item.required is False
+        assert "转写：" in item.summary and "语义判断：" in item.summary
+        assert "cuda" in item.summary or "cpu" in item.summary
+
+    def test_follows_the_configured_device(self, monkeypatch, tmp_path):
+        """配置成仅 CPU 时，自检要跟着说 CPU（而不是仍旧报"有显卡"）。"""
+        from app.core import env_check as ec
+        from app.core.app_config import AppConfig
+
+        path = tmp_path / "config.json"
+        AppConfig(asr_device="cpu").save(path)
+        real_load = AppConfig.load.__func__
+        monkeypatch.setattr(
+            AppConfig, "load", classmethod(lambda cls, where=None: real_load(cls, path))
+        )
+
+        item = ec._check_inference_device()
+        assert "CPU" in item.summary, item.summary
+
+        AppConfig(asr_device="cuda").save(path)
+        monkeypatch.setattr(
+            "app.core.asr.cuda_device_count", lambda: 1
+        )
+        item = ec._check_inference_device()
+        assert "GPU" in item.summary, item.summary

@@ -28,6 +28,23 @@ __all__ = ["AppConfig", "app_dir", "config_path", "default_models_root", "LOCAL_
 #: backend_prefs 里"用本地模型"的取值；其余取值是厂商档案 id（如 "volc"）
 LOCAL_BACKEND = "local"
 
+#: 转写设备可选值 + 界面用的中文名（界面与解析共用一份，避免两处漂移）
+ASR_DEVICE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("auto", "自动（有显卡就用）"),
+    ("cpu", "仅 CPU"),
+    ("cuda", "仅 GPU（CUDA）"),
+)
+
+
+def _clean_asr_device(raw: object) -> str:
+    """只接受三个已知取值；手改配置写坏了就回到 auto，不让分析起不来。"""
+    value = str(raw or "").strip().lower()
+    if value in ("gpu", "cuda"):
+        return "cuda"
+    if value == "cpu":
+        return "cpu"
+    return "auto"
+
 
 def app_dir() -> Path:
     """配置与产物的基准目录。打包后取 exe 同级，源码运行取项目根。
@@ -65,6 +82,8 @@ class AppConfig:
     update_mirror: str = ""
     asr_model_tier: str | None = None   # 使用中的转写档位；None = 默认档位
     llm_model_key: str | None = None    # 使用中的语义模型（"llm:2B:Q4_K_M"）；None = 自动
+    # 转写推理设备：auto = 有显卡就用（用不了自动回退 CPU）/ cpu / cuda
+    asr_device: str = "auto"
     theme: str = "light"                # 界面主题：light / dark
     # 厂商 API 档案（云端模型）；空列表 = 使用内置默认档案，且两个开关都是关的
     providers: list[dict] = field(default_factory=list)
@@ -104,6 +123,7 @@ class AppConfig:
             update_mirror=str(data.get("update_mirror") or "").strip(),
             asr_model_tier=tier,
             llm_model_key=key,
+            asr_device=_clean_asr_device(data.get("asr_device")),
             theme=theme,
             providers=_clean_providers(data.get("providers")),
             backend_prefs=_clean_backend_prefs(data.get("backend_prefs")),

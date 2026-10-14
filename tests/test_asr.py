@@ -503,3 +503,104 @@ class TestTranscriptionCache:
             AsrSettings(model_tier="small", initial_prompt="不同提示词")
         ).transcribe_cached(speech_asset, fingerprint, store, duration_seconds=duration)
         assert not hit, "参数不同不应命中同一缓存"
+
+
+
+class TestTranscriptionDevice:
+    """转写设备：auto / cpu / cuda 的选择、GPU 起不来时的回退、以及用完释放。
+
+    背景：机器有 RTX 4050 却一直跑 CPU——设备原先写死 "cpu"，而 GPU 路线
+    实测快不少（6 秒素材：CPU int8 1.9s / CUDA float16 1.1s）。这一组把
+    "选哪条路"和"失败了怎么办"都钉住。
+    """
+
+    def test_cpu_and_cuda_map_to_their_compute_types(self):
+        from app.core.asr import resolve_device
+
+        assert resolve_device("cpu") == ("cpu", "int8")
+        assert resolve_device("cuda") == ("cuda", "float16")
+        assert resolve_device("gpu") == ("cuda", "float16"), "gpu 是 cuda 的别名"
+
+    def test_auto_follows_the_probe(self, monkeypatch):
+        from app.core import asr
+
+        monkeypatch.setattr(asr, "cuda_device_count", lambda: 2)
+        assert asr.resolve_device("auto") == ("cuda", "float16")
+        monkeypatch.setattr(asr, "cuda_device_count", lambda: 0)
+        assert asr.resolve_device(None) == ("cpu", "int8"), "没显卡就老实走 CPU"
+
+    def test_probe_failure_means_no_gpu(self, monkeypatch):
+        """探测本身出问题（没装 ctranslate2 / 驱动异常）必须当成「没有显卡」。"""
+        import builtins
+
+        from app.core import asr
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "ctranslate2":
+                raise ImportError("No module named 'ctranslate2'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert asr.cuda_device_count() == 0
+
+    def test_gpu_load_failure_falls_back_to_cpu(self, tmp_path):
+        """显存不够 / cuDNN 缺失时自动用 CPU 重来，并留下可读的说明。"""
+        from app.core import asr
+
+        calls: list[tuple[str, str]] = []
+
+        class _FakeWhisper:
+            def __init__(self, path, device, compute_type):
+                calls.append((device, compute_type))
+                if device == "cuda":
+                    raise RuntimeError("CUDA out of memory")
+
+        info = asr.ModelInfo(tier="small", path=tmp_path, size_bytes=1)
+        engine = asr.AsrEngine(
+            asr.AsrSettings(model_tier="small", device="cuda", compute_type="float16")
+        )
+
+        model = engine._load_model(info, _FakeWhisper)
+
+        assert isinstance(model, _FakeWhisper)
+        assert calls == [("cuda", "float16"), ("cpu", "int8")], "要用 CPU 再试一次"
+        assert engine.settings.device == "cpu" and engine.settings.compute_type == "int8"
+        assert engine.device_note and "已回退" in engine.device_note
+
+    def test_cpu_failure_is_not_swallowed(self, tmp_path):
+        """已经是最低档还失败，就如实抛出去——不假装成功。"""
+        from app.core import asr
+
+        class _Broken:
+            def __init__(self, path, device, compute_type):
+                raise RuntimeError("模型文件损坏")
+
+        info = asr.ModelInfo(tier="small", path=tmp_path, size_bytes=1)
+        engine = asr.AsrEngine(asr.AsrSettings(model_tier="small"))
+        with pytest.raises(RuntimeError):
+            engine._load_model(info, _Broken)
+
+    def test_release_frees_the_model(self):
+        from app.core.asr import AsrEngine, AsrSettings
+
+        engine = AsrEngine(AsrSettings())
+        assert engine.release() is False, "没加载过模型时无可释放"
+        engine._model = object()
+        assert engine.release() is True
+        assert engine._model is None and engine._loaded_tier is None
+
+    def test_device_preference_survives_config_round_trip(self, tmp_path):
+        """设备偏好写进 config.json；手改坏了要回到 auto，而不是让分析起不来。"""
+        from app.core.app_config import AppConfig
+
+        path = tmp_path / "config.json"
+        AppConfig(asr_device="cuda").save(path)
+        assert AppConfig.load(path).asr_device == "cuda"
+
+        path.write_text('{"asr_device": "tensor-core-9"}', encoding="utf-8")
+        assert AppConfig.load(path).asr_device == "auto"
+
+        path.write_text('{"asr_device": "gpu"}', encoding="utf-8")
+        assert AppConfig.load(path).asr_device == "cuda", "gpu 归一化成 cuda"

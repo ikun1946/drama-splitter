@@ -96,7 +96,12 @@
   `DRAMA_MODELS_DIR` 优先级更高）；
 - **磁盘可用空间提示**，下载前再检查一次，空间不足会明确拒绝而不是写到一半失败；
 - **实时进度**（按已下载字节），取消后清理临时文件；
-- **删除**只删该模型自己的目录。
+- **删除**只删该模型自己的目录；
+- **转写设备可选**（自动 / 仅 CPU / 仅 GPU）：自动档在检测到可用 CUDA 显卡时
+  用 GPU（float16），加载失败（显存被占、cuDNN 缺失、驱动太旧）**自动回退 CPU**
+  （int8）并把原因写进分析日志——不静默降级，也不让分析失败；
+- **跑完就还**：转写模型在转写结束、语义模型在判定结束各自显式释放内存 / 显存，
+  不留到分析结束或程序退出。
 
 两类模型相互独立，可只装其一；未安装时对应能力自动跳过并在日志中说明原因。
 语义判断的「使用中」只在本地路径生效（走 Ollama / 进程内 llama.cpp）；
@@ -115,6 +120,7 @@
 | 语义模型 / 推理栈 | 降级 | 语义模型可下载；推理栈给发布页（有预编译轮子） |
 | 镜头检测 / 繁简 / 字幕解析 | 降级 | 缺失时对应能力跳过（scenedetect 给发布页） |
 | 模型目录 | 阻断 | 不可写时跳到模型管理 |
+| 推理设备（CPU / GPU） | 说明 | 写明转写与语义判断各跑在哪条路上，以及有没有用到显卡 |
 
 **可修能力**分两种，都在应用内真装：
 
@@ -773,3 +779,23 @@ testdata/          合成素材（不入版本库）
 - VFR 素材不做精确导出，仅识别 + 提示（完整帧表属阶段5）
 - 界面未做高分屏适配与多语言
 - 尚未在真实短剧素材上验证，所有性能与效果结论均基于合成素材
+
+
+15. **本地模型一直在 CPU 上跑（而这台机器有显卡）。** 两个模型各有一处原因：
+    语音转写的设备写死 ``device="cpu"``，而它的底层 ctranslate2 在 Windows 轮子里
+    **是带 CUDA 支持的**（同机实测 ``get_cuda_device_count() == 1``）；语义判断用的是
+    llama.cpp 的 **CPU-only 轮子**（``llama_supports_gpu_offload() == False``，lib 里
+    只有 ``ggml-cpu.dll``），代码也没传显卡卸载层数，想上显卡得换 CUDA 轮子或改用
+    Ollama（Ollama 自己会用显卡，但本机没装）。
+    现在：转写设备可选（**自动 = 有显卡就用**，落盘在 ``config.json`` 的
+    ``asr_device``，界面在「工具 → 模型管理 → 语音转写」，每次分析在日志里写明实际
+    走了哪条路）；GPU 加载失败自动回退 CPU 并把原因写进日志。
+    实测（RTX 4050 Laptop，6 秒素材）：CPU int8 **1.9s** → CUDA float16 **1.1s**。
+    **跑完自动释放**：转写模型在转写阶段结束、本地 LLM 在判定结束各自显式释放
+    （llama.cpp 走 ``close()``，Ollama 发 ``keep_alive: 0``，ctranslate2 靠析构 +
+    ``gc.collect()``）。实测两块都还了：显存 **2727 → 2077 MiB**（模型那 650 MB 回去
+    了；剩下的 ~168 MB 是 CUDA 上下文本身，随进程退出释放）；语义模型的常驻内存
+    **1895 → 52 MB**（加载 1160 MB、判完一次涨到 1895 MB，``close()`` 之后几乎全还）。
+    回归测试：``tests/test_asr.py::TestTranscriptionDevice``、
+    ``tests/test_semantic.py::TestJudgeRelease``、``tests/test_env_check.py::TestInferenceDeviceItem``、
+    ``tests/test_gui_smoke.py::TestModelFormChoices::test_device_choice_is_exposed_and_saved``。

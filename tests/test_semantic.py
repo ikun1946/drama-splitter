@@ -678,3 +678,101 @@ class TestRealLLM:
             f"模型输出无法解析：{verdict.raw_output[:200]}"
         )
         assert verdict.evidence, "真实判断应给出证据"
+
+
+class TestJudgeRelease:
+    """本地推理栈用完必须显式释放：llama.cpp 的模型动辄一两 GB 常驻。"""
+
+    def test_local_judge_release_closes_the_model(self, monkeypatch, tmp_path):
+        from app.core import semantic
+
+        closed: list[bool] = []
+
+        class _FakeLlama:
+            def __init__(self, **kwargs):
+                pass
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(semantic, "_import_llama", lambda: _FakeLlama)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"gguf")
+        judge = semantic.LocalLlmJudge(model)
+
+        assert judge.release() is True
+        assert closed == [True], "必须真的调 close()，不能只丢引用"
+        assert judge.release() is False, "重复释放要安全"
+
+    def test_release_judge_tolerates_missing_or_broken_release(self):
+        from app.core.semantic import release_judge
+
+        assert release_judge(None) is False
+
+        class _NoRelease:
+            pass
+
+        assert release_judge(_NoRelease()) is False
+
+        class _Broken:
+            def release(self):
+                raise RuntimeError("关不掉")
+
+        assert release_judge(_Broken()) is False, "释放失败不能把异常抛给分析"
+
+    def test_resilient_judge_releases_both_sides(self):
+        from app.core.semantic import ResilientJudge, SemanticJudge, release_judge
+
+        released: list[str] = []
+
+        class _Judge(SemanticJudge):
+            def judge(self, request):  # pragma: no cover - 本用例不判定
+                raise AssertionError("不该真的判定")
+
+            def available(self):
+                return True
+
+            def describe(self):
+                return "替身"
+
+            def release(self):
+                released.append("hit")
+                return True
+
+        primary, fallback = _Judge(), _Judge()
+        resilient = ResilientJudge(primary, lambda: fallback, notes=[])
+        resilient._fallback = fallback          # 假装已经切到备选
+
+        assert release_judge(resilient) is True
+        assert released == ["hit", "hit"], "主判定器与备选都要释放"
+
+    def test_ollama_release_requests_unload(self, monkeypatch):
+        """Ollama 那条路要让服务端把模型卸掉（keep_alive=0），否则显存一直占着。"""
+        import urllib.request
+
+        from app.core.semantic import OllamaJudge
+
+        seen: dict = {}
+
+        class _Response:
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Opener:
+            def open(self, request, timeout=None):
+                seen["url"] = request.full_url
+                seen["body"] = json.loads(request.data.decode("utf-8"))
+                return _Response()
+
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: _Opener())
+        judge = OllamaJudge("qwen3.5-2b-judge")
+
+        assert judge.release() is True
+        assert seen["url"].endswith("/api/generate")
+        assert seen["body"] == {"model": "qwen3.5-2b-judge", "keep_alive": 0}

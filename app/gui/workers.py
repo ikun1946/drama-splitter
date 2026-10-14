@@ -414,7 +414,7 @@ class AnalysisWorker(BaseWorker):
         from pathlib import Path
 
         from app.core import subtitles as subs
-        from app.core.asr import AsrSettings
+        from app.core.asr import AsrSettings, device_label, resolve_device
         from app.core.cache import CacheStore, SourceFingerprint
         from app.core.cloud_asr import select_asr_engine
         from app.core.shots import detect_all
@@ -454,13 +454,24 @@ class AnalysisWorker(BaseWorker):
 
         # ---- 语音转写 ----------------------------------------------
         self._begin_stage("语音转写")
-        settings = AsrSettings(model_tier=active_whisper_tier(config))
+        # 设备在这里解析（而不是让 asr 自己猜）：缓存键要带上真正用的设备。
+        # auto = 有可用的 CUDA 设备就上 GPU，加载失败由 asr._load_model 回退 CPU。
+        device, compute_type = resolve_device(getattr(config, "asr_device", None))
+        settings = AsrSettings(
+            model_tier=active_whisper_tier(config),
+            device=device,
+            compute_type=compute_type,
+        )
         self.dialogue_model_tier = settings.model_tier
         # 无音轨的源片注定转写不出东西：先认出来，别让用户以为"没对白"是引擎问题
         if not self._media.audio_tracks:
             self.dialogue_diagnosis = DIALOGUE_EMPTY_AUDIO
         self.stage_log.emit(
             f"本地转写档位：whisper-{settings.model_tier}（可在 工具 → 模型管理 中切换）"
+        )
+        self.stage_log.emit(
+            f"转写设备：{device_label(device)}（{device}/{compute_type}）"
+            "；模型用完会自动释放。"
         )
         if not settings.vad_filter:
             self.stage_log.emit("VAD 已关闭。")
@@ -509,6 +520,10 @@ class AnalysisWorker(BaseWorker):
                         "跳过语音转写（本地回退也失败）："
                         f"{describe_dialogue_failure(self.dialogue_diagnosis, settings.model_tier, str(exc2))}"
                     )
+                finally:
+                    release_local = getattr(local, "release", None)
+                    if callable(release_local):
+                        release_local()
             else:
                 self.dialogue_diagnosis = classify_dialogue_failure(str(exc))
                 self.stage_log.emit(
@@ -533,6 +548,15 @@ class AnalysisWorker(BaseWorker):
                     self.stage_log.emit(
                         "转写完成但未识别到任何对白——该片段可能确实无人声。"
                     )
+        finally:
+            # 设备回退说明要在释放之前打：它解释的是刚才那次到底跑在哪
+            fallback_note = getattr(engine, "device_note", None)
+            if fallback_note:
+                self.stage_log.emit(fallback_note)
+            # 转写模型（尤其走显卡时）不留到最后：这里立刻释放
+            release_engine = getattr(engine, "release", None)
+            if callable(release_engine) and release_engine():
+                self.stage_log.emit("转写模型已释放（内存 / 显存归还系统）。")
         # 转写在被取消后也要可见：main_window 靠它决定导出时是否生成 SRT
         self.transcript = transcript
         self.subtitle_tracks = subtitle_tracks
@@ -574,7 +598,12 @@ class AnalysisWorker(BaseWorker):
         # ---- 整体规划 ----------------------------------------------
         self._begin_stage("整体规划")
         from app.core.planner import PlanningError, plan_rule_based
-        from app.core.semantic import EventIndex, judge_candidates, select_judge
+        from app.core.semantic import (
+            EventIndex,
+            judge_candidates,
+            release_judge,
+            select_judge,
+        )
         from app.core.settings import CountPolicy, SplitMode, check_feasibility
         from app.core.solver import solve_from_candidates
 
@@ -599,12 +628,17 @@ class AnalysisWorker(BaseWorker):
         strategy = self._settings.strategy.value
         # 语义判断是「整体规划」里唯一的长耗时子步骤（云端后端一次请求数秒），
         # 因此把它的比例映射到本阶段 5%–85%，求解前再报到 90%（求解本身很快）。
-        outcome = judge_candidates(
-            candidates, index, judge, strategy=strategy, budget_requests=24,
-            on_progress=lambda done, total: self.stage_progress.emit(
-                f"语义判断 {done}/{total}", 0.05 + 0.8 * done / max(1, total)
-            ),
-        )
+        try:
+            outcome = judge_candidates(
+                candidates, index, judge, strategy=strategy, budget_requests=24,
+                on_progress=lambda done, total: self.stage_progress.emit(
+                    f"语义判断 {done}/{total}", 0.05 + 0.8 * done / max(1, total)
+                ),
+            )
+        finally:
+            # 本地模型动辄一两 GB：判完立刻还，不留到分析结束
+            if release_judge(judge):
+                self.stage_log.emit("语义模型已释放（内存 / 显存归还系统）。")
         self.stage_log.emit(outcome.describe())
         for note in outcome.notes:
             self.stage_log.emit(f"  {note}")

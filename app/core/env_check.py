@@ -390,6 +390,44 @@ def _check_llm_stack() -> EnvCheckItem:
     )
 
 
+def _check_inference_device() -> EnvCheckItem:
+    """转写与语义判断实际跑在 CPU 还是 GPU——性能问题的第一现场。
+
+    只读：转写侧问 ctranslate2 能不能看到 CUDA 设备，语义侧问装着的
+    llama.cpp 有没有显卡支持，都不加载模型。
+    """
+    from .app_config import AppConfig
+    from .asr import cuda_device_count, device_label, resolve_device
+    from .semantic import _import_llama, llm_gpu_supported
+
+    preference = getattr(AppConfig.load(), "asr_device", "auto")
+    device, compute = resolve_device(preference)
+    gpus = cuda_device_count()
+
+    if _import_llama() is None:
+        judge_text = "未安装推理栈"
+    elif llm_gpu_supported():
+        judge_text = "GPU 可用（llama.cpp 支持显卡卸载）"
+    else:
+        judge_text = "CPU（llama.cpp 是 CPU 版）"
+
+    return EnvCheckItem(
+        key="inference_device",
+        label="推理设备（CPU / GPU）",
+        level=LEVEL_OK,
+        required=False,
+        summary=f"转写：{device_label(device)}（{device}/{compute}）· 语义判断：{judge_text}",
+        detail=(
+            f"检测到 {gpus} 块 CUDA 设备。" if gpus else "未检测到可用的 CUDA 设备。"
+        )
+        + (
+            "转写设备在「工具 → 模型管理」里选（自动 = 有显卡就用，加载失败会"
+            "自动回退 CPU 并把原因写进分析日志）；两个本地模型跑完都会释放"
+            "内存 / 显存。"
+        ),
+    )
+
+
 def _check_optional_packages() -> list[EnvCheckItem]:
     """可选能力依赖：缺失只降级，逐项如实说明。"""
     items: list[EnvCheckItem] = []
@@ -484,6 +522,7 @@ def check_environment(
         _check_whisper_model(root, tier, engine_ok=engine.level != LEVEL_BLOCK),
         _check_llm_model(),
         _check_llm_stack(),
+        _check_inference_device(),
         *_check_optional_packages(),
         _check_models_dir(root),
     ]

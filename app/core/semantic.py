@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import re
 from dataclasses import dataclass, field
@@ -65,6 +66,8 @@ __all__ = [
     "create_judge",
     "select_judge",
     "ollama_model_name_for",
+    "release_judge",
+    "llm_gpu_supported",
     "parse_verdict",
     "DialogueEvent",
     "VERDICT_GOOD",
@@ -302,6 +305,15 @@ class SemanticJudge:
     def describe(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
+    def release(self) -> bool:
+        """用完释放底层资源；返回是否真的释放了东西（默认没有可释放的）。
+
+        本地推理栈必须显式释放：llama.cpp 的模型内存随对象销毁归还，而
+        解释器不保证及时回收（显卡上就是「跑完显存不掉」）。云端判定器走
+        HTTP，没有常驻资源，继承这个默认实现即可。
+        """
+        return False
+
 
 class NullJudge(SemanticJudge):
     """降级判定器：明确表示"没有语义判断"。
@@ -403,6 +415,21 @@ class LocalLlmJudge(SemanticJudge):
         )
         verdict = self.judge(request)
         return f"{self.describe()} → {verdict.verdict}"
+
+    def release(self) -> bool:
+        """关掉 llama.cpp 的模型，把内存（走了显卡则是显存）还给系统。"""
+        llm, self._llm = self._llm, None
+        if llm is None:
+            return False
+        close = getattr(llm, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - 关不掉也不能让分析失败
+                pass
+        del llm
+        gc.collect()
+        return True
 
     def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
         problems = request.validate()
@@ -523,6 +550,28 @@ class OllamaJudge(SemanticJudge):
         return str(data.get("response", ""))
 
     _max_tokens: int = 160
+
+    def release(self) -> bool:
+        """让 Ollama 立刻卸载模型（keep_alive=0），把显存 / 内存还回去。
+
+        Ollama 默认把模型留在显存里等下一次请求；本应用一轮分析最多用二十
+        几次判定，跑完就该还回去。服务没启动或被拒都不影响分析结果。
+        """
+        import urllib.request
+
+        payload = json.dumps({"model": self.model, "keep_alive": 0}).encode("utf-8")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request(
+            f"{self.host}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with opener.open(request, timeout=5) as response:
+                response.read()
+        except Exception:  # noqa: BLE001 - 卸载失败只是显存晚点还，不是错误
+            return False
+        return True
 
     def judge(self, request: JudgmentRequest) -> JudgmentVerdict:
         prompt, invalid = prepare_prompt(request, self.judge_id)
@@ -679,6 +728,14 @@ class ResilientJudge(SemanticJudge):
             )
         return fallback.judge(request)
 
+    def release(self) -> bool:
+        """主判定器与已经建好的备选判定器都要释放。"""
+        released = release_judge(self._primary)
+        fallback, self._fallback = self._fallback, None
+        if fallback is not None and fallback is not self._primary:
+            released = release_judge(fallback) or released
+        return released
+
 
 def parse_verdict(text: str, judge_id: str) -> JudgmentVerdict:
     """严格解析模型输出。解析失败如实标记，绝不猜测或兜底成某个等级。"""
@@ -787,6 +844,39 @@ def create_judge(
     场景用的；界面链路请用 :func:`select_judge`，它还会读云端档案。
     """
     return local_judge(ollama_model=ollama_model, model_dir=model_dir)
+
+
+def release_judge(judge: "SemanticJudge | None") -> bool:
+    """用完释放判定器占的资源（None 安全）；返回是否真的释放了东西。
+
+    判定器每轮分析新建一个，本地模型动辄一两 GB 常驻——必须在这里还。
+    释放失败只影响内存回收，绝不能影响已经算出来的结论，所以全部吞掉。
+    """
+    if judge is None:
+        return False
+    release = getattr(judge, "release", None)
+    if not callable(release):
+        return False
+    try:
+        return bool(release())
+    except Exception:  # noqa: BLE001 - 释放失败不能让分析失败
+        return False
+
+
+def llm_gpu_supported() -> bool:
+    """装着的 llama.cpp 能不能把层放到显卡上（CPU-only 轮子恒为 False）。
+
+    环境自检用它说明「本地语义判断为什么是 CPU」——不是没显卡，而是这套
+    推理栈没有显卡支持。
+    """
+    if _import_llama() is None:
+        return False
+    try:
+        import llama_cpp  # noqa: F401 - 只为拿到 llama_supports_gpu_offload
+
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:  # noqa: BLE001 - 老版本没有这个函数 / 加载失败
+        return False
 
 
 def cloud_block_reason(profile: ProviderProfile) -> str | None:

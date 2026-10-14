@@ -25,6 +25,7 @@ segment 边界上**——那会把切点放到两句之间本该连续的地方�
 
 from __future__ import annotations
 
+import gc
 import shutil
 import subprocess
 import sys
@@ -378,6 +379,56 @@ class Transcript:
         return transcript
 
 
+#: 转写推理设备。auto = 有可用的 CUDA 设备就用 GPU，用不了自动回退 CPU。
+DEVICE_AUTO = "auto"
+DEVICE_CPU = "cpu"
+DEVICE_CUDA = "cuda"
+
+#: 各设备用的计算精度：CPU 用 int8（faster-whisper 官方推荐），
+#: GPU 用 float16（int8 在显卡上要额外的量化支持，float16 最稳）。
+COMPUTE_FOR_DEVICE = {DEVICE_CPU: "int8", DEVICE_CUDA: "float16"}
+
+#: 给人看的设备名（日志、界面、环境自检共用一套说法）。
+DEVICE_LABELS = {DEVICE_CPU: "CPU", DEVICE_CUDA: "GPU（CUDA）"}
+
+
+def cuda_device_count() -> int:
+    """ctranslate2 能看到几块 CUDA 设备；没装 / 没驱动 / 显卡不支持都返回 0。
+
+    只做探测，不做推理——它决定 auto 会选哪条路。
+    """
+    try:
+        import ctranslate2
+    except ImportError:
+        return 0
+    try:
+        return int(ctranslate2.get_cuda_device_count())
+    except Exception:  # noqa: BLE001 - 探测失败按「没有显卡」处理，不能挡住分析
+        return 0
+
+
+def resolve_device(preference: str | None) -> tuple[str, str]:
+    """把用户偏好解析成具体的 (device, compute_type)。
+
+    - ``cpu``：强制 CPU；
+    - ``cuda`` / ``gpu``：强制 GPU（真跑不起来时由 ``_load_model`` 回退）；
+    - 其它（``auto`` / 空 / None）：有可用 CUDA 设备就上 GPU，否则 CPU。
+    """
+    want = (preference or DEVICE_AUTO).strip().lower()
+    if want == DEVICE_CPU:
+        return DEVICE_CPU, COMPUTE_FOR_DEVICE[DEVICE_CPU]
+    if want in (DEVICE_CUDA, "gpu"):
+        return DEVICE_CUDA, COMPUTE_FOR_DEVICE[DEVICE_CUDA]
+    if cuda_device_count() > 0:
+        return DEVICE_CUDA, COMPUTE_FOR_DEVICE[DEVICE_CUDA]
+    return DEVICE_CPU, COMPUTE_FOR_DEVICE[DEVICE_CPU]
+
+
+def device_label(device: str) -> str:
+    """设备的中文名（未知取值原样返回，便于排查）。"""
+    return DEVICE_LABELS.get(device, device)
+
+
 @dataclass
 class AsrSettings:
     """影响转写结果的参数。任何一项变化都会命中不同的缓存键。"""
@@ -439,6 +490,8 @@ class AsrEngine:
         self.fingerprint = fingerprint
         self._model = None
         self._loaded_tier: str | None = None
+        #: GPU 加载失败回退 CPU 时的说明（调用方打进日志，不静默）
+        self.device_note: str | None = None
 
     # ---- 模型 ----------------------------------------------------------
 
@@ -470,17 +523,47 @@ class AsrEngine:
                     "（约 80 MB，不需要 pip 或编译器）。"
                 ) from exc
 
-            self._model = WhisperModel(
-                str(info.path),
-                device=self.settings.device,
-                compute_type=self.settings.compute_type,
-            )
+            self._model = self._load_model(info, WhisperModel)
             self._loaded_tier = info.tier
         return info
 
-    def release(self) -> None:
+    def release(self) -> bool:
+        """丢掉模型，把显存 / 内存还给系统；返回是否真的释放了东西。
+
+        必须显式调用：ctranslate2 的显存只随对象销毁归还，而解释器不保证
+        及时回收——GPU 上那是几百 MB 一直占到进程退出（「跑完显存没掉」
+        就是这里）。分析结束时由 workers 调用。
+        """
+        had_model = self._model is not None
         self._model = None
         self._loaded_tier = None
+        gc.collect()
+        return had_model
+
+    def _load_model(self, info: ModelInfo, whisper_model):
+        """按设置的设备加载模型；GPU 起不来就退回 CPU，并把原因记进 device_note。
+
+        显卡路线失败的原因很多（显存被别的东西占着、cuDNN / cuBLAS 缺失、
+        驱动太旧）。「转写不了」对用户来说不可接受，所以一律回退 CPU 重试，
+        原因交给调用方打进日志——不静默降级，也不让分析失败。
+        """
+        device, compute = self.settings.device, self.settings.compute_type
+        try:
+            return whisper_model(str(info.path), device=device, compute_type=compute)
+        except Exception as exc:  # noqa: BLE001 - 任何加载失败都值得退回 CPU 再试
+            if device == DEVICE_CPU:
+                raise
+            self.device_note = (
+                f"GPU（{device}/{compute}）加载失败：{exc}；"
+                f"已回退 {DEVICE_CPU}/{COMPUTE_FOR_DEVICE[DEVICE_CPU]}。"
+            )
+            self.settings.device = DEVICE_CPU
+            self.settings.compute_type = COMPUTE_FOR_DEVICE[DEVICE_CPU]
+            return whisper_model(
+                str(info.path),
+                device=DEVICE_CPU,
+                compute_type=COMPUTE_FOR_DEVICE[DEVICE_CPU],
+            )
 
     # ---- 转写 ----------------------------------------------------------
 
@@ -724,6 +807,14 @@ class AsrEngine:
             on_progress=on_progress,
             cancel_check=cancel_check,
             ffmpeg=ffmpeg,
+        )
+        # GPU 起不来时 _load_model 会把 settings 改写成实际用的设备，这里按
+        # **实际**设备重算一次键再存，免得把 CPU 跑出来的结果挂到 GPU 的键上。
+        key = CacheKey.build(
+            "asr",
+            fingerprint,
+            audio_stream=audio_stream_index if audio_stream_index is not None else "auto",
+            **self.settings.cache_parts(),
         )
         store.save(key, transcript.to_json(), note=f"转写 {self.settings.model_tier}")
         return transcript, False

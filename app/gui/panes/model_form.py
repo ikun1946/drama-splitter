@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core.app_config import AppConfig, default_models_root
+from ...core.app_config import ASR_DEVICE_CHOICES, AppConfig, default_models_root
 from ...core.model_manager import (
     WHISPER_TIERS,
     default_whisper_tier,
@@ -240,6 +240,26 @@ class ModelForm(QWidget):
         self._asr_rows.setContentsMargins(0, 0, 0, 0)
         self._asr_rows.setSpacing(2)
         self.asr_card.body_layout.addLayout(self._asr_rows)
+
+        # 转写设备：有显卡就走显卡（float16），跑不起来自动回退 CPU（int8）
+        self.device_combo = NoWheelComboBox(self.asr_card)
+        for value, label in ASR_DEVICE_CHOICES:
+            self.device_combo.addItem(label, value)
+        self.device_combo.setToolTip(
+            "自动：检测到可用的 CUDA 显卡就用 GPU，否则用 CPU；"
+            "GPU 加载失败会自动回退 CPU，并把原因写进分析日志。"
+        )
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        device_row = QHBoxLayout()
+        device_row.setContentsMargins(0, 0, 0, 0)
+        device_row.addWidget(QLabel("转写设备：", self.asr_card))
+        device_row.addWidget(self.device_combo, 1)
+        self.asr_card.body_layout.addLayout(device_row)
+        self.device_state = QLabel("", self.asr_card)
+        self.device_state.setProperty("role", "muted")
+        self.device_state.setWordWrap(True)
+        self.asr_card.body_layout.addWidget(self.device_state)
+
         asr_hint = QLabel(
             "档位越大越准、也越慢。切换档位后重新分析会自动重跑转写"
             "（转写缓存按档位分开存，不会串用旧结果）。",
@@ -386,6 +406,7 @@ class ModelForm(QWidget):
 
         self._refresh_status(root)
         self._refresh_dir(root, busy)
+        self._sync_device_row()
 
     def rows(self) -> list[dict]:
         """当前界面上的每一行（工具与测试用；对应于界面所见）。"""
@@ -504,6 +525,37 @@ class ModelForm(QWidget):
             self._append(f"配置写入失败：{exc}", "error")
             return False
         return True
+
+    def _sync_device_row(self) -> None:
+        """「转写设备」下拉与配置对齐，并说明自动档现在会选哪条路。"""
+        from ...core.asr import cuda_device_count, device_label, resolve_device
+
+        value = getattr(self._config, "asr_device", "auto")
+        index = self.device_combo.findData(value)
+        if index >= 0 and index != self.device_combo.currentIndex():
+            self.device_combo.blockSignals(True)
+            self.device_combo.setCurrentIndex(index)
+            self.device_combo.blockSignals(False)
+        device, compute = resolve_device(value)
+        gpus = cuda_device_count()
+        detected = f"检测到 {gpus} 块 CUDA 设备" if gpus else "未检测到可用的 CUDA 设备"
+        release_text = (
+            "模型跑完会自动释放显存。" if device != "cpu" else "模型跑完会自动释放内存。"
+        )
+        self.device_state.setText(
+            f"{detected}；当前将用 {device_label(device)}（{device}/{compute}）。{release_text}"
+        )
+
+    def _on_device_changed(self, _index: int) -> None:
+        value = self.device_combo.currentData() or "auto"
+        if getattr(self._config, "asr_device", "auto") == value:
+            return
+        self._config.asr_device = value
+        if self._save_config():
+            self._append(f"转写设备已设为「{self.device_combo.currentText()}」，下次分析生效。")
+        else:
+            self._append("转写设备已临时切换，但没写进配置（重启后会回到原值）。", "warn")
+        self._sync_device_row()
 
     def _pick_dir(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
