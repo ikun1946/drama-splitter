@@ -74,6 +74,18 @@ RELEASES_PAGE = "https://github.com/ikun1946/drama-splitter/releases"
 #:   ghfast.top    连不上
 #: 只有直连候选全部失败才会用到它们；配置里把 ``update_mirror`` 设成
 #: "off" 可以彻底关掉。
+#: 慢速换源：候选连上了但平均速度低于 ``SLOW_FAILOVER_BPS`` 且已跑满
+#: ``SLOW_FAILOVER_AFTER`` 秒，就当作「这条不通」换下一个（已下载部分保留）。
+#:
+#: 为什么要有它：候选原本只在**失败**时切换，而实测「能连但很慢」同样致命——
+#: 官方直连 0 B/s、API 地址 ~58 KB/s、gh-proxy.com 5 MB/s，只按失败切换就会
+#: 一直卡在 58 KB/s 上。阈值取 200 KB/s：低于它，35 MB 要下 3 分钟以上。
+SLOW_FAILOVER_AFTER = 15.0          # 秒
+SLOW_FAILOVER_BPS = 200 * 1024      # 字节/秒
+#: 连上之后多久还一个字节都没有就换源。死链（TCP 连上但不发数据）等 15 秒没有
+#: 意义——实测 github.com 就是这种：连得上、6 秒 0 字节。
+SLOW_START_AFTER = 5.0              # 秒
+
 BUILTIN_MIRRORS: tuple[str, ...] = (
     "https://gh-proxy.com/",
     "https://ghproxy.net/",
@@ -510,10 +522,15 @@ def _download_to_part(
     on_progress,
     cancel_check,
     stall_seconds: int,
+    slow_after: float = SLOW_FAILOVER_AFTER,
+    slow_speed: int = SLOW_FAILOVER_BPS,
+    start_after: float = SLOW_START_AFTER,
+    can_failover: bool = False,
 ) -> tuple[str, str, int]:
     """用一个地址把数据下到 ``.part``（不校验、不改名）。
 
-    返回 ``(状态, 说明, 已落盘字节)``，状态是 ``ok`` / ``cancelled`` / ``failed``。
+    返回 ``(状态, 说明, 已落盘字节)``，状态是 ``ok`` / ``cancelled`` / ``failed`` /
+    ``slow``（``slow`` = 连上了但太慢，调用方应换下一个候选）。
     单独拆出来，是为了让 :func:`download_asset` 能在多个候选地址之间依次重试。
     """
     args = download_curl_args(url, part, stall_seconds=stall_seconds)
@@ -536,6 +553,10 @@ def _download_to_part(
             return 0
 
     last_report = 0.0
+    started = time.monotonic()
+    # 续传时 .part 里已有别的候选下过的字节，算「本次候选的速度」必须先扣掉
+    base = got()
+    settled = False          # 速度达标后不再判慢，避免来回抖动
     try:
         while True:
             if cancel_check and cancel_check():
@@ -556,6 +577,41 @@ def _download_to_part(
                 last_report = now
             if code is not None:
                 break
+            elapsed = now - started
+            if can_failover and not settled and elapsed >= start_after:
+                if current - base <= 0:
+                    try:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                    except Exception:  # noqa: BLE001 - 换源尽力而为
+                        pass
+                    return (
+                        "slow",
+                        f"连上 {elapsed:.0f} 秒仍未收到数据",
+                        current,
+                    )
+            if can_failover and not settled and elapsed >= slow_after:
+                this_round = max(0, current - base)
+                speed = this_round / elapsed if elapsed > 0 else 0.0
+                if speed >= slow_speed:
+                    settled = True
+                else:
+                    try:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                    except Exception:  # noqa: BLE001 - 换源尽力而为
+                        pass
+                    return (
+                        "slow",
+                        f"速度过慢（{format_size(speed)}/s，{format_size(this_round)}/{elapsed:.0f}s）",
+                        current,
+                    )
             time.sleep(0.1)
         detail = (process.stderr.read() or b"").decode("utf-8", "replace").strip()
     finally:
@@ -579,6 +635,9 @@ def download_asset(
     on_source=None,
     mirror: str = "",
     stall_seconds: int = 30,
+    slow_after: float = SLOW_FAILOVER_AFTER,
+    slow_speed: int = SLOW_FAILOVER_BPS,
+    start_after: float = SLOW_START_AFTER,
 ) -> DownloadOutcome:
     """下载资产到 ``target``；``urls`` 是候选地址列表（也接受单个字符串）。
 
@@ -612,12 +671,14 @@ def download_asset(
             )
 
     failures: list[str] = []
-    for url in candidates:
+    for index, url in enumerate(candidates):
         if on_source is not None:
             try:
                 on_source(_host_of(url))
             except Exception:  # noqa: BLE001 - 展示用回调，失败不该影响下载
                 pass
+        # 最后一条候选没有「下一个」可换：慢也得让它下完（总比什么都没有好）
+        can_failover = index < len(candidates) - 1
         status, detail, partial = _download_to_part(
             url,
             part,
@@ -625,9 +686,17 @@ def download_asset(
             on_progress=on_progress,
             cancel_check=cancel_check,
             stall_seconds=stall_seconds,
+            slow_after=slow_after,
+            slow_speed=slow_speed,
+            start_after=start_after,
+            can_failover=can_failover,
         )
         if status == "ok":
             break
+        if status == "slow":
+            # 不是失败，只是太慢：已下载的部分留着，换下一条继续续传
+            failures.append(f"{_host_of(url)}：{detail}（已自动换下一个来源）")
+            continue
         if status == "cancelled":
             return DownloadOutcome(
                 ok=False,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import sys
 import threading
@@ -149,33 +150,49 @@ class _Handler(BaseHTTPRequestHandler):
     #: >0 时按块慢发（每块之间 sleep chunk_delay），用来复现「下载途中」的状态
     chunk_size = 0
     chunk_delay = 0.0
+    #: >0 时先晾着再发正文（模拟「TCP 连上但一个字节都不给」的死链）
+    first_delay = 0.0
 
     def log_message(self, *args):  # noqa: D102 - 测试里别刷屏
         pass
 
     def _send(self):
-        self.send_response(self.status)
+        if not self.path.startswith("/download"):
+            self.send_response(self.status)
+            for key, value in self.headers_extra.items():
+                self.send_header(key, value)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(self.payload)))
+            self.end_headers()
+            self.wfile.write(self.payload)
+            return
+        # /download 支持 Range：断点续传/慢速换源都靠它
+        body = self.body_blob
+        start = 0
+        match = re.match(r"bytes=(\d+)-", self.headers.get("Range") or "")
+        if match and self.status == 200:
+            start = min(int(match.group(1)), len(body))
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+        else:
+            self.send_response(self.status)
         for key, value in self.headers_extra.items():
             self.send_header(key, value)
-        if self.path.startswith("/download"):
-            self.send_header("Content-Length", str(len(self.body_blob)))
-            self.end_headers()
-            if self.chunk_size:
-                sent = 0
-                while sent < len(self.body_blob):
-                    piece = self.body_blob[sent:sent + self.chunk_size]
-                    self.wfile.write(piece)
-                    self.wfile.flush()
-                    sent += len(piece)
-                    if self.chunk_delay:
-                        time.sleep(self.chunk_delay)
-                return
-            self.wfile.write(self.body_blob)
-            return
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(self.payload)))
+        self.send_header("Content-Length", str(len(body) - start))
         self.end_headers()
-        self.wfile.write(self.payload)
+        if self.first_delay:
+            time.sleep(self.first_delay)
+        if self.chunk_size:
+            while start < len(body):
+                piece = body[start:start + self.chunk_size]
+                self.wfile.write(piece)
+                self.wfile.flush()
+                start += len(piece)
+                if self.chunk_delay:
+                    time.sleep(self.chunk_delay)
+            return
+        self.wfile.write(body[start:])
+        return
 
     do_GET = _send
 
@@ -685,3 +702,119 @@ class TestReleaseHeadline:
     def test_empty_input(self):
         assert updater.release_headline("") == ""
         assert updater.release_headline(None) == ""
+
+
+def _make_server(
+    blob: bytes, *, chunk: int = 0, delay: float = 0.0, status: int = 200, first_delay: float = 0.0
+):
+    """起一个可配速度的本地服务器（换源用例要两条不同速度/不同毛病的源）。"""
+    handler = type(
+        "H",
+        (_Handler,),
+        {"body_blob": blob, "status": status, "chunk_size": chunk,
+         "chunk_delay": delay, "first_delay": first_delay},
+    )
+    srv = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    handler.base_url = f"http://127.0.0.1:{srv.server_port}"
+    return srv, handler
+
+
+class TestSlowFailover:
+    """连上了但太慢，也要换下一个候选——只在「失败」时换是不够的。
+
+    实测：官方直连 0 B/s、API 地址 ~58 KB/s、gh-proxy.com 5 MB/s。若只按失败切换，
+    用户会一直卡在 58 KB/s 那条上，35 MB 要下好几分钟。
+    """
+
+    def test_slow_source_is_swapped_for_the_next(self, tmp_path):
+        _require_curl()
+        blob = b"s" * (256 * 1024)
+        slow_srv, slow = _make_server(blob, chunk=4096, delay=0.05)     # ≈80 KB/s
+        fast_srv, fast = _make_server(blob)                              # 全速
+        try:
+            hosts: list[str] = []
+            target = tmp_path / "a.bin"
+            outcome = updater.download_asset(
+                [f"{slow.base_url}/download", f"{fast.base_url}/download"],
+                target,
+                size=len(blob),
+                slow_after=1.0,
+                slow_speed=200 * 1024,
+                on_source=hosts.append,
+            )
+            assert outcome.ok, outcome.message
+            assert len(hosts) == 2, f"慢源应被换掉，实际走过的来源 {hosts}"
+            assert (target).read_bytes() == blob, "换源后仍要拿到完整文件"
+        finally:
+            slow_srv.shutdown()
+            fast_srv.shutdown()
+
+    def test_last_candidate_is_not_swapped(self, tmp_path):
+        """最后一条没有「下一个」：慢也得让它下完，不能把用户卡在半路。"""
+        _require_curl()
+        blob = b"t" * (64 * 1024)
+        srv, handler = _make_server(blob, chunk=8192, delay=0.03)
+        try:
+            hosts: list[str] = []
+            outcome = updater.download_asset(
+                [f"{handler.base_url}/download"],
+                tmp_path / "a.bin",
+                size=len(blob),
+                slow_after=0.05,
+                slow_speed=200 * 1024,
+                on_source=hosts.append,
+            )
+            assert outcome.ok, outcome.message
+            assert len(hosts) == 1
+        finally:
+            srv.shutdown()
+
+    def test_fast_enough_source_is_kept(self, tmp_path):
+        """够快就别乱切（阈值之上要"落定"，否则会在候选间来回抖）。"""
+        _require_curl()
+        blob = b"f" * (512 * 1024)
+        fast_srv, fast = _make_server(blob, chunk=65536, delay=0.15)    # ≈427 KB/s
+        other_srv, other = _make_server(blob)
+        try:
+            hosts: list[str] = []
+            outcome = updater.download_asset(
+                [f"{fast.base_url}/download", f"{other.base_url}/download"],
+                tmp_path / "a.bin",
+                size=len(blob),
+                slow_after=0.5,
+                slow_speed=200 * 1024,
+                on_source=hosts.append,
+            )
+            assert outcome.ok, outcome.message
+            assert len(hosts) == 1, f"速度达标就不该换源，实际 {hosts}"
+        finally:
+            fast_srv.shutdown()
+            other_srv.shutdown()
+
+
+class TestNoDataFailover:
+    """连上但一个字节都不给：5 秒就该换，不必干等 15 秒的慢速判定。"""
+
+    def test_dead_but_connected_source_is_swapped_quickly(self, tmp_path):
+        _require_curl()
+        blob = b"n" * (64 * 1024)
+        dead_srv, dead = _make_server(blob, chunk=len(blob), first_delay=3.0)
+        fast_srv, fast = _make_server(blob)
+        try:
+            started = time.monotonic()
+            outcome = updater.download_asset(
+                [f"{dead.base_url}/download", f"{fast.base_url}/download"],
+                tmp_path / "a.bin",
+                size=len(blob),
+                start_after=0.5,          # 测试里把「零字节」判定缩到 0.5 秒
+                slow_after=15.0,
+                slow_speed=200 * 1024,
+            )
+            elapsed = time.monotonic() - started
+            assert outcome.ok, outcome.message
+            assert elapsed < 3.0, f"零字节死链应很快换掉，实际用了 {elapsed:.1f}s"
+            assert (tmp_path / "a.bin").read_bytes() == blob
+        finally:
+            dead_srv.shutdown()
+            fast_srv.shutdown()
