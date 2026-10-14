@@ -392,12 +392,33 @@ class LocalLlmJudge(SemanticJudge):
         self.model_path = model_path
         self.judge_id = f"local:{model_path.name}"
         self._max_tokens = max_tokens
-        self._llm = llama_cls(
-            model_path=str(model_path),
-            n_ctx=n_ctx,
-            n_threads=n_threads or 0,
-            verbose=False,
+        #: 装着的 llama.cpp 是否支持显卡卸载（None = 老版本没有这个接口）
+        self.gpu_offload: bool | None = _gpu_offload_supported()
+        #: GPU 加载失败、回退 CPU 时的说明（调用方打进日志，不静默）
+        self.device_note: str | None = None
+        self._llm = self._load(
+            llama_cls, model_path, n_ctx=n_ctx, n_threads=n_threads or 0
         )
+
+    def _load(self, llama_cls, model_path, *, n_ctx: int, n_threads: int):
+        """加载模型：**优先把层放进显卡**，失败再退回纯 CPU。
+
+        ``n_gpu_layers=-1`` = 能放多少放多少。CPU 版轮子会**忽略**这个参数
+        （llama.cpp 自己打一句 not compiled with GPU offload 就继续跑），所以无条件
+        传是安全的；只有显存不够 / 缺 CUDA 运行库时才会真的加载失败——那时退回
+        CPU 并留下说明，由调用方打进日志，不静默降级。
+        """
+        try:
+            return llama_cls(
+                model_path=str(model_path), n_ctx=n_ctx, n_threads=n_threads,
+                n_gpu_layers=-1, verbose=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - 显存不足 / 缺 cuBLAS 都走这里
+            self.device_note = f"GPU 加载失败（{exc}）；已回退 CPU（判定会慢一些）。"
+            return llama_cls(
+                model_path=str(model_path), n_ctx=n_ctx, n_threads=n_threads,
+                n_gpu_layers=0, verbose=False,
+            )
 
     @classmethod
     def from_model_dir(cls, directory: str | Path, **kwargs) -> "LocalLlmJudge":
@@ -411,7 +432,9 @@ class LocalLlmJudge(SemanticJudge):
         return True
 
     def describe(self) -> str:
-        return f"本地模型 {self.model_path.name}（提示词 {PROMPT_VERSION}）"
+        """带上设备：日志里要能一眼看出这次判定跑在 GPU 还是 CPU。"""
+        device = "GPU" if self.gpu_offload else "CPU"
+        return f"本地模型 {self.model_path.name}（提示词 {PROMPT_VERSION}，{device}）"
 
     def probe(self) -> str:
         """加载自检：跑一条最小请求，验证推理栈真的能出结果。"""
@@ -898,6 +921,16 @@ def release_judge(judge: "SemanticJudge | None") -> bool:
         return bool(release())
     except Exception:  # noqa: BLE001 - 释放失败不能让分析失败
         return False
+
+
+def _gpu_offload_supported() -> bool | None:
+    """装着的 llama.cpp 支不支持显卡卸载；老版本没有该接口时返回 None。"""
+    try:
+        import llama_cpp
+
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:  # noqa: BLE001 - 没装 / 老版本 / 加载失败
+        return None
 
 
 def llm_gpu_supported() -> bool:

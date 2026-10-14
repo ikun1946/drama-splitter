@@ -374,6 +374,57 @@ class TestPromptRendering:
             rule_score=0.5, strategy="story",
         )
 
+    def test_local_judge_asks_for_gpu_offload(self, monkeypatch, tmp_path):
+        """加载时要申请把层放进显卡（n_gpu_layers=-1）。
+
+        CPU 版轮子会忽略这个参数（llama.cpp 自己打一句说明就继续），所以无条件传是安全的；
+        不传的话，即使装了 CUDA 版也永远跑 CPU——这正是用户反馈的"GPU 占用很低"。
+        """
+        from app.core import semantic
+
+        seen: dict = {}
+
+        class _FakeLlama:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(semantic, "_import_llama", lambda: _FakeLlama)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+
+        judge = semantic.LocalLlmJudge(model)
+
+        assert seen["n_gpu_layers"] == -1, "要申请显卡卸载，否则永远跑 CPU"
+        assert judge.device_note is None
+        assert ("CPU" in judge.describe()) or ("GPU" in judge.describe()), judge.describe()
+
+    def test_local_judge_falls_back_to_cpu(self, monkeypatch, tmp_path):
+        """显存不够 / 缺 CUDA 运行库时退回 CPU，并留下可读的说明。"""
+        from app.core import semantic
+
+        attempts: list = []
+
+        class _FakeLlama:
+            def __init__(self, **kwargs):
+                attempts.append(kwargs.get("n_gpu_layers"))
+                if kwargs.get("n_gpu_layers"):
+                    raise RuntimeError("CUDA out of memory")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(semantic, "_import_llama", lambda: _FakeLlama)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+
+        judge = semantic.LocalLlmJudge(model)
+
+        assert attempts == [-1, 0], attempts
+        assert judge.device_note and "已回退 CPU" in judge.device_note
+
     def test_local_judge_prefers_the_chat_template(self, monkeypatch, tmp_path):
         """推理型模型要走它自己的 chat 模板——裸补全下它会复述上下文、被 stop 截断。"""
         from app.core import semantic

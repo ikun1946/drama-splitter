@@ -620,6 +620,9 @@ class AnalysisWorker(BaseWorker):
         )
         for note in judge_notes:
             self.stage_log.emit(note)
+        device_note = getattr(judge, "device_note", None)
+        if device_note:
+            self.stage_log.emit(device_note)
         if judge is None:
             self.stage_log.emit(
                 "语义判断未启用（本地模型与云端后端都不可用）——"

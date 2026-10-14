@@ -881,3 +881,18 @@ testdata/          合成素材（不入版本库）
     想让语义判断也上显卡，得换 CUDA 版轮子（abetlen 官方索引，体积大得多）并传
     ``n_gpu_layers=-1``，或改用 Ollama（它自己会用显卡）。这是个**下载体积 vs 速度**的取舍，
     要用户拍板，不做默认切换。
+
+
+23. **本地语义判断想上显卡：光换轮子不够，还得让它「申请」显卡。**
+    应用内装的 llama-cpp-python 是 CPU-only 轮子；即使换成 CUDA 版，代码里不传
+    ``n_gpu_layers`` 也仍然跑 CPU（默认 0 层）。现在加载时统一传 ``n_gpu_layers=-1``
+    （能放多少放多少）：CPU 版会**忽略**这个参数（llama.cpp 自己打一句说明继续跑），所以
+    无条件传是安全的；只有显存不够 / 缺 CUDA 运行库时才会真的失败，那时自动回退
+    ``n_gpu_layers=0`` 并把原因写进日志（``device_note``），不静默降级。
+    同时 ``describe()`` 带上设备（``本地模型 xxx（提示词 v1，GPU）``），分析日志里一眼看得出
+    这次判定跑在哪。
+    ⚠️ 换轮子时**按版本对齐，别只看标签**：官方 CUDA 索引里 Windows 的 ``cp312`` 标签只到
+    0.3.4，而它**不认识** Qwen3.5 的 ``qwen35`` 架构（实测 ``unknown model architecture:
+    'qwen35'``，模型直接加载失败）；要选 **``py3-none`` 标签的 0.3.36** 那一批（同一个索引里
+    就有，只是标签不同，py3-none 反过来对任何 Python 都成立）。
+    回归测试：``test_local_judge_asks_for_gpu_offload``、``test_local_judge_falls_back_to_cpu``。
