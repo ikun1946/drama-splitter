@@ -44,6 +44,7 @@ __all__ = [
     "installed_copy",
     "check_for_update",
     "download_asset",
+    "asset_candidates",
     "download_curl_args",
     "download_status_text",
     "extract_portable_zip",
@@ -51,6 +52,7 @@ __all__ = [
     "format_size",
     "launch_installer",
     "mirror_url",
+    "release_headline",
     "mark_update_pending",
     "take_update_pending",
     "update_action_label",
@@ -62,6 +64,20 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 #: （版本比较因此不必处理预发布分支）。未鉴权配额是 60 次/小时/IP。
 RELEASE_API = "https://api.github.com/repos/ikun1946/drama-splitter/releases/latest"
 RELEASES_PAGE = "https://github.com/ikun1946/drama-splitter/releases"
+
+#: 直连都失败时依次尝试的公共加速源（**只影响传输**：装之前仍按发布页的
+#: SHA-256 逐字节校验，所以镜像塞不进被篡改的包）。
+#:
+#: 实测（同一条 35.8 MB 安装包）：
+#:   gh-proxy.com  5.3 MB/s（8 秒下完）
+#:   ghproxy.net   62 KB/s
+#:   ghfast.top    连不上
+#: 只有直连候选全部失败才会用到它们；配置里把 ``update_mirror`` 设成
+#: "off" 可以彻底关掉。
+BUILTIN_MIRRORS: tuple[str, ...] = (
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+)
 
 SETUP_SUFFIX = "-setup.exe"
 ZIP_SUFFIX = "-win64.zip"
@@ -83,16 +99,25 @@ class UpdateInfo:
     zip_url: str
     zip_size: int
     zip_digest: str
+    #: Release API 给的资产地址（``api.github.com/.../releases/assets/<id>``）。
+    #: 实测 ``github.com`` 在部分网络下连不上（用户机 21 秒超时、本机仅
+    #: ~48KB/s），而 API 主机与它 302 过去的 CDN 通常还通——所以下载优先走它。
+    setup_api_url: str = ""
+    zip_api_url: str = ""
 
-    def asset_for(self, installed: bool) -> tuple[str, int, str] | None:
-        """按运行形态挑资产：装了就给安装包，没装就给免安装 zip。"""
+    def asset_for(self, installed: bool) -> tuple[list[str], int, str] | None:
+        """按运行形态挑资产，返回**候选地址列表**（API 地址优先、官方地址兜底）。
+
+        为什么给一串地址而不是一个：官方下载地址在 ``github.com``，它在部分
+        网络下不可达（用户实测：应用里连 21 秒都不通；本机也只有 ~48KB/s）。
+        Release API 的 ``assets[].url`` 走 ``api.github.com`` → 302 → CDN，
+        同一份文件通常快得多也更容易连上。多给几个候选，失败就换下一个。
+        """
         if installed:
-            if self.setup_url:
-                return self.setup_url, self.setup_size, self.setup_digest
-            return None
-        if self.zip_url:
-            return self.zip_url, self.zip_size, self.zip_digest
-        return None
+            urls = [u for u in (self.setup_api_url, self.setup_url) if u]
+            return (urls, self.setup_size, self.setup_digest) if urls else None
+        urls = [u for u in (self.zip_api_url, self.zip_url) if u]
+        return (urls, self.zip_size, self.zip_digest) if urls else None
 
 
 @dataclass(frozen=True)
@@ -247,24 +272,25 @@ def _fetch_release(timeout: int) -> tuple[int, dict | None, str]:
     return 0, payload, ""
 
 
-def _asset_fields(assets: list) -> tuple[str, int, str, str, int, str]:
-    """从资产列表里挑出安装包与免安装包各自的 (url, size, digest)。"""
-    setup = ("", 0, "")
-    portable = ("", 0, "")
+def _asset_fields(assets: list) -> tuple[tuple[str, str, int, str], tuple[str, str, int, str]]:
+    """挑出安装包与免安装包各自的 (官方地址, API 资产地址, 大小, 摘要)。"""
+    setup = ("", "", 0, "")
+    portable = ("", "", 0, "")
     for item in assets:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "")
         url = str(item.get("browser_download_url") or "")
-        if not url:
+        api_url = str(item.get("url") or "")
+        if not url and not api_url:
             continue
         size = int(item.get("size") or 0)
         digest = str(item.get("digest") or "")
         if name.endswith(SETUP_SUFFIX):
-            setup = (url, size, digest)
+            setup = (url, api_url, size, digest)
         elif name.endswith(ZIP_SUFFIX):
-            portable = (url, size, digest)
-    return setup[0], setup[1], setup[2], portable[0], portable[1], portable[2]
+            portable = (url, api_url, size, digest)
+    return setup, portable
 
 
 def check_for_update(local_version: str, *, timeout: int = 15) -> CheckResult:
@@ -282,8 +308,8 @@ def check_for_update(local_version: str, *, timeout: int = 15) -> CheckResult:
 
     assets = payload.get("assets")
     assets = assets if isinstance(assets, list) else []
-    s_url, s_size, s_digest, z_url, z_size, z_digest = _asset_fields(assets)
-    if not s_url and not z_url:
+    (s_url, s_api, s_size, s_digest), (z_url, z_api, z_size, z_digest) = _asset_fields(assets)
+    if not (s_url or s_api) and not (z_url or z_api):
         return CheckResult(ok=False, message="该版本没有可下载的安装包。")
 
     info = UpdateInfo(
@@ -297,6 +323,8 @@ def check_for_update(local_version: str, *, timeout: int = 15) -> CheckResult:
         zip_url=z_url,
         zip_size=z_size,
         zip_digest=z_digest,
+        setup_api_url=s_api,
+        zip_api_url=z_api,
     )
     return CheckResult(ok=True, info=info, message=f"发现新版本 {info.version}。")
 
@@ -374,9 +402,52 @@ def download_status_text(done: int, total: int, elapsed: float) -> tuple[str, bo
     return " · ".join(parts), determinate
 
 
-def download_curl_args(
-    url: str, part: Path, *, mirror: str = "", stall_seconds: int = 30
-) -> list[str]:
+def asset_candidates(direct: list[str], mirror: str = "") -> list[str]:
+    """把直连地址排成候选序列：用户镜像 → 直连 → 内置加速源。
+
+    规则：
+    - ``mirror`` 非空：用户指定的镜像优先，然后才是直连（不再用内置源）；
+    - ``mirror`` 为 ``"off"`` / ``"none"``：只用直连，彻底不用任何镜像；
+    - 默认（空）：直连优先，**全部失败才**回退到内置加速源。
+
+    为什么内置源只做兜底：它们是第三方服务，能不用就不用；但用户那边
+    github.com 完全连不上时，没有兜底就等于永远更新不了（实测镜像 5.3 MB/s，
+    直连只有 48 KB/s 甚至超时）。装之前仍按 SHA-256 校验，镜像无法投毒。
+    """
+    direct = [url for url in direct if url]
+    if not direct:
+        return []
+    key = (mirror or "").strip().lower()
+    if key in ("off", "none", "-"):
+        return list(direct)
+    # 只有「官方下载地址（github.com）」需要套镜像；API 资产地址本身就可达，
+    # 绕第三方反而多一跳（它只负责 302 到 CDN）。
+    github_urls = [url for url in direct if _is_release_host(url)]
+    others = [url for url in direct if not _is_release_host(url)]
+    if mirror and mirror.strip():
+        return [mirror_url(url, mirror) for url in github_urls] + others + github_urls
+    extra = [mirror_url(url, prefix) for prefix in BUILTIN_MIRRORS for url in github_urls]
+    return others + github_urls + extra
+
+
+def release_headline(notes: str) -> str:
+    """从发布说明里取出「这一版改了什么」的一句话标题。
+
+    更新窗口不该把整篇 Markdown 糊上去：用户第一眼要知道的是这版改了什么，
+    所以取说明里第一个标题（``## xxx`` → ``xxx``）；没有标题就取第一行非空文本。
+    """
+    for line in (notes or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            text = text.lstrip("#").strip()
+        if text:
+            return text
+    return ""
+
+
+def download_curl_args(url: str, part: Path, *, stall_seconds: int = 30) -> list[str]:
     """构造下载用的 curl 参数（抽出来便于测试断言）。
 
     **故意不设 ``--max-time``**：它是整个传输的总时限。国内直连 GitHub 实测
@@ -387,6 +458,9 @@ def download_curl_args(
     args = [
         "curl", "-sS", "-L", "--fail",
         "--noproxy", "localhost,127.0.0.1",
+        # 走 Release API 的资产地址时必须带这个头，否则拿到的是 JSON 元数据；
+        # 对 github.com 的官方下载地址无副作用。
+        "-H", "Accept: application/octet-stream",
         "-o", str(part),
     ]
     if part.is_file() and part.stat().st_size:
@@ -394,50 +468,55 @@ def download_curl_args(
     args += [
         "--speed-limit", "1024",   # 低于 1 KB/s 持续 stall_seconds 秒 → 判定卡死
         "--speed-time", str(stall_seconds),
-        mirror_url(url, mirror),
+        url,
     ]
     return args
 
 
-def download_asset(
-    url: str,
-    target: Path,
-    *,
-    digest: str = "",
-    size: int = 0,
-    on_progress=None,
-    cancel_check=None,
-    mirror: str = "",
-    stall_seconds: int = 30,
-) -> DownloadOutcome:
-    """下载一个资产到 ``target``，过程中持续回报进度，最后校验 SHA-256。
+def _host_of(url: str) -> str:
+    """取 URL 的主机名，把失败原因说清楚（例如 ``github.com：curl 28``）。"""
+    try:
+        from urllib.parse import urlparse
 
-    为什么用 ``Popen`` + 轮询而不是 ``subprocess.run``：进度只能从**已落盘的
-    ``.part`` 体积**推出来。写死总时限不行（见 :func:`download_curl_args`），
-    所以要一边等一边看文件长没长——模型下载（1.2 GB）早就是这么做的。
+        return urlparse(url).netloc or url[:40]
+    except Exception:  # noqa: BLE001
+        return url[:40]
 
-    失败/取消时 **保留 ``.part``**：慢链路上一次下不完是常态，留着就能续传；
-    真正的"完成"只认 ``target``，半截文件永远不会被当成已完成，最后还有
-    SHA-256 把关。
+
+def _is_release_host(url: str) -> bool:
+    """是不是「官方下载主机」（github.com）。
+
+    注意不能用 ``"github.com" in url`` 判断：``api.github.com`` 也含这个子串，
+    而它本身可达、不该被套加速源，也不该被算成「连不上官方主机」。
     """
-    if not url:
-        return DownloadOutcome(ok=False, message="下载地址为空。")
+    return _host_of(url) in ("github.com", "www.github.com")
 
-    part = target.with_name(target.name + ".part")
-    target.parent.mkdir(parents=True, exist_ok=True)
 
-    if size:
-        free = free_space_bytes(target.parent)
-        if free is not None and free < size * 105 // 100:
-            return DownloadOutcome(
-                ok=False,
-                message=(
-                    f"磁盘空间不足：需要约 {size / 1024 / 1024:.0f} MB，"
-                    f"可用 {free / 1024 / 1024:.0f} MB"
-                ),
-            )
+def _download_failure_hint(urls: list[str]) -> str:
+    """全部候选都失败时给一句可操作的话。"""
+    if any(_is_release_host(u) for u in urls):
+        return (
+            "（github.com 在部分网络下连不上：可点「发布页」手动下载，"
+            "或按 README 在 config.json 里配 update_mirror 走镜像）"
+        )
+    return ""
 
-    args = download_curl_args(url, part, mirror=mirror, stall_seconds=stall_seconds)
+
+def _download_to_part(
+    url: str,
+    part: Path,
+    *,
+    size: int,
+    on_progress,
+    cancel_check,
+    stall_seconds: int,
+) -> tuple[str, str, int]:
+    """用一个地址把数据下到 ``.part``（不校验、不改名）。
+
+    返回 ``(状态, 说明, 已落盘字节)``，状态是 ``ok`` / ``cancelled`` / ``failed``。
+    单独拆出来，是为了让 :func:`download_asset` 能在多个候选地址之间依次重试。
+    """
+    args = download_curl_args(url, part, stall_seconds=stall_seconds)
     try:
         process = subprocess.Popen(
             args,
@@ -446,11 +525,11 @@ def download_asset(
             creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
-        return DownloadOutcome(ok=False, message="本机没有 curl，无法下载更新。")
+        return "failed", "本机没有 curl", 0
     except OSError as exc:
-        return DownloadOutcome(ok=False, message=f"无法启动下载：{exc}")
+        return "failed", f"无法启动下载：{exc}", 0
 
-    def partial_size() -> int:
+    def got() -> int:
         try:
             return part.stat().st_size if part.is_file() else 0
         except OSError:
@@ -468,18 +547,12 @@ def download_asset(
                         process.kill()
                 except Exception:  # noqa: BLE001 - 收尾尽力而为
                     pass
-                got = partial_size()
-                return DownloadOutcome(
-                    ok=False,
-                    cancelled=True,
-                    message=f"已取消，已保留 {format_size(got)}（再点一次可继续）。",
-                    partial_bytes=got,
-                )
+                return "cancelled", "已取消", got()
             code = process.poll()
-            current = partial_size()
+            current = got()
             now = time.monotonic()
             if on_progress and (now - last_report > 0.2 or code is not None):
-                on_progress(current, size, target.name, 1, 1)
+                on_progress(current, size, part.name, 1, 1)
                 last_report = now
             if code is not None:
                 break
@@ -490,21 +563,94 @@ def download_asset(
             process.kill()
 
     if code != 0:
-        got = partial_size()
-        if got:
-            # 28 = 触发 --speed-limit 判定；其它非零码也多半是中途断开。
+        # 28 = 连不上，或触发 --speed-limit 的"卡死"判定；其余非零码多半是 HTTP 错误
+        return "failed", f"curl {code}：{detail[:160] or '连接失败'}", got()
+    return "ok", "", got()
+
+
+def download_asset(
+    urls: str | list[str],
+    target: Path,
+    *,
+    digest: str = "",
+    size: int = 0,
+    on_progress=None,
+    cancel_check=None,
+    on_source=None,
+    mirror: str = "",
+    stall_seconds: int = 30,
+) -> DownloadOutcome:
+    """下载资产到 ``target``；``urls`` 是候选地址列表（也接受单个字符串）。
+
+    为什么要多候选：官方下载地址在 ``github.com``，实测在部分网络下**完全连不上**
+    （用户机连 21 秒都不通；本机也只有 ~48KB/s），而 Release API 给的资产地址走
+    ``api.github.com`` → 302 → CDN，通常快一个数量级。候选之间共用同一个
+    ``.part``，换地址时已下载的部分不浪费（curl ``-C -`` 续传）。
+
+    契约不变：过程持续回报进度、取消/中断保留断点、最后按 SHA-256 校验。
+    """
+    if isinstance(urls, str):
+        direct = [urls] if urls else []
+    else:
+        direct = [u for u in (urls or []) if u]
+    candidates = asset_candidates(direct, mirror)
+    if not candidates:
+        return DownloadOutcome(ok=False, message="下载地址为空。")
+
+    part = target.with_name(target.name + ".part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if size:
+        free = free_space_bytes(target.parent)
+        if free is not None and free < size * 105 // 100:
+            return DownloadOutcome(
+                ok=False,
+                message=(
+                    f"磁盘空间不足：需要约 {size / 1024 / 1024:.0f} MB，"
+                    f"可用 {free / 1024 / 1024:.0f} MB"
+                ),
+            )
+
+    failures: list[str] = []
+    for url in candidates:
+        if on_source is not None:
+            try:
+                on_source(_host_of(url))
+            except Exception:  # noqa: BLE001 - 展示用回调，失败不该影响下载
+                pass
+        status, detail, partial = _download_to_part(
+            url,
+            part,
+            size=size,
+            on_progress=on_progress,
+            cancel_check=cancel_check,
+            stall_seconds=stall_seconds,
+        )
+        if status == "ok":
+            break
+        if status == "cancelled":
+            return DownloadOutcome(
+                ok=False,
+                cancelled=True,
+                message=f"已取消，已保留 {format_size(partial)}（再点一次可继续）。",
+                partial_bytes=partial,
+            )
+        failures.append(f"{_host_of(url)}：{detail}")
+    else:
+        partial = part.stat().st_size if part.is_file() else 0
+        joined = "；".join(failures[:3])
+        if partial:
             return DownloadOutcome(
                 ok=False,
                 cancelled=True,
                 message=(
-                    f"下载中断（curl {code}）：已保留 {format_size(got)}，"
-                    f"再点一次可继续。{detail[:120]}"
-                ).strip(),
-                partial_bytes=got,
+                    f"下载中断，已保留 {format_size(partial)}，可点「继续下载」重试（{joined}）"
+                ),
+                partial_bytes=partial,
             )
-        _unlink(part)
         return DownloadOutcome(
-            ok=False, message=f"下载失败（curl 退出码 {code}）。{detail[:160]}".strip()
+            ok=False,
+            message=f"下载失败：{joined}{_download_failure_hint(candidates)}",
         )
 
     expected = (

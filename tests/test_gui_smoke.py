@@ -3558,6 +3558,45 @@ class TestUpdateDialog:
         finally:
             dialog.close()
 
+    def test_notes_render_markdown_and_collapse_by_default(self, window, qapp):
+        """说明要渲染成 Markdown 且默认折叠；状态行先说清这版改了什么。"""
+        import dataclasses
+
+        from PySide6.QtCore import Qt
+
+        dialog = window.build_update_dialog()
+        try:
+            dialog._info = dataclasses.replace(
+                self._info(), notes="## 这版修好了下载\n\n- 条目一\n- 条目二"
+            )
+            dialog._set_available()
+            assert "这版修好了下载" in dialog.status.text(), "状态行没写清这版改了什么"
+            assert dialog.notes_body.textFormat() == Qt.TextFormat.MarkdownText, (
+                "说明应以 Markdown 渲染，而不是把 ## / ** 原文糊上去"
+            )
+            assert dialog.notes.maximumHeight() == dialog.NOTES_COLLAPSED, "说明默认应折叠"
+            assert not dialog.btn_notes.isHidden(), "折叠时应提供「展开完整说明」"
+            dialog._toggle_notes()
+            assert dialog.notes.maximumHeight() == dialog.NOTES_EXPANDED, "点开应展开"
+            assert dialog.btn_notes.text() == "收起说明"
+        finally:
+            dialog.close()
+
+    def test_download_source_is_shown(self, window, qapp):
+        """走镜像时必须让用户看见下载来自哪里（透明度）。"""
+        import time
+
+        dialog = window.build_update_dialog()
+        try:
+            dialog._info = self._info()
+            dialog._state = "downloading"
+            dialog._download_started = time.monotonic()
+            dialog._on_source("gh-proxy.com")
+            dialog._on_progress(1024 * 1024, 10 * 1024 * 1024)
+            assert "gh-proxy.com" in dialog.status.text()
+        finally:
+            dialog.close()
+
     def test_partial_failure_offers_resume(self, window, qapp):
         """慢链路中断后按钮要能直接接着下，而不是又走一遍「检查更新」。"""
         from app.core.updater import DownloadOutcome

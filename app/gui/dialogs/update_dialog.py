@@ -42,6 +42,10 @@ __all__ = ["UpdateDialog"]
 
 
 class UpdateDialog(DialogShell):
+    #: 说明区默认折叠高度（约 5 行）与展开高度——整篇 Markdown 糊一屏体验很差
+    NOTES_COLLAPSED = 108
+    NOTES_EXPANDED = 360
+
     def __init__(self, parent: QWidget | None = None, *, current_version: str = "") -> None:
         super().__init__("检查更新", parent, width=760, height=560)
         self._version = current_version
@@ -49,12 +53,14 @@ class UpdateDialog(DialogShell):
         self._downloaded: Path | None = None
         #: 下载起点（算速度与剩余时间用）与当前镜像前缀（空 = 直连）
         self._download_started = 0.0
+        self._source_host = ""
         self._mirror = ""
         #: 免安装版解压出来的目录（没有安装器可启动，只能让用户自己替换）
         self._extracted: Path | None = None
         self._worker = None
         #: idle / checking / up_to_date / available / downloading / ready / failed
         self._state = "idle"
+        self._notes_expanded = False
 
         self.status = QLabel("", self)
         self.status.setWordWrap(True)
@@ -97,9 +103,13 @@ class UpdateDialog(DialogShell):
         self.btn_primary.clicked.connect(self._on_primary)
         self.btn_release = QPushButton("发布页", self)
         self.btn_release.clicked.connect(self._open_release)
+        self.btn_notes = QPushButton("展开完整说明", self)
+        self.btn_notes.clicked.connect(self._toggle_notes)
+        self.btn_notes.setVisible(False)
         self.btn_skip = QPushButton("跳过这一版", self)
         self.btn_skip.setToolTip("这一版不再提示；出了更新的版本仍会提示")
         self.btn_skip.clicked.connect(self._skip_version)
+        self.add_footer(self.btn_notes)
         self.add_footer(self.btn_release)
         self.add_footer(self.btn_skip)
         self.add_footer(self.btn_primary)
@@ -122,6 +132,7 @@ class UpdateDialog(DialogShell):
         self.progress.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.notes.setVisible(False)
+        self.btn_notes.setVisible(False)
         self.btn_skip.setVisible(False)
 
     def _skip_version(self) -> None:
@@ -158,18 +169,45 @@ class UpdateDialog(DialogShell):
         self.progress.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_skip.setVisible(False)
+        self.btn_notes.setVisible(False)
 
     def _set_available(self) -> None:
+        from app.core.updater import release_headline
+
         info = self._info
         self._state = "available"
-        self.status.setText(f"发现新版本 {info.version}。")
+        # 状态行先说清「这版改了什么」——用户第一眼要的是这个，不是一整篇说明
+        headline = release_headline(info.notes)
+        self.status.setText(
+            f"发现新版本 {info.version}：{headline}"
+            if headline
+            else f"发现新版本 {info.version}。"
+        )
+        # Markdown 渲染：以前直接 setText，把 ## / ** / ``` 原样糊在界面上。
+        # 注意 QLabel 没有 setMarkdown，要显式把文本格式设成 Markdown 再 setText。
+        self.notes_body.setTextFormat(Qt.TextFormat.MarkdownText)
         self.notes_body.setText(info.notes or "（这次发布没有写说明）")
         self.notes.setVisible(True)
+        self._set_notes_expanded(False)
         self.btn_primary.setText("下载并安装" if self._installed else "下载")
         self.btn_primary.setEnabled(True)
         self.progress.setVisible(False)
         self.btn_cancel.setVisible(False)
         self.btn_skip.setVisible(True)
+
+    def _set_notes_expanded(self, expanded: bool) -> None:
+        """说明区默认只露几行，想看细节再展开——避免一屏全是字。"""
+        self._notes_expanded = expanded
+        self.notes.setMaximumHeight(
+            self.NOTES_EXPANDED if expanded else self.NOTES_COLLAPSED
+        )
+        self.btn_notes.setText("收起说明" if expanded else "展开完整说明")
+        # 用 isHidden() 而不是 isVisible()：对话框还没 show 时 isVisible() 恒为假，
+        # 会把按钮错误地藏起来（离屏测试与延迟显示都会踩到）。
+        self.btn_notes.setVisible(not self.notes.isHidden())
+
+    def _toggle_notes(self) -> None:
+        self._set_notes_expanded(not self._notes_expanded)
 
     def _set_up_to_date(self, why: str) -> None:
         self._state = "up_to_date"
@@ -231,7 +269,7 @@ class UpdateDialog(DialogShell):
         if asset is None:
             self._set_failed("该版本没有可下载的文件。")
             return
-        url, size, digest = asset
+        urls, size, digest = asset
         target = Path(tempfile.gettempdir()) / f"drama-splitter-{self._info.version}.exe"
         if not self._installed:
             target = target.with_suffix(".zip")
@@ -239,6 +277,7 @@ class UpdateDialog(DialogShell):
         self._state = "downloading"
         self._download_started = time.monotonic()
         self._mirror = ""
+        self._source_host = ""
         try:
             from app.core.app_config import AppConfig
 
@@ -256,14 +295,19 @@ class UpdateDialog(DialogShell):
         self.btn_cancel.setVisible(True)
         self.btn_primary.setEnabled(False)
 
-        worker = UpdateDownloadWorker(url, target, digest=digest, size=size, parent=self)
+        worker = UpdateDownloadWorker(urls, target, digest=digest, size=size, parent=self)
         # 以前这条线是断的（worker 也没上报），进度条从头到尾不动——慢链路上
         # 用户根本看不出是在跑还是卡死了。
         worker.progress.connect(self._on_progress)
+        worker.source_changed.connect(self._on_source)
         worker.finished_with.connect(self._on_downloaded)
         self._worker = worker
         register_worker(self, "update_download", worker)
         worker.start()
+
+    def _on_source(self, host: str) -> None:
+        """记录这次实际用的下载来源，显示出来——走镜像时要让用户看见。"""
+        self._source_host = str(host or "")
 
     def _on_progress(self, done: int, total: int) -> None:
         """下载进度：进度条 + 「已下载 / 速度 / 剩余」文案。"""
@@ -282,7 +326,8 @@ class UpdateDialog(DialogShell):
         if not self._mirror and 0 < speed < 300 * 1024:
             hint = "\n直连较慢：可在 config.json 里填 update_mirror 走镜像加速（见 README）。"
         version = self._info.version if self._info is not None else ""
-        self.status.setText(f"正在下载 {version}：{text}{hint}")
+        source = f"（{self._source_host}）" if self._source_host else ""
+        self.status.setText(f"正在下载 {version}{source}：{text}{hint}")
 
     def _on_downloaded(self, outcome) -> None:
         self._worker = None

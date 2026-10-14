@@ -79,26 +79,50 @@ def make_info(**kw) -> updater.UpdateInfo:
         setup_url="https://example.invalid/a-setup.exe",
         setup_size=100,
         setup_digest="sha256:aa",
+        setup_api_url="https://api.example.invalid/assets/setup",
         zip_url="https://example.invalid/a-win64.zip",
         zip_size=200,
         zip_digest="sha256:bb",
+        zip_api_url="https://api.example.invalid/assets/zip",
     )
     base.update(kw)
     return updater.UpdateInfo(**base)
 
 
 class TestAssetSelection:
-    def test_installed_copy_picks_setup(self):
-        url, size, digest = make_info().asset_for(installed=True)
-        assert url.endswith("-setup.exe") and size == 100 and digest == "sha256:aa"
+    """资产挑选要给**候选列表**：API 资产地址优先、官方地址兜底。
 
-    def test_portable_copy_picks_zip(self):
-        url, size, digest = make_info().asset_for(installed=False)
-        assert url.endswith("-win64.zip") and size == 200 and digest == "sha256:bb"
+    实测背景：官方下载地址在 github.com，用户机连 21 秒都不通（本机也只有
+    ~48KB/s），而 Release API 的资产地址走 api.github.com → 302 → CDN 通常能用。
+    """
+
+    def test_installed_copy_prefers_api_then_official(self):
+        urls, size, digest = make_info().asset_for(installed=True)
+        assert urls == [
+            "https://api.example.invalid/assets/setup",
+            "https://example.invalid/a-setup.exe",
+        ], "API 资产地址必须排在官方 github.com 地址前面"
+        assert size == 100 and digest == "sha256:aa"
+
+    def test_portable_copy_prefers_api_then_official(self):
+        urls, size, digest = make_info().asset_for(installed=False)
+        assert urls == [
+            "https://api.example.invalid/assets/zip",
+            "https://example.invalid/a-win64.zip",
+        ]
+        assert size == 200 and digest == "sha256:bb"
+
+    def test_official_url_alone_still_works(self):
+        urls, _size, _digest = make_info(setup_api_url="").asset_for(installed=True)
+        assert urls == ["https://example.invalid/a-setup.exe"]
+
+    def test_api_url_alone_still_works(self):
+        urls, _size, _digest = make_info(setup_url="").asset_for(installed=True)
+        assert urls == ["https://api.example.invalid/assets/setup"]
 
     def test_missing_asset_returns_none(self):
-        assert make_info(setup_url="").asset_for(installed=True) is None
-        assert make_info(zip_url="").asset_for(installed=False) is None
+        assert make_info(setup_url="", setup_api_url="").asset_for(installed=True) is None
+        assert make_info(zip_url="", zip_api_url="").asset_for(installed=False) is None
 
 
 class TestInstalledCopy:
@@ -176,12 +200,14 @@ def release_payload(**over):
             {
                 "name": "drama-splitter-1.0.1-setup.exe",
                 "browser_download_url": "https://example.invalid/a-setup.exe",
+                "url": "https://api.example.invalid/assets/setup",
                 "size": 100,
                 "digest": "sha256:" + "a" * 64,
             },
             {
                 "name": "drama-splitter-1.0.1-win64.zip",
                 "browser_download_url": "https://example.invalid/a-win64.zip",
+                "url": "https://api.example.invalid/assets/zip",
                 "size": 200,
                 "digest": "sha256:" + "b" * 64,
             },
@@ -205,6 +231,9 @@ class TestCheckForUpdate:
         assert result.info.version == "1.0.1"
         assert result.info.notes == "更新说明"
         assert result.info.setup_digest.startswith("sha256:")
+        # API 资产地址必须取出来：官方下载地址在 github.com，部分网络连不上
+        assert result.info.setup_api_url == "https://api.example.invalid/assets/setup"
+        assert result.info.zip_api_url == "https://api.example.invalid/assets/zip"
 
     def test_same_version_is_not_an_update(self, server, monkeypatch):
         result = self._run(server, monkeypatch, tag_name="v1.0.0")
@@ -381,11 +410,54 @@ class TestDownloadCurlArgs:
         args = updater.download_curl_args("https://x/y", part)
         assert "-C" in args
 
-    def test_mirror_is_applied_to_the_url(self, tmp_path):
-        args = updater.download_curl_args(
-            "https://github.com/a/b", tmp_path / "a.part", mirror="https://mirror.test/"
+    def test_accept_header_is_present(self, tmp_path):
+        """走 API 资产地址时必须带 Accept: application/octet-stream，否则拿到 JSON。"""
+        args = updater.download_curl_args("https://api.github.com/x", tmp_path / "a.part")
+        assert "Accept: application/octet-stream" in args
+
+
+class TestAssetCandidates:
+    """候选顺序：用户镜像 → 直连 → 内置加速源（只做兜底）。"""
+
+    def test_direct_first_then_builtin_mirrors(self):
+        urls = updater.asset_candidates(["https://github.com/a/b"])
+        assert urls[0] == "https://github.com/a/b", "直连必须排第一"
+        assert any(u.startswith(updater.BUILTIN_MIRRORS[0]) for u in urls[1:]), (
+            "直连失败后要能回退到内置加速源"
         )
-        assert args[-1] == "https://mirror.test/https://github.com/a/b"
+
+    def test_user_mirror_goes_first_and_disables_builtin(self):
+        urls = updater.asset_candidates(
+            ["https://github.com/a/b"], mirror="https://my-mirror.test/"
+        )
+        assert urls[0] == "https://my-mirror.test/https://github.com/a/b"
+        assert len(urls) == 2, f"用户配了镜像就只走「镜像 + 直连」，实际 {urls}"
+
+    def test_user_mirror_only_wraps_the_download_url(self):
+        """API 资产地址不套镜像——它本身可达，只负责 302 到 CDN。"""
+        api = "https://api.github.com/repos/o/r/releases/assets/1"
+        dl = "https://github.com/o/r/releases/download/v1/a.exe"
+        urls = updater.asset_candidates([api, dl], mirror="https://my-mirror.test/")
+        assert urls == [
+            "https://my-mirror.test/https://github.com/o/r/releases/download/v1/a.exe",
+            api,
+            dl,
+        ]
+
+    def test_mirror_off_uses_direct_only(self):
+        for value in ("off", "none", "-"):
+            urls = updater.asset_candidates(["https://github.com/a/b"], mirror=value)
+            assert urls == ["https://github.com/a/b"], value
+
+    def test_api_url_is_not_mirrored(self):
+        """内置加速源只套 github.com 地址；API 地址本身可达，不该绕路。"""
+        api = "https://api.github.com/repos/o/r/releases/assets/1"
+        urls = updater.asset_candidates([api])
+        assert urls == [api]
+
+    def test_empty_input(self):
+        assert updater.asset_candidates([]) == []
+        assert updater.asset_candidates([], mirror="https://m.test/") == []
 
 
 class TestMirrorUrl:
@@ -560,3 +632,56 @@ class TestRelaunchAfterSilentUpdate:
         assert "{param:RESTARTAPP|0}" in text, "重启条件没读 /RESTARTAPP 参数"
         # 交互安装那条仍要 skipifsilent：托管静默部署不该被突然拉出一个界面
         assert "skipifsilent" in text
+
+
+class TestDownloadCandidates:
+    """第一个地址失败就换下一个——用户那边 github.com 不通，得靠 API 地址救回来。"""
+
+    def test_falls_back_to_the_next_url(self, server, tmp_path):
+        _require_curl()
+        blob = b"z" * 65536
+        server.body_blob = blob
+        server.status = 200
+        digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+        dead = "http://127.0.0.1:1/nothing"          # 连不上 → curl 非零退出
+        good = f"{server.base_url}/download"
+        outcome = updater.download_asset(
+            [dead, good], tmp_path / "a.bin", digest=digest, size=len(blob)
+        )
+        assert outcome.ok, outcome.message
+        assert (tmp_path / "a.bin").read_bytes() == blob
+
+    def test_all_candidates_fail_is_reported(self, tmp_path):
+        _require_curl()
+        outcome = updater.download_asset(
+            ["http://127.0.0.1:1/a", "http://127.0.0.1:1/b"], tmp_path / "a.bin"
+        )
+        assert not outcome.ok
+        assert "下载失败" in outcome.message
+        assert not (tmp_path / "a.bin.part").exists()
+
+    def test_github_failure_hint_is_actionable(self):
+        """连不上 github.com 时必须给出下一步怎么做，而不是只报 curl 码。"""
+        hint = updater._download_failure_hint(["https://github.com/a/b"])
+        assert "发布页" in hint and "update_mirror" in hint
+
+    def test_hint_is_empty_for_other_hosts(self):
+        assert updater._download_failure_hint(["https://mirror.test/a"]) == ""
+
+
+class TestReleaseHeadline:
+    """更新窗口第一眼要看到「这版改了什么」，而不是一整篇 Markdown。"""
+
+    def test_takes_first_heading(self):
+        notes = "## 这版修的是「下载失败」\n\n正文…"
+        assert updater.release_headline(notes) == "这版修的是「下载失败」"
+
+    def test_skips_hash_levels_and_blank_lines(self):
+        assert updater.release_headline("\n\n### 小标题\n正文") == "小标题"
+
+    def test_falls_back_to_first_text_line(self):
+        assert updater.release_headline("没有标题的一段话\n\n## 后面才有") == "没有标题的一段话"
+
+    def test_empty_input(self):
+        assert updater.release_headline("") == ""
+        assert updater.release_headline(None) == ""

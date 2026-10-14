@@ -944,12 +944,15 @@ class UpdateDownloadWorker(BaseWorker):
     """
 
     progress = Signal(int, int)  # 已下载字节, 总字节
+    source_changed = Signal(str)  # 当前下载来源主机（直连 / 镜像）
     finished_with = Signal(object)  # DownloadOutcome
 
-    def __init__(self, url: str, target, *, digest: str = "", size: int = 0,
+    def __init__(self, urls, target, *, digest: str = "", size: int = 0,
                  parent=None) -> None:
+        # ``urls`` 可以是单个地址，也可以是候选列表（API 资产地址优先、
+        # 官方下载地址兜底）——谁来试由 download_asset 决定。
         super().__init__(parent)
-        self._url = url
+        self._urls = urls
         self._target = target
         self._digest = digest
         self._size = size
@@ -965,7 +968,7 @@ class UpdateDownloadWorker(BaseWorker):
             except Exception:  # noqa: BLE001 - 配置读不出来就直连，不该挡住更新
                 mirror = ""
             outcome = download_asset(
-                self._url,
+                self._urls,
                 self._target,
                 digest=self._digest,
                 size=self._size,
@@ -974,6 +977,7 @@ class UpdateDownloadWorker(BaseWorker):
                 on_progress=lambda done, total, *_: self.progress.emit(
                     int(done), int(total)
                 ),
+                on_source=lambda host: self.source_changed.emit(str(host)),
             )
         except Exception as exc:  # noqa: BLE001
             outcome = DownloadOutcome(ok=False, message=f"下载过程异常：{exc}")
