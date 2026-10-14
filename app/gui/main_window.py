@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
     # ---- 接线 ----------------------------------------------------------
 
     def _connect(self) -> None:
+        self.app_bar.update_clicked.connect(self.open_update_dialog)
         self.workbench.stage_changed.connect(lambda _stage: self._sync_chrome())
         self.workbench.state_changed.connect(self._sync_chrome)
         self.workbench.hint_changed.connect(self.bottom.set_hint)
@@ -199,7 +200,11 @@ class MainWindow(QMainWindow):
 
         help_menu = bar.addMenu("帮助")
         self._add_action(help_menu, "环境自检…", self.open_env_check_dialog)
-        self._add_action(help_menu, "检查更新…", self.open_update_dialog)
+        # 存下这个 action：检查到新版时要把版本号写进文案——关掉弹窗之后
+        # 菜单是唯一还在的入口。
+        self.action_update = self._add_action(
+            help_menu, "检查更新…", self.open_update_dialog
+        )
         self._add_action(help_menu, "关于", self._show_about)
 
     def _add_action(self, menu, text: str, handler, shortcut: str = "",
@@ -466,7 +471,37 @@ class MainWindow(QMainWindow):
             dismissed = ""
         if dismissed and result.info is not None and result.info.version == dismissed:
             return  # 用户跳过了这一版
+        # 弹窗只是「当下提醒一次」；关掉之后还得有地方能回到更新，所以顺手把
+        # 版本号落到常驻入口（菜单文案 + 顶栏按钮）。
+        if result.info is not None:
+            self._remember_available_version(result.info.version)
         self.build_update_dialog().show()
+
+    def _remember_available_version(self, version: str) -> None:
+        """把「有新版本」落到常驻入口：菜单项文案 + 顶栏按钮。"""
+        from ..core.updater import update_action_label
+
+        if getattr(self, "action_update", None) is not None:
+            self.action_update.setText(update_action_label(version))
+        self.app_bar.set_update_available(version)
+
+    def _notify_if_just_updated(self) -> None:
+        """更新完的第一次启动：报一句「已更新到 X」。
+
+        为什么要这句：应用内更新是静默安装 + 自动重启，用户只看到窗口闪了
+        一下，不说结果他没法判断是升级成功还是崩了。对账用的是真实 VERSION
+        ——用户中途取消了安装时标记不会命中，也就不会误报。
+        """
+        try:
+            from run import VERSION
+
+            from ..core.updater import take_update_pending
+        except Exception:  # noqa: BLE001 - 提示功能失败不该影响启动
+            return
+        version = take_update_pending(VERSION)
+        if not version:
+            return
+        message.information(self, "更新完成", f"已更新到 {version}。")
 
     def _show_about(self) -> None:
         from run import VERSION

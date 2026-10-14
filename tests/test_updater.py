@@ -321,3 +321,109 @@ class TestLaunchInstaller:
         assert ok
         assert "/VERYSILENT" in seen["args"]
         assert "/NORESTART" in seen["args"]
+        # 装完要让新版自己回来：installer.iss 靠这个参数决定是否重启
+        assert "/RESTARTAPP=1" in seen["args"]
+
+
+# ---------------------------------------------------------------------------
+# 更新闭环：入口文案 / 待确认标记 / 免安装版解压 / 装完自动重启
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateEntryLabel:
+    """关掉弹窗之后，菜单是唯一还在的入口——文案必须把版本号带上。"""
+
+    def test_without_available_version(self):
+        assert updater.update_action_label() == "检查更新…"
+
+    def test_with_available_version(self):
+        label = updater.update_action_label("1.0.9")
+        assert "检查更新" in label and "1.0.9" in label
+
+
+class TestUpdatePendingMarker:
+    """升级完要能告诉用户「已更新到 X」；中途取消则不能误报。"""
+
+    @staticmethod
+    def _config_in(tmp_path, monkeypatch):
+        from app.core import app_config
+
+        monkeypatch.setattr(app_config, "app_dir", lambda: tmp_path)
+
+    def test_round_trip_reports_new_version_once(self, tmp_path, monkeypatch):
+        self._config_in(tmp_path, monkeypatch)
+        assert updater.mark_update_pending("1.0.9") is True
+        assert updater.take_update_pending("1.0.9") == "1.0.9"
+        # 消费一次就清掉，别每次启动都报一遍
+        assert updater.take_update_pending("1.0.9") is None
+
+    def test_cancelled_install_does_not_report(self, tmp_path, monkeypatch):
+        self._config_in(tmp_path, monkeypatch)
+        assert updater.mark_update_pending("1.0.9") is True
+        # 用户取消了安装：跑的还是旧版 → 不报，但标记要清掉
+        assert updater.take_update_pending("1.0.8") is None
+        assert updater.take_update_pending("1.0.9") is None
+
+    def test_tolerates_v_prefix(self, tmp_path, monkeypatch):
+        self._config_in(tmp_path, monkeypatch)
+        assert updater.mark_update_pending("v1.0.9") is True
+        assert updater.take_update_pending("1.0.9") == "v1.0.9"
+
+    def test_empty_version_is_not_recorded(self, tmp_path, monkeypatch):
+        self._config_in(tmp_path, monkeypatch)
+        assert updater.mark_update_pending("") is False
+        assert updater.take_update_pending("1.0.9") is None
+
+
+class TestPortableExtraction:
+    """免安装版：解压到临时目录给用户替换，绝不原地覆盖。"""
+
+    @staticmethod
+    def _zip(tmp_path, members):
+        import zipfile
+
+        path = tmp_path / "pkg.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in members:
+                archive.writestr(name, "data")
+        return path
+
+    def test_returns_inner_folder(self, tmp_path):
+        path = self._zip(tmp_path, [
+            "drama-splitter/drama-splitter.exe",
+            "drama-splitter/_internal/x.txt",
+        ])
+        ok, where, why = updater.extract_portable_zip(path, "1.0.9")
+        assert ok and where is not None
+        assert where.name == "drama-splitter", "包里套的那层目录要直接返回，省得用户再点一层"
+        assert (where / "drama-splitter.exe").is_file()
+        assert "已解压到" in why
+
+    def test_rejects_path_traversal(self, tmp_path):
+        path = self._zip(tmp_path, ["../evil.txt", "drama-splitter/ok.txt"])
+        ok, where, _ = updater.extract_portable_zip(path, "1.0.9")
+        assert ok and where is not None
+        assert (where / "ok.txt").is_file()
+        assert not (tmp_path / "evil.txt").exists()
+        assert not (where.parent / "evil.txt").exists(), "压缩包里的 ../ 不许写到解压目录外"
+
+    def test_missing_file_is_reported(self, tmp_path):
+        ok, where, why = updater.extract_portable_zip(tmp_path / "nope.zip", "1.0.9")
+        assert not ok and where is None and "不存在" in why
+
+
+class TestRelaunchAfterSilentUpdate:
+    """静默更新装完必须把新版拉起来——否则用户只看到「窗口关了，什么都没有」。"""
+
+    def test_updater_passes_restart_flag(self):
+        import inspect
+
+        source = inspect.getsource(updater.launch_installer)
+        assert "/RESTARTAPP=1" in source, "更新器没告诉安装器装完要重启"
+
+    def test_installer_has_relaunch_entry(self):
+        text = (ROOT / "tools" / "installer.iss").read_text(encoding="utf-8")
+        assert "RelaunchRequested" in text, "installer.iss 没有重启新版的入口"
+        assert "{param:RESTARTAPP|0}" in text, "重启条件没读 /RESTARTAPP 参数"
+        # 交互安装那条仍要 skipifsilent：托管静默部署不该被突然拉出一个界面
+        assert "skipifsilent" in text

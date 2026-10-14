@@ -46,6 +46,8 @@ class UpdateDialog(DialogShell):
         self._version = current_version
         self._info = None
         self._downloaded: Path | None = None
+        #: 免安装版解压出来的目录（没有安装器可启动，只能让用户自己替换）
+        self._extracted: Path | None = None
         self._worker = None
         #: idle / checking / up_to_date / available / downloading / ready / failed
         self._state = "idle"
@@ -254,11 +256,27 @@ class UpdateDialog(DialogShell):
             self.status.setText("已下载并通过完整性校验。点下面的按钮安装。")
             self.btn_primary.setText("立即重启安装")
         else:
-            self.status.setText(
-                f"已下载并通过完整性校验：{outcome.path}\n"
-                "这是免安装版，没有安装器可用——请自己把新文件替换到旧版本所在目录。"
-            )
-            self.btn_primary.setText("打开所在目录")
+            # 免安装版：解压到临时目录，用户拿现成的文件去替换即可。
+            # 不自动覆盖——正在运行的 exe 覆盖不了自己，目标目录里还混着
+            # models/、cache/、config.json，替不替、什么时候替由用户决定。
+            from app.core.app_config import app_dir
+            from app.core.updater import extract_portable_zip
+
+            ok_zip, where, why = extract_portable_zip(outcome.path, self._info.version)
+            self._extracted = where if ok_zip else None
+            if ok_zip:
+                self.status.setText(
+                    f"已解压到：{where}\n"
+                    f"把里面的文件覆盖到当前程序目录（{app_dir()}）即可完成升级——"
+                    "覆盖前请先关掉本程序。"
+                )
+                self.btn_primary.setText("打开解压目录")
+            else:
+                self.status.setText(
+                    f"已下载并通过完整性校验：{outcome.path}\n"
+                    f"自动解压失败（{why}），请手动解压后覆盖到当前程序目录。"
+                )
+                self.btn_primary.setText("打开所在目录")
         self.btn_primary.setEnabled(True)
 
     def _apply_update(self) -> None:
@@ -267,11 +285,16 @@ class UpdateDialog(DialogShell):
         if self._downloaded is None:
             return
         if not self._installed:
-            # 免安装版没有安装器可启动，只能把目录打开让用户自己换
+            # 免安装版没有安装器可启动：打开已解压好的目录（解压失败则回退到下载目录）
             import os
 
-            os.startfile(str(self._downloaded.parent))  # noqa: S606
+            os.startfile(str(self._extracted or self._downloaded.parent))  # noqa: S606
             return
+        # 先记下「这次要装到哪个版本」：新版首次启动会拿它对账，报一句
+        # 「已更新到 X」。写失败也继续装——标记只是提示，不该挡住升级。
+        from app.core.updater import mark_update_pending
+
+        mark_update_pending(self._info.version if self._info is not None else "")
         ok, why = launch_installer(self._downloaded)
         if not ok:
             self._set_failed(why)

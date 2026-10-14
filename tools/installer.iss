@@ -29,13 +29,13 @@
 [Setup]
 AppId={{8F3C2A17-6D94-4E2B-9C51-7A0D3E68B412}
 AppName=AI 短剧智能分集器
-AppVersion=1.0.8
-AppVerName=AI 短剧智能分集器 1.0.8
+AppVersion=1.0.9
+AppVerName=AI 短剧智能分集器 1.0.9
 AppPublisher=ikun1946
 AppPublisherURL=https://github.com/ikun1946/drama-splitter
 AppSupportURL=https://github.com/ikun1946/drama-splitter/issues
 AppUpdatesURL=https://github.com/ikun1946/drama-splitter/releases
-VersionInfoVersion=1.0.8.0
+VersionInfoVersion=1.0.9.0
 VersionInfoDescription=AI 短剧智能分集器 安装程序
 
 ; 按用户安装，免管理员
@@ -54,7 +54,7 @@ CloseApplications=yes
 CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
-OutputBaseFilename=drama-splitter-1.0.8-setup
+OutputBaseFilename=drama-splitter-1.0.9-setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -84,9 +84,24 @@ Name: "{group}\{cm:UninstallProgram,AI 短剧智能分集器}"; Filename: "{unin
 Name: "{autodesktop}\AI 短剧智能分集器"; Filename: "{app}\drama-splitter.exe"; Tasks: desktopicon
 
 [Run]
+; 交互安装：勾选后启动新版。skipifsilent = 静默安装不弹界面（托管部署不该被
+; 突然拉出一个窗口）。
 Filename: "{app}\drama-splitter.exe"; Description: "{cm:LaunchProgram,AI 短剧智能分集器}"; Flags: nowait postinstall skipifsilent
+; 应用内更新：更新器用 /RESTARTAPP=1 启动安装器，这一条负责把新版拉起来。
+; 少了它，用户看到的就是「窗口突然关掉，然后什么都没有」——更新等于没做完。
+Filename: "{app}\drama-splitter.exe"; Flags: nowait; Check: RelaunchRequested
 
 [Code]
+// 应用内更新的收尾：更新器用 /VERYSILENT /RESTARTAPP=1 启动安装器。
+//
+// 为什么单独来一条 [Run]：交互安装那条带 skipifsilent（静默安装不弹界面），
+// 于是应用内更新装完什么都不会启动，用户看到的就是「窗口突然关掉，然后什么都
+// 没有」。这里只在更新器显式传了 /RESTARTAPP=1 时重启，托管静默部署不受影响。
+function RelaunchRequested(): Boolean;
+begin
+  Result := ExpandConstant('{param:RESTARTAPP|0}') = '1';
+end;
+
 // 安装后检测 FFmpeg。
 //
 // 判据是「用户装完能不能直接干活」，不是「程序能不能启动」：程序缺 FFmpeg 照样

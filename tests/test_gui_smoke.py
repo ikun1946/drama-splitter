@@ -3407,6 +3407,9 @@ class TestUpdateDialog:
             CheckResult(ok=True, info=self._info(), message="发现新版")
         )
         assert shown, "确有新版却没提示"
+        # 弹窗关掉之后还得有入口：菜单文案带版本号 + 顶栏出现按钮
+        assert "1.0.1" in window.action_update.text(), "菜单没记住有新版本"
+        assert not window.app_bar.btn_update.isHidden(), "顶栏没出现更新入口"
 
     def test_startup_check_respects_dismissed_version(self, window, qapp, monkeypatch):
         from app.core.updater import CheckResult

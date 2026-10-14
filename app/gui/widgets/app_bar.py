@@ -29,6 +29,7 @@ class AppBar(QFrame):
 
     change_source_clicked = Signal()
     reparse_clicked = Signal()
+    update_clicked = Signal()
 
     def __init__(self, title: str = _APP_TITLE, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +46,15 @@ class AppBar(QFrame):
 
         self.save_label = QLabel("")
         self.save_label.setProperty("role", "status-text")
+
+        # 「有新版本」入口：检查到新版才会出现。放顶栏而不是只弹一次对话框——
+        # 用户把弹窗关掉之后，还得有地方能想起这件事
+        # （见 MainWindow._remember_available_version）。
+        self.btn_update = QPushButton("有新版本")
+        self.btn_update.setProperty("role", "ghost")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.clicked.connect(self.update_clicked)
+        self.btn_update.setVisible(False)
 
         # 重新解析：改了设置 / 补下模型后重跑，不必重新导入源片。
         # 只在已有源片且当前没在分析时可用（由主窗口按阶段置灰）。
@@ -69,10 +79,21 @@ class AppBar(QFrame):
         layout.addWidget(self.title_label)
         layout.addStretch(1)
         layout.addWidget(self.save_label)
+        layout.addWidget(self.btn_update)
         layout.addWidget(self.btn_reparse)
         layout.addWidget(self.btn_change_source)
 
     # ---- 状态 ----------------------------------------------------------
+
+    def set_update_available(self, version: str | None) -> None:
+        """有新版就显示顶栏入口；没有（或已经升上去）就藏起来。"""
+        if not version:
+            self.btn_update.setVisible(False)
+            self.btn_update.setToolTip("")
+            return
+        self.btn_update.setText(f"有新版本 {version}")
+        self.btn_update.setToolTip(f"点这里查看并更新到 {version}")
+        self.btn_update.setVisible(True)
 
     def set_reparse_enabled(self, enabled: bool) -> None:
         """有无源片决定「重新解析」是否出现（未导入时隐藏，别给空入口）。"""

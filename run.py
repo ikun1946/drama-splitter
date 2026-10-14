@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 #     OutputBaseFilename
 # 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
 # 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 
 def _print_version() -> int:
@@ -437,6 +437,15 @@ def main() -> int:
         )
 
     window.show()
+
+    # 刚被应用内更新过的话，报一句「已更新到 X」：静默安装 + 自动重启，用户只
+    # 看到窗口闪了一下，不说结果他没法判断是升级成功还是崩了。
+    try:
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(400, window._notify_if_just_updated)
+    except Exception:  # noqa: BLE001 - 提示失败不该影响启动
+        pass
 
     # 启动后静默检查更新。延后 2 秒是刻意的：避开启动高峰，也让主窗口先出画面。
     # 这一步**只有确有新版才会弹窗**，断网/限流一律静默（见

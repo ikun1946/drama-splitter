@@ -43,7 +43,11 @@ __all__ = [
     "installed_copy",
     "check_for_update",
     "download_asset",
+    "extract_portable_zip",
     "launch_installer",
+    "mark_update_pending",
+    "take_update_pending",
+    "update_action_label",
 ]
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -391,6 +395,104 @@ def _unlink(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 更新闭环：待确认标记 / 免安装版解压 / 入口文案
+# ---------------------------------------------------------------------------
+
+#: config.json 的 extra 里记「这次更新预计会装到哪个版本」。
+#: 为什么需要：应用内更新是静默安装 + 自动重启，用户只看到窗口闪了一下。
+#: 不告诉他结果，他没法判断是升级成功还是崩了。
+PENDING_KEY = "update_pending"
+
+
+def update_action_label(available: str | None = None) -> str:
+    """「检查更新」入口的文案：知道有新版就把版本号写进去。
+
+    为什么要落到菜单文字上：只弹一次对话框的话，用户点了「稍后」/关掉窗口之后
+    就再也看不到「有新版」这件事——菜单是关掉弹窗后唯一还在的入口。
+    """
+    if available:
+        return f"检查更新（有新版 {available}）"
+    return "检查更新…"
+
+
+def mark_update_pending(version: str) -> bool:
+    """升级前记下预计装到的版本；写失败返回 False。
+
+    写失败**不阻断更新**：这只是给下一次启动的一句提示，不该挡住升级本身。
+    """
+    if not version:
+        return False
+    try:
+        from .app_config import AppConfig
+
+        config = AppConfig.load()
+        config.extra[PENDING_KEY] = str(version)
+        config.save()
+    except Exception:  # noqa: BLE001 - 配置读写问题不许影响升级
+        return False
+    return True
+
+
+def take_update_pending(current_version: str) -> str | None:
+    """消费「刚更新完」标记：只有当前版本与标记一致才返回它。
+
+    两种情形都**清掉标记**：
+
+    - 装成功：当前版本 == 标记 → 返回它，界面报一句「已更新到 X」；
+    - 用户中途取消了安装：当前版本还是旧的 → 返回 None（否则每次启动都误报
+      「已更新」，比不提示更糟）。
+
+    配置读写失败一律当作「没有标记」。
+    """
+    try:
+        from .app_config import AppConfig
+
+        config = AppConfig.load()
+        pending = str(config.extra.get(PENDING_KEY) or "")
+        if not pending:
+            return None
+        config.extra.pop(PENDING_KEY, None)
+        config.save()
+    except Exception:  # noqa: BLE001
+        return None
+    if parse_version(pending) != parse_version(current_version):
+        return None
+    return pending
+
+
+def extract_portable_zip(zip_path: Path, version: str) -> tuple[bool, Path | None, str]:
+    """把免安装版 zip 解压到临时目录，返回 (是否成功, 解压根目录, 说明)。
+
+    为什么不原地覆盖：① 正在运行的 exe 覆盖不了自己；② 目标目录里混着用户的
+    ``models/``、``cache/``、``config.json``，自动替换等于拿用户数据冒险。
+    这里只把新版解压到临时目录并把路径交出去，替换与否由用户决定。
+    """
+    import tempfile
+    import zipfile
+
+    if not zip_path.is_file():
+        return False, None, "压缩包不存在。"
+
+    root = Path(tempfile.mkdtemp(prefix=f"drama-splitter-{version}-"))
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                name = member.filename.replace("\\", "/")
+                # 压缩包来自网络，不能信：绝对路径、盘符、../ 一律拒绝（zip-slip）
+                if name.startswith("/") or ":" in name or ".." in name.split("/"):
+                    continue
+                archive.extract(member, root)
+    except (OSError, zipfile.BadZipFile) as exc:
+        return False, None, f"解压失败：{exc}"
+
+    # 包里通常套一层 drama-splitter/，有就返回它，省得用户再点进去一次
+    entries = list(root.iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        return True, entries[0], f"已解压到 {entries[0]}"
+    return True, root, f"已解压到 {root}"
+
+
+# ---------------------------------------------------------------------------
 # 启动安装器
 # ---------------------------------------------------------------------------
 
@@ -400,10 +502,23 @@ def launch_installer(path: Path) -> tuple[bool, str]:
 
     装的是免安装版时**不该**走这里——那种情况没有安装器可启动，界面要改成
     "打开下载目录"让用户自己换文件。
+
+    装完由 installer.iss 的 [Run]（``RelaunchRequested``）把新版重新拉起：
+    静默安装结束后程序自己回来，用户不必记得手动打开——否则他看到的只是
+    "窗口突然关掉，然后什么都没有"。
     """
     if not path.is_file():
         return False, "安装包不存在。"
-    args = [str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+    # /RESTARTAPP=1 是给 installer.iss 的信号：装完请把新版拉起来。
+    # 交互安装那条 [Run] 带 skipifsilent（静默安装不弹窗），靠这一条兜住
+    # 应用内更新的场景。
+    args = [
+        str(path),
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/RESTARTAPP=1",
+    ]
     try:
         subprocess.Popen(args, creationflags=_NO_WINDOW)
     except OSError as exc:
