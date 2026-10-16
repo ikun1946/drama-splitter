@@ -25,10 +25,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core.export import ExportPreset
+from ...core.export import (
+    CutMode,
+    ExportPreset,
+    nvenc_available,
+    snap_plan_to_keyframes,
+)
+from ...core.probe import probe_keyframe_frames
 from ...core.plan import BoundaryPlan
 from ...core.settings import SplitSettings
-from ...core.timebase import format_seconds_brief
+from ...core.timebase import format_seconds_brief, format_timecode
 from ..state import ProjectState
 from ..widgets import (
     Card,
@@ -47,6 +53,21 @@ from ._common import (
 
 
 __all__ = ["ExportForm", "export_precheck", "precheck_prompt", "review_target"]
+
+
+#: NVENC 可用性探测缓存（键 = ffmpeg 路径）。探测要真跑一次编码，
+#: 同进程内不重复付这个成本。
+_NVENC_CACHE: dict[str, bool] = {}
+
+
+def nvenc_cached(binaries) -> bool:
+    """带缓存的 NVENC 可用性探测；binaries 为空直接 False。"""
+    if binaries is None:
+        return False
+    key = str(getattr(binaries, "ffmpeg", binaries))
+    if key not in _NVENC_CACHE:
+        _NVENC_CACHE[key] = nvenc_available(binaries)
+    return _NVENC_CACHE[key]
 
 
 def export_precheck(
@@ -112,6 +133,16 @@ class ExportForm(QWidget):
         # 由对话框注入它的 request_precheck，测试则直接覆写对话框的方法。
         self.precheck = precheck or self._default_precheck
 
+        self.codec_combo = NoWheelComboBox()
+        self.codec_combo.addItem("x264（CPU，兼容最好）", "libx264")
+        self.codec_combo.addItem("NVENC（GPU 硬件加速）", "h264_nvenc")
+        self.codec_combo.addItem("零损失快速复制（不重新编码）", "fast_copy")
+        self._nvenc_ok = nvenc_cached(self.state.binaries)
+        if not self._nvenc_ok:
+            item = self.codec_combo.model().item(1)
+            if item is not None:
+                item.setEnabled(False)
+
         self.crf_spin = NoWheelSpinBox()
         self.crf_spin.setRange(0, 51)
         self.crf_spin.setValue(18)
@@ -124,10 +155,17 @@ class ExportForm(QWidget):
             self.audio_bitrate_combo.addItem(value)
         self.audio_bitrate_combo.setCurrentText("192k")
 
-        preset_card = Card("编码预设（精确裁切，重新编码）", parent=self)
+        preset_card = Card("编码设置", parent=self)
         preset_form = QFormLayout()
-        preset_form.addRow(QLabel("容器 / 视频编码："), QLabel("MP4 / H.264（libx264）"))
-        crf_field = LabeledField("CRF")
+        preset_form.addRow(QLabel("容器 / 视频编码："), QLabel("MP4 / H.264"))
+        codec_field = LabeledField("编码方式")
+        codec_field.attach(self.codec_combo)
+        preset_form.addRow(codec_field)
+        self.codec_hint = QLabel("")
+        self.codec_hint.setWordWrap(True)
+        self.codec_hint.setProperty("role", "muted")
+        preset_form.addRow(self.codec_hint)
+        crf_field = LabeledField("CRF（越小越清晰）")
         crf_field.attach(self.crf_spin)
         preset_form.addRow(crf_field)
         preset_field = LabeledField("编码速度")
@@ -136,6 +174,7 @@ class ExportForm(QWidget):
         audio_field = LabeledField("音频")
         audio_field.attach(self.audio_bitrate_combo)
         preset_form.addRow(audio_field)
+        self._crf_field = crf_field
 
         old = preset_card.body.layout()
         if old is not None:
@@ -146,6 +185,8 @@ class ExportForm(QWidget):
         preset_card.body_layout = preset_form
         preset_form.setContentsMargins(12, 10, 12, 10)
         preset_form.setSpacing(8)
+        self.codec_combo.currentIndexChanged.connect(self._sync_codec_fields)
+        self._sync_codec_fields()
 
         self.output_edit = QLineEdit()
         self.output_edit.setReadOnly(True)
@@ -247,7 +288,36 @@ class ExportForm(QWidget):
             "（按源片码率上浮 10% 粗略估算；CRF 编码实际大小取决于画面复杂度）"
         )
 
+    def _sync_codec_fields(self) -> None:
+        """编码方式联动：GPU / 零损失下哪些参数还有意义。"""
+        codec = self.codec_combo.currentData()
+        lossless = codec == "fast_copy"
+        gpu = codec == "h264_nvenc"
+        self.crf_spin.setEnabled(not lossless)
+        self.preset_combo.setEnabled(not lossless and not gpu)
+        self.audio_bitrate_combo.setEnabled(not lossless)
+        self._crf_field.set_label(
+            "质量 CQ（越小越清晰）" if gpu else "CRF（越小越清晰）"
+        )
+        if lossless:
+            self.codec_hint.setText(
+                "不重新编码，画质与源片逐帧一致；切点会吸附到最近的关键帧，"
+                "导出前会显示调整明细。"
+            )
+        elif gpu:
+            self.codec_hint.setText(
+                "NVIDIA 硬件编码（最高质量档），速度比 CPU 快数倍；质量由 CQ 控制。"
+            )
+        else:
+            self.codec_hint.setText("")
+
     def _preset(self) -> ExportPreset:
+        if self.codec_combo.currentData() == "h264_nvenc":
+            return ExportPreset(
+                video_codec="h264_nvenc",
+                crf=self.crf_spin.value(),
+                audio_bitrate=self.audio_bitrate_combo.currentText(),
+            )
         return ExportPreset(
             crf=self.crf_spin.value(),
             preset=self.preset_combo.currentText(),
@@ -280,6 +350,14 @@ class ExportForm(QWidget):
                 self.review_requested.emit(*review_target(plan, warnings))
                 return
 
+        cut_mode = CutMode.PRECISE
+        export_plan = plan
+        if self.codec_combo.currentData() == "fast_copy":
+            prepared = self._prepare_fast_copy(plan, media)
+            if prepared is None:
+                return
+            export_plan, cut_mode = prepared
+
         self.progress.setValue(0)
         self.btn_start.setEnabled(False)
         self.btn_retry.setEnabled(False)
@@ -288,12 +366,13 @@ class ExportForm(QWidget):
         self.worker = ExportWorker(
             self.state.binaries,
             media,
-            plan,
+            export_plan,
             self.state.output_root,
             self.state.audio_stream_index,
             self._preset(),
             only_episodes=only,
             transcript=self.state.transcript,
+            cut_mode=cut_mode,
             parent=self,
         )
         self.worker.episode_done.connect(self._on_episode_done)
@@ -301,6 +380,54 @@ class ExportForm(QWidget):
         self.worker.failed.connect(self._on_failed)
         register_worker(self, "export", self.worker)
         self.worker.start()
+
+    def _prepare_fast_copy(self, plan: BoundaryPlan, media) -> tuple[BoundaryPlan, CutMode] | None:
+        """零损失快速导出的前置：探关键帧 → 吸附切点 → 用户确认明细。
+
+        确认走 ``_confirm_fast_copy``（可覆写，与 precheck 同一套路数）——
+        测试与离屏冒烟不会真的弹模态框。
+        """
+        binaries = self.state.binaries
+        if binaries is None:
+            message.warning(self, "无法快速导出", "尚未找到 FFmpeg，无法探测关键帧。")
+            return None
+        try:
+            keyframes = probe_keyframe_frames(binaries, media)
+        except Exception as exc:  # noqa: BLE001 - 探测失败要变成可读提示
+            message.warning(self, "关键帧探测失败", str(exc))
+            return None
+
+        snapped_plan, snaps, problems = snap_plan_to_keyframes(plan, media, keyframes)
+        if problems:
+            message.warning(
+                self, "有切点无法吸附", "\n".join(problems) + "\n\n请改用精确导出。"
+            )
+            return None
+
+        moved = [s for s in snaps if s.moved]
+        if moved:
+            lines = [
+                f"第 {s.index} 个切点：{format_timecode(s.original_seconds)} → "
+                f"{format_timecode(s.snapped_seconds)}"
+                f"（{float(s.offset_seconds):+.1f} 秒）"
+                for s in moved
+            ]
+            detail = "以下切点将吸附到最近的关键帧：\n" + "\n".join(lines)
+        else:
+            detail = "所有切点都已在关键帧上，无需调整。"
+
+        if not self._confirm_fast_copy(detail):
+            return None
+        return snapped_plan, CutMode.FAST_COPY
+
+    def _confirm_fast_copy(self, detail: str) -> bool:
+        """零损失导出的确认框；测试可覆写为直接返回 True。"""
+        text = (
+            f"{detail}\n\n"
+            "零损失快速导出不重新编码，画质与源片完全一致；"
+            "各集时长会按上面的调整变化。"
+        )
+        return message.confirm_continue(self, "零损失快速导出", text, "开始导出", "取消")
 
     def _default_precheck(self, warnings: list, unreviewed: int) -> str:
         """§37 前置检查的默认实现：返回 "continue" 或 "review"。

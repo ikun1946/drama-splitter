@@ -2009,6 +2009,108 @@ class TestExportDialogContracts:
         assert "继续" in text and "返回审核" in text
 
 
+class TestExportCodecOptions:
+    """导出「编码方式」：x264 / NVENC（GPU）/ 零损失快速复制 的界面契约。"""
+
+    def _form(self, window, qapp):
+        dialog = window.build_export_dialog()
+        dialog.show()
+        qapp.processEvents()
+        return dialog, dialog.form
+
+    def test_three_modes_with_x264_default(self, window, qapp):
+        dialog, form = self._form(window, qapp)
+        try:
+            assert form.codec_combo.count() == 3
+            assert form.codec_combo.currentData() == "libx264"
+        finally:
+            dialog.close()
+
+    def test_fast_copy_disables_encoder_fields(self, window, qapp):
+        dialog, form = self._form(window, qapp)
+        try:
+            form.codec_combo.setCurrentIndex(2)     # 零损失快速复制
+            qapp.processEvents()
+            assert not form.crf_spin.isEnabled()
+            assert not form.preset_combo.isEnabled()
+            assert not form.audio_bitrate_combo.isEnabled()
+            assert "不重新编码" in form.codec_hint.text()
+
+            form.codec_combo.setCurrentIndex(0)     # 切回 x264
+            qapp.processEvents()
+            assert form.crf_spin.isEnabled() and form.preset_combo.isEnabled()
+            assert form.audio_bitrate_combo.isEnabled()
+            assert form.codec_hint.text() == ""
+        finally:
+            dialog.close()
+
+    def test_nvenc_mode_switches_to_cq_and_disables_preset(self, window, qapp):
+        dialog, form = self._form(window, qapp)
+        try:
+            form.codec_combo.model().item(1).setEnabled(True)   # 无视本机探测结果
+            form.codec_combo.setCurrentIndex(1)
+            qapp.processEvents()
+            assert not form.preset_combo.isEnabled(), "GPU 模式下速度档无意义"
+            assert form.crf_spin.isEnabled()
+            assert "CQ" in form._crf_field._title.text()
+            assert form._preset().video_codec == "h264_nvenc"
+        finally:
+            dialog.close()
+
+    def test_unavailable_nvenc_item_is_disabled(self, window, qapp, monkeypatch):
+        from app.gui.panes import export_form as ep
+
+        monkeypatch.setattr(ep, "nvenc_cached", lambda binaries: False)
+        dialog, form = self._form(window, qapp)
+        try:
+            assert not form.codec_combo.model().item(1).isEnabled(), (
+                "本机没有可用 NVENC 时必须禁用该条目（不静默钻坑）"
+            )
+        finally:
+            dialog.close()
+
+    def test_prepare_fast_copy_returns_snapped_plan(self, window, qapp, binaries, assets):
+        from app.core.export import CutMode
+
+        media = probe_media(binaries, assets["cfr"])
+        plan = TestProjectPersistence._build_plan(media, [28, 60, 90])
+        window.state.binaries = binaries
+        dialog, form = self._form(window, qapp)
+        try:
+            form._confirm_fast_copy = lambda detail: True      # 绕过模态确认
+            prepared = form._prepare_fast_copy(plan, media)
+            assert prepared is not None, "吸附应成功（切点邻近都有关键帧）"
+            new_plan, cut_mode = prepared
+            assert cut_mode is CutMode.FAST_COPY
+            assert new_plan.boundary_ticks != plan.boundary_ticks, "应有切点被吸附"
+        finally:
+            dialog.close()
+
+    def test_start_export_fast_copy_passes_cut_mode(
+        self, window, qapp, binaries, assets, tmp_path, monkeypatch
+    ):
+        from app.core.export import CutMode
+        from app.gui.panes import export_form as ep
+
+        TestStep5Refinement()._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        dialog, form = self._form(window, qapp)
+        try:
+            form.precheck = lambda warnings, unreviewed: "continue"
+            form._confirm_fast_copy = lambda detail: True
+            form.codec_combo.setCurrentIndex(2)
+            qapp.processEvents()
+            form.start_export()
+            assert len(_FakeWorker.instances) == 1
+            assert _FakeWorker.instances[0].kwargs.get("cut_mode") is CutMode.FAST_COPY
+        finally:
+            dialog.close()
+
+
 class _FakeSignal:
     def connect(self, slot):
         pass

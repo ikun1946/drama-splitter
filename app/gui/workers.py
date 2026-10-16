@@ -38,7 +38,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from ..core.app_config import AppConfig, app_dir
-from ..core.export import ExportBatchResult, ExportPreset, Exporter
+from ..core.export import CutMode, ExportBatchResult, ExportPreset, Exporter
 from ..core.ffmpeg import check_encoders
 from ..core.model_manager import default_whisper_tier, installed_llm_file, spec_by_key
 from ..core.plan import BoundaryPlan
@@ -849,10 +849,11 @@ class ExportWorker(BaseWorker):
         *,
         only_episodes: list[int] | None = None,
         transcript=None,
+        cut_mode: CutMode = CutMode.PRECISE,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._exporter = Exporter(binaries, media, preset)
+        self._exporter = Exporter(binaries, media, preset, cut_mode=cut_mode)
         self._plan = plan
         self._output_root = Path(output_root)
         self._audio_stream_index = audio_stream_index

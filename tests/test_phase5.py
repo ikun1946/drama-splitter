@@ -149,7 +149,7 @@ class TestFastCopy:
         exporter = Exporter(
             binaries, media, ExportPreset(), cut_mode=CutMode.FAST_COPY, max_parallel=1
         )
-        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=0)
+        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=media.audio_tracks[0].index)
 
         assert not batch.plan_layer_problems, batch.plan_layer_problems
         assert len(batch.results) == 4
@@ -166,7 +166,7 @@ class TestFastCopy:
         exporter = Exporter(
             binaries, media, ExportPreset(), cut_mode=CutMode.FAST_COPY, max_parallel=1
         )
-        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=0)
+        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=media.audio_tracks[0].index)
         assert all(r.success for r in batch.results)
 
         sequence: list[int] = []
@@ -188,7 +188,7 @@ class TestFastCopy:
         exporter = Exporter(
             binaries, media, ExportPreset(), cut_mode=CutMode.FAST_COPY, max_parallel=1
         )
-        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=0)
+        batch = exporter.export_plan(plan, tmp_path, audio_stream_index=media.audio_tracks[0].index)
 
         assert batch.plan_layer_problems, "必须报出关键帧不满足"
         assert "FAST_COPY_KEYFRAME" in batch.plan_layer_problems[0]

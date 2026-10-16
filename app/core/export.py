@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import bisect
 import csv
 import json
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path
@@ -31,12 +33,19 @@ from .timebase import format_seconds_brief, format_timecode, parse_seconds
 __all__ = [
     "CutMode",
     "ExportPreset",
+    "KeyframeSnap",
+    "nvenc_available",
+    "snap_plan_to_keyframes",
     "ExportJob",
     "ExportResult",
     "ExportBatchResult",
     "Exporter",
     "verify_episode_output",
 ]
+
+
+#: Windows 下隐藏子进程控制台窗口（探测 NVENC 时用）
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class CutMode(str, Enum):
@@ -61,6 +70,12 @@ class ExportPreset:
     extra_output_args: tuple[str, ...] = ()
 
     def describe(self) -> str:
+        if self.video_codec == "h264_nvenc":
+            # NVENC 的质量刻度叫 cq；标注 GPU 便于在日志/界面一眼看出走了哪条路
+            return (
+                f"{self.container.upper()} / h264_nvenc（GPU 硬件编码）"
+                f"CQ{self.crf} / {self.audio_codec}"
+            )
         return f"{self.container.upper()} / {self.video_codec} CRF{self.crf} / {self.audio_codec}"
 
     def to_json(self) -> dict:
@@ -243,14 +258,27 @@ class Exporter:
                 self.preset.audio_bitrate,
             ]
 
-        args += [
-            "-c:v",
-            self.preset.video_codec,
-            "-preset",
-            self.preset.preset,
-            "-crf",
-            str(self.preset.crf),
-        ]
+        if self.preset.video_codec == "h264_nvenc":
+            # GPU 硬件编码（NVENC）：质量档固定最高（p7 + tune hq），质量值沿用
+            # 界面上的 crf（NVENC 对应 cq，同为恒定质量刻度）；b:v=0 = 纯按
+            # 质量控码率（不做码率上限，保真度优先）。
+            args += [
+                "-c:v", "h264_nvenc",
+                "-preset", "p7",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-cq", str(self.preset.crf),
+                "-b:v", "0",
+            ]
+        else:
+            args += [
+                "-c:v",
+                self.preset.video_codec,
+                "-preset",
+                self.preset.preset,
+                "-crf",
+                str(self.preset.crf),
+            ]
         if self.preset.pix_fmt:
             args += ["-pix_fmt", self.preset.pix_fmt]
         if self.media.video and self.media.video.color_primaries:
@@ -296,7 +324,10 @@ class Exporter:
             "0:v:0",
         ]
         if job.audio_stream_index is not None:
-            args += ["-map", f"0:a:{job.audio_stream_index}"]
+            # 与精确裁切同语义：audio_stream_index 是**容器流索引**（真实素材常为 1），
+            # `0:a:N` 要的是**音频序号**（0 起）。直接把索引当序号用，真实素材
+            # （音轨流索引 = 1）会 `Stream map matches no streams` 整个失败。
+            args += ["-map", f"0:a:{_audio_ordinal(self.media, job.audio_stream_index)}"]
         args += [
             "-c",
             "copy",
@@ -386,13 +417,15 @@ class Exporter:
                 duration_seconds=float(job.duration_seconds),
                 cancel_check=self._cancel.is_set,
             )
-        except RuntimeError:
-            _safe_unlink(tmp_path)
-            result.message = "已取消"
-            return result
         except (FfmpegError, ValueError) as exc:
             _safe_unlink(tmp_path)
             result.message = str(exc)
+            return result
+        except RuntimeError:
+            # 只有真正的取消才走到这里。注意顺序：FfmpegError 继承 RuntimeError，
+            # 若先捕 RuntimeError，一切编码失败都会被误报成「已取消」（实测踩过）。
+            _safe_unlink(tmp_path)
+            result.message = "已取消"
             return result
 
         # 基础校验：文件存在且非空
@@ -640,6 +673,92 @@ def verify_episode_output(
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
+
+
+def nvenc_available(binaries: FfmpegBinaries, *, timeout: int = 30) -> bool:
+    """NVIDIA 硬件编码（NVENC）在本机是否**真的能跑**。
+
+    ``ffmpeg -encoders`` 列出 h264_nvenc 不等于可用：驱动缺失、显卡被占用、
+    虚拟机直通不完整都会在初始化处直接失败。这里用 0.1 秒合成黑帧真编一次，
+    返回码非 0 一律视为不可用——调用方据此禁用选项，绝不静默钻坑。
+    """
+    command = [
+        str(binaries.ffmpeg),
+        "-hide_banner", "-v", "error",
+        "-f", "lavfi", "-i", "color=black:s=256x144:r=30:d=0.1",
+        "-c:v", "h264_nvenc",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            command, capture_output=True, timeout=timeout, creationflags=_NO_WINDOW
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+@dataclass(frozen=True)
+class KeyframeSnap:
+    """一个内部边界吸附到最近关键帧前后的对照（零损失快速导出用）。"""
+
+    index: int                      # boundary_ticks 的下标（1..n-2）
+    original_seconds: Fraction
+    snapped_seconds: Fraction
+
+    @property
+    def offset_seconds(self) -> Fraction:
+        return self.snapped_seconds - self.original_seconds
+
+    @property
+    def moved(self) -> bool:
+        return self.snapped_seconds != self.original_seconds
+
+
+def snap_plan_to_keyframes(
+    plan: BoundaryPlan, media: MediaInfo, keyframes: "Iterable[int]"
+) -> "tuple[BoundaryPlan, tuple[KeyframeSnap, ...], tuple[str, ...]]":
+    """把每个内部边界吸附到**最近的关键帧**（零损失快速导出的前置步骤）。
+
+    返回 ``(吸附后的新方案, 吸附对照清单, 无法吸附的问题清单)``；原 plan 不被修改。
+
+    规则（不静默、不丢集）：
+    - 首尾边界（片头 / 片尾）永远不动；
+    - 每个内部边界独立找最近关键帧（帧距相同取靠前者）；
+    - 吸附结果必须严格落在前后边界之间；不满足时保留原边界并记一条问题——
+      导出前的关键帧校验会如实拒绝，绝不静默丢集或降级。
+    """
+    frames = sorted({f for f in keyframes if f >= 0})
+    ticks = list(plan.boundary_ticks)
+    if len(ticks) < 3 or not frames:
+        return plan, (), ()
+
+    result = list(ticks)
+    snaps: list[KeyframeSnap] = []
+    problems: list[str] = []
+    for i in range(1, len(ticks) - 1):
+        seconds = plan.time_base.ticks_to_seconds(ticks[i])
+        frame = media.frame_index_at_or_after(seconds)
+        pos = bisect.bisect_left(frames, frame)
+        candidates: list[int] = []
+        if pos < len(frames):
+            candidates.append(frames[pos])
+        if pos > 0:
+            candidates.append(frames[pos - 1])
+        nearest = min(candidates, key=lambda k: (abs(k - frame), k))
+        new_seconds = media.frame_start_seconds(nearest)
+        new_ticks = plan.time_base.seconds_to_ticks(new_seconds)
+        if new_ticks <= result[i - 1] or new_ticks >= ticks[i + 1]:
+            problems.append(
+                f"切点 #{i}（{format_timecode(seconds)}）附近的关键帧与相邻切点过近，"
+                "吸附会破坏覆盖顺序；该切点保持原样（快速导出会因它不在关键帧上而拒绝）。"
+            )
+            snaps.append(KeyframeSnap(i, seconds, seconds))
+            continue
+        result[i] = new_ticks
+        snaps.append(KeyframeSnap(i, seconds, new_seconds))
+
+    return replace(plan, boundary_ticks=result), tuple(snaps), tuple(problems)
 
 
 def _decimal(value: Fraction, digits: int) -> str:
