@@ -996,3 +996,13 @@ testdata/          合成素材（不入版本库）
     指向**视频**子目录；切点变化后受影响集的视频照旧改名 ``.stale``，字幕由下次
     导出整体重写。回归测试：
     ``tests/test_export_e2e.py`` 的 ``test_videos_and_subtitles_live_in_separate_folders``。
+
+28. **零损失导出确认框被切点明细撑出屏幕：固定高度 + 内部滚动。**
+    （用户截图反馈：几十个切点的明细把「零损失快速导出」确认框顶出屏幕，
+    底部按钮够不着。）``QMessageBox.setText`` 会被超长文本撑爆；新增
+    ``message.scrollable_confirm``——正文装进固定上限（420px）的
+    ``QScrollArea``，超出即内部上下滚动，「开始导出 / 取消」按钮固定在底部
+    始终可见；短内容按实际高度自适应、不被强行撑高（实测 50 行切点：窗口
+    640×478，而原实现会超过 1500px）。零损失确认改走这个框。
+    回归测试：``tests/test_gui_smoke.py::TestScrollableConfirm`` 两条
+    （50 行高度受控 / 短内容保持紧凑）。

@@ -2111,6 +2111,48 @@ class TestExportCodecOptions:
             dialog.close()
 
 
+class TestScrollableConfirm:
+    """内容过长的确认框：固定高度 + 内部滚动，按钮不被顶出屏幕。
+
+    背景：零损失快速导出的切点明细一行一条，几十集的片把 QMessageBox
+    撑出屏幕，用户看不到底部按钮（用户实测截图反馈）。
+    """
+
+    def test_window_height_is_bounded_with_many_lines(self, qapp, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.gui.widgets import message as m
+
+        seen = {}
+
+        def fake_exec(self):
+            seen["size"] = (self.width(), self.height())
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+        lines = [f"第 {i} 个切点：00:{i:02d}:03.167 → 00:{i:02d}:03.000" for i in range(1, 51)]
+        text = "\n".join(lines)
+        result = m.scrollable_confirm(None, "零损失快速导出", text, "开始导出", "取消")
+        w, h = seen["size"]
+        assert h <= 700, f"50 行内容时窗口高 {h}，应受滚动区约束"
+        assert result is True
+
+    def test_short_content_stays_small(self, qapp, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.gui.widgets import message as m
+
+        seen = {}
+
+        def fake_exec(self):
+            seen["size"] = (self.width(), self.height())
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+        m.scrollable_confirm(None, "标题", "所有切点都已在关键帧上，无需调整。", "开始导出", "取消")
+        assert seen["size"][1] < 520, "短内容窗口应保持紧凑（滚动区按内容自适应）"
+
+
 class _FakeSignal:
     def connect(self, slot):
         pass

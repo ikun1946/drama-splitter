@@ -19,7 +19,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QMessageBox, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 __all__ = [
     "information",
@@ -28,6 +29,7 @@ __all__ = [
     "warning_with_action",
     "confirm",
     "confirm_continue",
+    "scrollable_confirm",
 ]
 
 
@@ -81,6 +83,60 @@ def confirm(
     box.setWindowTitle(title)
     box.setText(text)
     box.addButton(ok_text, QMessageBox.ButtonRole.AcceptRole)
+    refused = box.addButton(cancel_text, QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    return box.clickedButton() is not refused
+
+
+def scrollable_confirm(
+    parent: QWidget | None,
+    title: str,
+    text: str,
+    ok_text: str,
+    cancel_text: str,
+    *,
+    max_height: int = 420,
+    max_width: int = 640,
+) -> bool:
+    """内容过长的确认框：正文放固定上限的滚动区，绝不让窗口顶出屏幕。
+
+    ``QMessageBox.setText`` 会被超长文本撑爆——零损失快速导出的切点明细
+    （一行一个切点，几十上百行）曾把对话框顶出屏幕、按钮够不着。这里把
+    正文装进 ``QScrollArea``（固定最大高度，超出即内部上下滚动），按钮行
+    固定在底部始终可见。
+
+    短文本场景请继续用 :func:`confirm_continue`（原生样式更简洁）。
+    同样是实例级 ``exec()``——离屏自动化请覆写调用方的方法（如
+    ``ExportForm._confirm_fast_copy``），不要直接调用本函数。
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    # 滚动区需要显式宽度参照，否则 QScrollArea 的 sizeHint 恒为最小值
+    label.setFixedWidth(max_width - 48)
+
+    scroll = QScrollArea()
+    scroll.setWidget(label)
+    scroll.setWidgetResizable(True)
+    # 短内容不被强行撑到上限：按内容自适应，只有超出上限才固定住开始滚动
+    content_h = label.sizeHint().height()
+    scroll.setFixedHeight(min(content_h + 4, min(max_height, 420)))
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    body = QWidget()
+    layout = QVBoxLayout(body)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(scroll)
+    box.layout().addWidget(body, 1, 0)
+
+    box.resize(max_width, box.sizeHint().height())
+    accepted = box.addButton(ok_text, QMessageBox.ButtonRole.AcceptRole)
     refused = box.addButton(cancel_text, QMessageBox.ButtonRole.RejectRole)
     box.exec()
     return box.clickedButton() is not refused

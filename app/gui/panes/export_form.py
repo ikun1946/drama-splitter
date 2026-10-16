@@ -421,13 +421,20 @@ class ExportForm(QWidget):
         return snapped_plan, CutMode.FAST_COPY
 
     def _confirm_fast_copy(self, detail: str) -> bool:
-        """零损失导出的确认框；测试可覆写为直接返回 True。"""
+        """零损失导出的确认框；测试可覆写为直接返回 True。
+
+        切点明细一行一条，几十集的片就是几十行——QMessageBox 会被撑出屏幕
+        （按钮够不着、内容被截断）。这里用固定高度的滚动确认框，超出部分
+        在内部上下滚，按钮永远可见。
+        """
         text = (
             f"{detail}\n\n"
             "零损失快速导出不重新编码，画质与源片完全一致；"
             "各集时长会按上面的调整变化。"
         )
-        return message.confirm_continue(self, "零损失快速导出", text, "开始导出", "取消")
+        return message.scrollable_confirm(
+            self, "零损失快速导出", text, "开始导出", "取消"
+        )
 
     def _default_precheck(self, warnings: list, unreviewed: int) -> str:
         """§37 前置检查的默认实现：返回 "continue" 或 "review"。
