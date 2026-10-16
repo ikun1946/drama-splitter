@@ -14,7 +14,6 @@ from __future__ import annotations
 from fractions import Fraction
 
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QCheckBox,
     QFormLayout,
     QHBoxLayout,
@@ -442,8 +441,14 @@ class SettingsForm(QWidget):
     def _sync_editable_fields(self, by_count: bool) -> None:
         """源字段可编辑、派生字段只读；标题随模式说明哪个是算出来的。
 
-        只读字段去掉步进箭头（``NoButtons``）：既避免误触，也不给它"可以改"
-        的暗示；控件保持 enabled 以便正常读出数值。
+        控件保持 enabled 以便正常读出数值；**不再切 ``NoButtons``** ——
+        Qt 6.12 的 QStyleSheetStyle 在「QSpinBox/QDoubleSpinBox + NoButtons +
+        主题 QSS 的 padding」组合下会算错文本绘制区：数字被裁成左上角一小块，
+        严重时完全不可见（离屏实测抓手：可见深色像素 48 → 0）。用户看到的就是
+        「预计集数没显示 / 数字被遮挡」。
+
+        而本主题 QSS 早已把 up/down 按钮画成透明（看不到箭头），两种符号模式
+        外观一致；「不能改」由 ``setReadOnly`` 真正保证（只读时点按钮也不改值）。
         """
         recommend = self.radio_recommend.isChecked()
         # 模式C 里两个都是**判定结果**，一个都不能改
@@ -452,16 +457,6 @@ class SettingsForm(QWidget):
 
         self.duration_spin.setReadOnly(duration_ro)
         self.count_spin.setReadOnly(count_ro)
-        self.duration_spin.setButtonSymbols(
-            QAbstractSpinBox.ButtonSymbols.NoButtons
-            if duration_ro
-            else QAbstractSpinBox.ButtonSymbols.UpDownArrows
-        )
-        self.count_spin.setButtonSymbols(
-            QAbstractSpinBox.ButtonSymbols.UpDownArrows
-            if by_count
-            else QAbstractSpinBox.ButtonSymbols.NoButtons
-        )
         if recommend:
             self._duration_field.set_label("每集时长（分析后自动判定）")
             self._count_field.set_label("集数（分析后自动判定）")

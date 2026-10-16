@@ -921,6 +921,59 @@ class TestSettingsAutoFill:
         form.tolerance_spin.setValue(0.0)
         return form
 
+    def test_derived_fields_keep_arrow_symbols(self, window, binaries, assets):
+        """派生（只读）字段不得切 NoButtons——Qt 6.12 下会把数字裁没（回归）。
+
+        实测（抓图统计深色像素）：NoButtons 时 0 个（完全不可见），
+        UpDownArrows 时约 48 个（正常渲染）。这条盯住"别改回去"。
+        """
+        from PySide6.QtWidgets import QAbstractSpinBox
+
+        form = self._form_with_media(window, binaries, assets)
+        form.radio_by_duration.setChecked(True)
+        assert (
+            form.count_spin.buttonSymbols()
+            == QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        ), "预计集数（只读）用了 NoButtons，Qt 6.12 会把文字裁掉"
+        form.radio_by_count.setChecked(True)
+        assert (
+            form.duration_spin.buttonSymbols()
+            == QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        ), "预计目标时长（只读）用了 NoButtons，Qt 6.12 会把文字裁掉"
+
+    def test_derived_field_text_renders_visibly(self, window, binaries, assets, qapp):
+        """数值必须真的画出来：成片深色像素、且位于垂直中带（像素级回归）。
+
+        背景：Qt 6.12 的 QSS + NoButtons 组合把文字裁成左上角一小块，
+        曾导致「预计集数（自动）」在界面上完全读不出来。
+        """
+        dialog = window.build_settings_dialog()
+        dialog.show()
+        for _ in range(3):
+            qapp.processEvents()
+        try:
+            form = dialog.form
+            form.radio_by_duration.setChecked(True)
+            form.duration_spin.setValue(50.0)
+            for _ in range(3):
+                qapp.processEvents()
+            img = form.count_spin.grab().toImage()
+            dark = 0
+            ys = []
+            for y in range(img.height()):
+                for x in range(img.width()):
+                    c = img.pixelColor(x, y)
+                    if c.red() < 120 and c.green() < 120 and c.blue() < 120:
+                        dark += 1
+                        ys.append(y)
+            assert dark >= 10, f"只读集数字段看不到文字（深色像素仅 {dark} 个）"
+            mid = sum(ys) / len(ys)
+            assert img.height() * 0.2 < mid < img.height() * 0.8, (
+                f"文字集中在 y≈{mid:.0f}（图高 {img.height()}），疑似被裁到边角"
+            )
+        finally:
+            dialog.close()
+
     def test_mode_a_fills_count_from_duration(self, window, binaries, assets):
         form = self._form_with_media(window, binaries, assets)
         form.duration_spin.setValue(30.0)

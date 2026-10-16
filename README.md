@@ -920,3 +920,21 @@ testdata/          合成素材（不入版本库）
     ``repair_steps`` 从报告提取计划、``execute_repair`` 串行执行并汇总），
     ``EnvRepairWorker`` 只负责挪进线程；回归测试：``tests/test_env_repair.py``
     12 条，加 ``tests/test_gui_smoke.py::TestEnvCheckDialog`` 里 7 条界面测试。
+
+
+25. **「预计集数（自动）」看不到数字：Qt 6.12 的 QSS + NoButtons 把文字裁没了。**
+    「分集设置」里两处"派生只读"字段（按目标时长时的「预计集数（自动）」、
+    按目标集数时的「预计目标时长（自动）」）原先在只读时会切
+    ``setButtonSymbols(NoButtons)``（本意是"去掉箭头、避免给出可以改的暗示"）。
+    而 Qt 6.12 的 QStyleSheetStyle 在「``QSpinBox/QDoubleSpinBox`` + ``NoButtons``
+    + 主题 QSS 的 ``padding``」组合下会算错文本绘制区：数字被裁成**左上角一小块**，
+    严重时完全不可见（离屏实测：可见深色像素 48 → 0；用户截图里就是一个模糊的小
+    墨点，看起来像"没有显示"或"被遮挡"）。
+    排查方式：同一控件只切 ``buttonSymbols`` 抓图对比——有箭头=正常、NoButtons=
+    裁没；与只读/可编辑无关（两种组合都试过）。
+    修法：**不再切 ``NoButtons``** —— 本主题 QSS 早已把 up/down 按钮画成透明
+    （本来就看不出箭头），两种符号模式外观一致；「不能改」由 ``setReadOnly``
+    真正保证（只读时点按钮也不改值）。
+    回归测试两条：``test_derived_fields_keep_arrow_symbols``（符号模式断言）与
+    ``test_derived_field_text_renders_visibly``（像素断言：深色像素 ≥10 且位于
+    垂直中带）。
