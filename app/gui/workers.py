@@ -870,7 +870,7 @@ class ExportWorker(BaseWorker):
         from app.core.episode_files import export_episode_subtitles
 
         directory = (
-            self._output_root / "episodes" / self._plan.export_directory_name()
+            self._output_root / "episodes" / self._plan.episode_subtitles_dir()
         )
         try:
             self.subtitle_results = export_episode_subtitles(

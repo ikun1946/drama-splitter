@@ -482,7 +482,7 @@ class Exporter:
         audio_stream_index: int | None,
     ) -> list[ExportJob]:
         """按冻结方案生成导出任务清单（§14.4 冻结版本）。"""
-        directory = output_root / "episodes" / plan.export_directory_name()
+        directory = output_root / "episodes" / plan.episode_videos_dir()
         counts = plan.frame_counts(self.media)
         jobs: list[ExportJob] = []
         for episode, count in zip(plan.episodes(), counts):
@@ -509,7 +509,8 @@ class Exporter:
         retry_failed: int = 2,
     ) -> ExportBatchResult:
         """导出整个方案。失败只重试失败项，成功集数保留（§14.4）。"""
-        batch = ExportBatchResult(plan_directory=output_root / "episodes" / plan.export_directory_name())
+        # plan_directory 指向视频子目录（mark_stale、完成提示都以它为家）
+        batch = ExportBatchResult(plan_directory=output_root / "episodes" / plan.episode_videos_dir())
 
         for problem in plan.validate():
             if problem.is_blocking:
@@ -570,6 +571,8 @@ class Exporter:
         """§14.4 切点改变后，相邻受影响集的既有产物标记过期。
 
         采用改名而非删除：用户可能已经发布了成片，不能被工具静默销毁。
+        ``directory`` 传**视频**子目录（受影响产物是视频；字幕会在下次导出时
+        整体重写，不需要逐个改名）。
         """
         marked: list[Path] = []
         if not directory.exists():

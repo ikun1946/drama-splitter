@@ -987,3 +987,12 @@ testdata/          合成素材（不入版本库）
     吸附正确性 / 帧守恒 / 端到端快速复制 / 音轨映射 / 异常不误报取消）与
     ``tests/test_gui_smoke.py::TestExportCodecOptions`` 6 条（三种模式 / 联动禁用 /
     不可用禁用 / 吸附前置 / ``cut_mode`` 传递）。
+
+27. **导出目录里视频和字幕混在一起：分成 plan_XXXX/视频 与 plan_XXXX/字幕。**
+    （用户反馈：``episodes/plan_0001/`` 下 ``第XX集.mp4`` 与 ``第XX集.srt``
+    混放，希望各自成文件夹。）现在分集视频落在 ``episodes/plan_XXXX/视频/``、
+    字幕落在 ``episodes/plan_XXXX/字幕/``——视频整目录拖进剪辑软件时不会带上
+    字幕，字幕也不会混在成片里。``plan_directory``（完成提示 / mark_stale 的家）
+    指向**视频**子目录；切点变化后受影响集的视频照旧改名 ``.stale``，字幕由下次
+    导出整体重写。回归测试：
+    ``tests/test_export_e2e.py`` 的 ``test_videos_and_subtitles_live_in_separate_folders``。

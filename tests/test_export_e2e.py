@@ -399,6 +399,20 @@ class TestTransactionAndRecovery:
         assert not batch.results
         assert not list(tmp_path.rglob("*.mp4"))
 
+    def test_videos_and_subtitles_live_in_separate_folders(self, exported):
+        """导出产物分目录：视频在 plan_XXXX/视频/，字幕在 plan_XXXX/字幕/。
+
+        用户反馈：plan_0001 里 .mp4 与 .srt 混在一起，希望各自成文件夹——
+        视频整目录拖进剪辑软件时不会带上字幕、字幕也不会挡住成片。
+        """
+        root = exported["root"]
+        videos = sorted(p.name for p in root.glob("episodes/plan_0001/视频/*.mp4"))
+        assert videos, "视频必须在 episodes/plan_0001/视频/ 下"
+        plan_dir_files = [
+            p.name for p in (root / "episodes" / "plan_0001").iterdir() if p.is_file()
+        ]
+        assert not plan_dir_files, f"方案根目录不应再有散落文件：{plan_dir_files}"
+
     def test_stale_marking_renames_affected_episodes(self, exported):
         """§14.4 切点改变后，相邻受影响集的既有产物必须标记过期。"""
         directory = exported["batch"].plan_directory

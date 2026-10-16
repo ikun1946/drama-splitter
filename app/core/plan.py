@@ -642,6 +642,14 @@ class BoundaryPlan:
         """§18.2 输出目录按方案版本隔离。"""
         return f"plan_{self.version:04d}"
 
+    def episode_videos_dir(self) -> str:
+        """分集视频所在子目录（与字幕分开，便于整目录拖进剪辑软件）。"""
+        return self.export_directory_name() + "/视频"
+
+    def episode_subtitles_dir(self) -> str:
+        """分集字幕（SRT）所在子目录。"""
+        return self.export_directory_name() + "/字幕"
+
 
 def _frac_json(value: Fraction):
     if value.denominator == 1:
