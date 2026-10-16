@@ -2112,13 +2112,15 @@ class TestExportCodecOptions:
 
 
 class TestScrollableConfirm:
-    """内容过长的确认框：固定高度 + 内部滚动，按钮不被顶出屏幕。
+    """内容过长的弹窗：固定尺寸 + 内部滚动，按钮不被顶出屏幕 / 宽度不塌缩。
 
-    背景：零损失快速导出的切点明细一行一条，几十集的片把 QMessageBox
-    撑出屏幕，用户看不到底部按钮（用户实测截图反馈）。
+    背景：零损失快速导出的切点明细与导出结束的汇总（每集一行）都是几十行，
+    曾两次把 QMessageBox 撑出屏幕（一次顶爆高度、一次在真机被布局回调压窄）。
+    autouse 的 message_recorder 会拦截 message 模块函数，所以这里直接打
+    QMessageBox 类属性、直测 scrollable_confirm / scrollable_notice 本体。
     """
 
-    def test_window_height_is_bounded_with_many_lines(self, qapp, monkeypatch):
+    def test_confirm_height_bounded_and_width_adaptive(self, qapp, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
         from app.gui.widgets import message as m
@@ -2135,9 +2137,10 @@ class TestScrollableConfirm:
         result = m.scrollable_confirm(None, "零损失快速导出", text, "开始导出", "取消")
         w, h = seen["size"]
         assert h <= 700, f"50 行内容时窗口高 {h}，应受滚动区约束"
+        assert 380 <= w <= 640, f"窗口宽 {w} 应自适应最长行且封顶 640（不许塌缩也不许过宽）"
         assert result is True
 
-    def test_short_content_stays_small(self, qapp, monkeypatch):
+    def test_short_content_stays_compact(self, qapp, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
         from app.gui.widgets import message as m
@@ -2150,7 +2153,39 @@ class TestScrollableConfirm:
 
         monkeypatch.setattr(QMessageBox, "exec", fake_exec)
         m.scrollable_confirm(None, "标题", "所有切点都已在关键帧上，无需调整。", "开始导出", "取消")
-        assert seen["size"][1] < 520, "短内容窗口应保持紧凑（滚动区按内容自适应）"
+        assert seen["size"][1] < 400, "短内容窗口应保持紧凑"
+        assert seen["size"][0] < 640, "短内容宽度按最长行自适应，不该被撑到上限"
+
+    def test_notice_long_summary_is_scrolled(self, qapp, monkeypatch):
+        """scrollable_notice：长汇总固定尺寸、内部滚动（information 的长文本形态）。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.gui.widgets import message as m
+
+        seen = {}
+
+        def fake_exec(self):
+            seen["size"] = (self.width(), self.height())
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+        text = "成功 45/45 集，失败 0 集" + "".join(
+            f"\n  第{i:02d}集有 1 条字幕被截断" for i in range(1, 46)
+        )
+        m.scrollable_notice(None, "导出结束", text)
+        w, h = seen["size"]
+        assert h <= 700, f"长汇总窗口高 {h} 应受滚动区约束"
+        assert w <= 640
+
+    def test_long_text_threshold(self):
+        """information/warning 的长文本阈值：>=8 行或 >=600 字符走滚动框。"""
+        from app.gui.widgets.message import _is_long
+
+        assert _is_long("a\n" * 8)
+        assert _is_long("x" * 600)
+        assert not _is_long("只有一行")
+        assert not _is_long("a\n" * 5)
+        assert not _is_long("x" * 100)
 
 
 class _FakeSignal:

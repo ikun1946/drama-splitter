@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 __all__ = [
@@ -33,12 +34,28 @@ __all__ = [
 ]
 
 
+#: 超过这个行数 / 字符数，information / warning 自动改用滚动框——
+#: 导出几十集的汇总（每集一行截断明细）曾把 QMessageBox 撑出屏幕。
+_LONG_TEXT_LINES = 8
+_LONG_TEXT_CHARS = 600
+
+
+def _is_long(text: str) -> bool:
+    return text.count("\n") >= _LONG_TEXT_LINES or len(text) >= _LONG_TEXT_CHARS
+
+
 def information(parent: QWidget | None, title: str, text: str) -> None:
+    if _is_long(text):
+        scrollable_notice(parent, title, text)
+        return
     QMessageBox.information(parent, title, text)
 
 
 def warning(parent: QWidget | None, title: str, text: str) -> None:
     """既是警告也是"此路不通"的硬约束提示（沿用既有文案习惯）。"""
+    if _is_long(text):
+        scrollable_notice(parent, title, text)
+        return
     QMessageBox.warning(parent, title, text)
 
 
@@ -88,6 +105,51 @@ def confirm(
     return box.clickedButton() is not refused
 
 
+def scrollable_notice(
+    parent: QWidget | None,
+    title: str,
+    text: str,
+    *,
+    max_height: int = 420,
+    max_width: int = 640,
+) -> None:
+    """单按钮「知道了」的滚动提示框（information / warning 的长内容形态）。"""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    from PySide6.QtGui import QFontMetrics
+
+    metrics = QFontMetrics(label.font())
+    longest = max(
+        (metrics.horizontalAdvance(line) for line in text.split("\n")), default=0
+    )
+    label.setFixedWidth(min(longest + 24, max_width - 80))
+
+    scroll = QScrollArea()
+    scroll.setWidget(label)
+    scroll.setWidgetResizable(False)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setFixedHeight(min(label.sizeHint().height() + 6, max_height))
+
+    body = QWidget()
+    body_layout = QVBoxLayout(body)
+    body_layout.setContentsMargins(0, 0, 0, 0)
+    body_layout.addWidget(scroll)
+    box.layout().addWidget(body, 1, 0)
+
+    box.addButton("知道了", QMessageBox.ButtonRole.AcceptRole)
+    avail_h = QGuiApplication.primaryScreen().availableGeometry().height() - 120
+    height = min(box.sizeHint().height(), avail_h)
+    box.setFixedSize(label.width() + 80, height)
+    box.exec()
+
+
 def scrollable_confirm(
     parent: QWidget | None,
     title: str,
@@ -98,12 +160,16 @@ def scrollable_confirm(
     max_height: int = 420,
     max_width: int = 640,
 ) -> bool:
-    """内容过长的确认框：正文放固定上限的滚动区，绝不让窗口顶出屏幕。
+    """内容过长的确认框：固定尺寸 + 正文滚动，绝不让窗口顶出或塌缩。
 
     ``QMessageBox.setText`` 会被超长文本撑爆——零损失快速导出的切点明细
     （一行一个切点，几十上百行）曾把对话框顶出屏幕、按钮够不着。这里把
-    正文装进 ``QScrollArea``（固定最大高度，超出即内部上下滚动），按钮行
-    固定在底部始终可见。
+    正文装进 ``QScrollArea``：高度按内容自适应、超过上限（420px）就固定住
+    开始滚动；「开始导出 / 取消」按钮固定在底部始终可见。
+
+    宽度必须 ``setFixedSize`` 钉死（且在加完按钮之后）：``QScrollArea`` 的
+    最小提示不约束内容宽度，只 ``resize()`` 的话真机 ``exec()`` 的布局回调
+    会把宽度塌缩到约 200px（用户实测：窗口窄成一条，时间码全被裁掉）。
 
     短文本场景请继续用 :func:`confirm_continue`（原生样式更简洁）。
     同样是实例级 ``exec()``——离屏自动化请覆写调用方的方法（如
@@ -117,27 +183,38 @@ def scrollable_confirm(
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    # 滚动区需要显式宽度参照，否则 QScrollArea 的 sizeHint 恒为最小值
-    label.setFixedWidth(max_width - 48)
+    # 标签宽度按**最长一行**自适应（封顶 max_width-80）：给换行一个确定参照，
+    # 短内容不空旷、长内容封顶后由滚动条接管纵向。
+    from PySide6.QtGui import QFontMetrics
+
+    metrics = QFontMetrics(label.font())
+    longest = max(
+        (metrics.horizontalAdvance(line) for line in text.split("\n")), default=0
+    )
+    label.setFixedWidth(min(longest + 24, max_width - 80))
 
     scroll = QScrollArea()
     scroll.setWidget(label)
-    scroll.setWidgetResizable(True)
-    # 短内容不被强行撑到上限：按内容自适应，只有超出上限才固定住开始滚动
-    content_h = label.sizeHint().height()
-    scroll.setFixedHeight(min(content_h + 4, min(max_height, 420)))
+    scroll.setWidgetResizable(False)
     scroll.setFrameShape(QScrollArea.Shape.NoFrame)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    # 短内容按实际高度自适应；超过上限才固定住开始滚动
+    scroll.setFixedHeight(min(label.sizeHint().height() + 6, max_height))
 
     body = QWidget()
-    layout = QVBoxLayout(body)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(scroll)
+    body_layout = QVBoxLayout(body)
+    body_layout.setContentsMargins(0, 0, 0, 0)
+    body_layout.addWidget(scroll)
     box.layout().addWidget(body, 1, 0)
 
-    box.resize(max_width, box.sizeHint().height())
     accepted = box.addButton(ok_text, QMessageBox.ButtonRole.AcceptRole)
     refused = box.addButton(cancel_text, QMessageBox.ButtonRole.RejectRole)
+
+    # 固定尺寸（宽 = max_width；高 = 内容实高，夹在屏幕可用区内）。
+    # setFixedSize 让最小尺寸 = 最大尺寸，布局回调无法再把窗口压窄。
+    avail_h = QGuiApplication.primaryScreen().availableGeometry().height() - 120
+    height = min(box.sizeHint().height(), avail_h)
+    box.setFixedSize(label.width() + 80, height)
     box.exec()
     return box.clickedButton() is not refused
 
