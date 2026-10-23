@@ -4,7 +4,10 @@
 # （本机 pypi.org 只有 15 kB/s，清华镜像实测 67 MB/s）
 
 # 界面（只要 Essentials；Addons 约 160MB，本项目不需要）
-PySide6-Essentials>=6.8
+# 6.12 的 PySide6 初始化方式与当前 PyInstaller 打包链不兼容；源码可运行，
+# 但冻结后会因 Qt 扩展模块未完整初始化而启动失败。发布构建固定在验证过的
+# 6.8.x 系列，等到打包链完成适配后再放开。
+PySide6-Essentials>=6.8.3,<6.12
 
 # 合成测试素材、包络计算、字幕对齐
 numpy>=2.0

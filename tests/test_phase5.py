@@ -124,6 +124,44 @@ class TestEpisodeSubtitles:
         assert all(not r.success for r in results)
         assert all(r.notes for r in results), "必须说明为什么没有字幕"
 
+    def test_recap_shifts_subtitle_timeline_and_includes_previous_tail(
+        self, binaries, tmp_path
+    ):
+        """带前情回顾时，第 2 集字幕要整体后移，并包含回顾段对白。"""
+        from app.core.asr import AsrWord, Transcript, build_sentences
+        from app.core.probe import probe_media
+
+        media = probe_media(binaries, Path("testdata/cfr_120s_25fps.mp4"))
+        plan = make_plan(media, [10, 50])
+        transcript = Transcript(duration=Fraction(60))
+        transcript.words = [
+            AsrWord(
+                start=Fraction(8),
+                end=Fraction(9),
+                text="回顾句。",
+                probability=0.9,
+            ),
+            AsrWord(
+                start=Fraction(11),
+                end=Fraction(29, 2),
+                text="正片句。",
+                probability=0.9,
+            ),
+        ]
+        transcript.sentences = build_sentences(transcript.words)
+        results = export_episode_subtitles(
+            plan,
+            transcript,
+            tmp_path,
+            recap_by_episode={2: Fraction(3)},
+        )
+        second = results[1].path.read_text(encoding="utf-8")
+        # 第 2 集正片从 10s 开始、回顾从 7s 开始：8–9s 的上一句要进第 2 集，
+        # 显示时间 1–2s；11–14.5s 的正片句从相对 1s 后移到 4s。
+        assert "00:00:01,000 --> 00:00:02,000" in second, second
+        assert "回顾句" in second, "回顾区间的对白必须带上"
+        assert "00:00:04,000 --> 00:00:07,500" in second, second
+
 
 # ---------------------------------------------------------------------------
 # 快速复制（§14.2）

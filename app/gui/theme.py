@@ -307,6 +307,31 @@ QComboBox QAbstractItemView:disabled {{
     color: {TEXT_DISABLED};
 }}
 
+QTabBar::tab {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: {BG};
+    color: {TEXT_MUTED};
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: {RADIUS_SM}px;
+    border-top-right-radius: {RADIUS_SM}px;
+    padding: 6px 14px;
+    margin-right: 2px;
+}}
+
+QTabBar::tab:hover {{
+    background: {BG_HOVER};
+    color: {TEXT};
+}}
+
+QTabBar::tab:selected {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    background: {BG_ALT};
+    color: {TEXT};
+    border-color: {BORDER};
+    font-weight: 600;
+}}
+
 /* ===== 按钮 ===== */
 /* 三档：primary（每屏唯一主动作）/ secondary（默认）/ ghost（行内小动作）。
    圆角 10 = RADIUS_MD，控件高约 36（min-height 20 + padding 8 + 边框 2）。
@@ -485,6 +510,7 @@ QListWidget::item:selected {{
 /* ===== 表格 ===== */
 QTableWidget {{
     background: {BG_ALT};
+    alternate-background-color: {BG_LOG};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
     gridline-color: {BORDER};
@@ -761,6 +787,53 @@ QLabel[role="section-label"] {{
     background: transparent;
 }}
 
+/* ===== 云端模型首屏 ===== */
+QLabel[role="provider-heading"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_DISPLAY}pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QLabel[role="provider-step"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_TITLE}pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+/* ===== 导出首屏 ===== */
+QLabel[role="export-heading"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_DISPLAY}pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QFrame[role="export-metric"] {{
+    background: {BG_LOG};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD}px;
+}}
+
+QLabel[role="export-metric-value"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_TITLE}pt;
+    font-weight: 600;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QLabel[role="export-metric-caption"] {{
+    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
+    font-size: {FONT_SIZE_CAPTION}pt;
+    color: {TEXT_MUTED};
+    background: transparent;
+}}
+
 /* ===== 滚动条 ===== */
 QScrollBar:vertical {{
     background: transparent;
@@ -821,6 +894,12 @@ QScrollArea {{
 }}
 
 QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+
+/* 导出页正文不是滚动区，但仍要透明：否则深色主题下 QWidget 的默认
+   白底会在两张卡片之间露出一条亮边，看起来像卡片边框断开。 */
+QWidget#exportBody {{
     background: transparent;
 }}
 

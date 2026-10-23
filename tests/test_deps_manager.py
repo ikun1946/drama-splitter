@@ -139,12 +139,32 @@ class TestPresentVsInstalled:
             (root / name).mkdir(parents=True)
         assert dm.deps_present(root) is True
 
-    def test_installed_false_when_placeholder_dirs(self, tmp_path):
+    def test_installed_false_when_placeholder_dirs(self, tmp_path, monkeypatch):
         """空目录能骗过 present，但骗不过 installed（真导入会失败）。"""
         root = tmp_path / "deps"
         for name in ("faster_whisper", "ctranslate2", "tokenizers", "onnxruntime", "av"):
             (root / name).mkdir(parents=True)
-        assert dm.deps_installed(root) is False
+        # 本机 site-packages 可能恰好装有 tokenizers / av 等包：那是“系统里能用”，
+        # 不能证明外挂空目录独立可用。清掉已导入模块，并临时把真实站点包
+        # 与工作区移出搜索路径；外挂空目录仍挂在末尾，导入应全部失败。
+        saved_modules = {
+            name: sys.modules.pop(name)
+            for name in list(sys.modules)
+            if name.split(".", 1)[0] in dm.REQUIRED_IMPORTS
+        }
+        saved_path = list(sys.path)
+        workspace = str(Path(__file__).resolve().parents[1])
+        try:
+            sys.path[:] = [
+                entry
+                for entry in sys.path
+                if "site-packages" not in entry.lower()
+                and not entry.startswith(workspace)
+            ]
+            assert dm.deps_installed(root) is False
+        finally:
+            sys.path[:] = saved_path
+            sys.modules.update(saved_modules)
 
 
 class TestDllDirDiscovery:

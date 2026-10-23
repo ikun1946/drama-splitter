@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("06-模型.png", _model_dialog)
 
-    # 07 导出对话框
+    # 07 导出对话框：默认原生编码；前情回顾默认关闭，展开时另见说明文案
     export_dir = ROOT / "testdata" / "_shot_out"
     export_dir.mkdir(parents=True, exist_ok=True)
     window.state.output_root = export_dir
@@ -257,19 +257,19 @@ def main(argv: list[str] | None = None) -> int:
 
     shot_dialog("07-导出.png", _export_dialog)
 
-    # 08 云端厂商页签（合并前的「厂商管理」）：左列表 + 右字段编辑 + 模型表格。
-    # 选中"火山方舟"（字段最全的一家），让截图里能看到"按协议显隐"与只读外发预览。
+    # 08 云端模型页签：左列表 + 厂商连接首屏；进阶模型管理默认收起。
+    # 选中 DeepSeek：首屏只展示连接信息，用途与模型留给「模型设置」。
     # 用空配置构造：本机若存了 API Key，切到这页就会真去拉各家的 /models。
     def _provider_dialog():
         dialog = window.build_model_dialog(
             config_path=Path(tempfile.mkdtemp()) / "config.json", providers_tab=True
         )
         form = dialog.providers
-        form.select_profile("volc")
+        form.select_profile("deepseek")
         pump(app, 0.2)
         return dialog
 
-    shot_dialog("08-云端厂商.png", _provider_dialog)
+    shot_dialog("08-云端模型.png", _provider_dialog)
 
     # 09 模型设置：两条能力各选一个模型，本地 / 云端可以混着用。
     # 刻意用**空配置**构造——本机若存了 API Key，打开它就会真去拉各家的

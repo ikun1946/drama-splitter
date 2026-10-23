@@ -1,11 +1,13 @@
-"""厂商表单：「模型管理 → 云端厂商」页签（列表 + 编辑区 + 模型表格 + 能力开关）。
+"""厂商表单：「模型管理 → 云端模型」页签（只配置厂商连接）。
 
 一个界面管一家厂商的全部
 ------------------------
-Key、外发许可、能力开关、模型名原先分散在「模型管理」的云端卡片与独立的
-「厂商管理」对话框里——同一份档案两处都能改，用户实测就撞上了。现在全部收在
-这一页：左列表选厂商，右侧填字段、看/选模型（`/models` 自动刷新 + 手填可记住）、
-勾能力并「保存并测试连通性」。
+左列表选厂商，右侧填写连接信息、外发许可与进阶参数，并用「保存并测试连接」
+验证这份档案是否可用。
+
+**具体用途用哪个模型不在这里选。** 语义判断和语音转写各用什么模型，统一由
+「工具 → 模型设置…」决定；本页只维护厂商档案（地址、协议、Key、模型清单与
+每个模型的参数）。这样同一份选择只有一处入口，不会出现两个页面各说各话。
 
 几条硬规则
 ----------
@@ -15,7 +17,7 @@ Key、外发许可、能力开关、模型名原先分散在「模型管理」�
   `backend_prefs` 里存的也是 id，因此覆盖不会让"已选中的后端"失效。
 - **删除/恢复默认必须连带处理引用**：把 `backend_prefs` 里指向它的能力改回本地，
   否则用户只会看到"云端静默失效"而不知道为什么。
-- **测通才允许启用**：勾了能力必须点「保存并测试连通性」，通过的才切后端。
+- **测通才允许启用**：只有「保存并测试连接」通过后，档案才会被标记为已启用。
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ from ..widgets import (
     ModelTable,
     NoWheelComboBox,
     NoWheelSpinBox,
+    StatusPill,
     scrollable,
 )
 from ..widgets import message
@@ -91,7 +94,8 @@ class ProviderForm(QWidget):
     ) -> None:
         super().__init__(parent)
         self.state = state
-        self.setMinimumWidth(760)
+        self.setMinimumWidth(820)
+        self.setMinimumHeight(620)
         self._config = AppConfig.load(config_path)
         #: 测试注入点：默认写真实 config.json，测试指到临时文件
         self._config_path = config_path
@@ -122,6 +126,13 @@ class ProviderForm(QWidget):
         self.profile_list.setItemDelegate(ElidingItemDelegate(self.profile_list))
         self.profile_list.currentItemChanged.connect(self._on_selected)
         self.profile_list.setMinimumWidth(220)
+        self.profile_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("搜索厂商")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_profile_filter)
         self.btn_new = QPushButton("新增")
         self.btn_duplicate = QPushButton("复制为自定义")
         self.btn_delete = QPushButton("删除")
@@ -138,6 +149,7 @@ class ProviderForm(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
+        left.addWidget(self.search)
         left.addWidget(self.profile_list, 1)
         # 四个动作排成 2×2：占的宽度与列表一致，比一列四行更紧凑
         pairs = QGridLayout()
@@ -296,31 +308,18 @@ class ProviderForm(QWidget):
         for _key, _box in self.info_modalities.items():
             _box.toggled.connect(self._on_info_edited)
 
-        # ---- 云端能力开关（合并自原「模型管理」的云端卡片）------------------
+        # ---- 厂商连接：保存 / 测通 ------------------------------------------
         #
-        # 为什么搬到厂商这里：Key、外发许可、能力开关都是"这家厂商怎么被使用"，
-        # 拆在两个对话框里等于同一份档案两处都能改（用户实测就是这么撞上的）。
-        # 排成一行而不是分组框：两个复选框 + 一个按钮的信息量不值得多占三行高度，
-        # 外发/上传范围写进各自的 tooltip（勾选那一刻就能读到）。
-        self.use_judge = QCheckBox("语义判断使用云端", self)
-        self.use_judge.setToolTip("只发候选点前后台词文本（不含画面）")
-        self.use_asr = QCheckBox("语音转写使用云端", self)
-        self.use_asr.setToolTip("整条音轨分块上传，约 10 分钟/块")
-        self.btn_probe = QPushButton("保存并测试连通性", self)
+        # 这里只回答"这份连接能不能用"，不决定哪条能力走云端，也不替用户选模型。
+        self.btn_probe = QPushButton("保存并测试连接", self)
         self.btn_probe.setToolTip(
-            "保存本页字段，并对勾选的能力各发一次连通性请求；只有测通的那条才会切到云端"
+            "保存厂商连接信息，并测试这份档案已配置的全部能力；"
+            "通过后才能在「模型设置」里选用"
         )
         self.btn_probe.clicked.connect(self._save_and_probe)
         self.cloud_hint = QLabel("", self)
         self.cloud_hint.setWordWrap(True)
         self.cloud_hint.setProperty("role", "muted")
-        ability_row = QHBoxLayout()
-        ability_row.setContentsMargins(0, 0, 0, 0)
-        ability_row.setSpacing(12)
-        ability_row.addWidget(self.use_judge)
-        ability_row.addWidget(self.use_asr)
-        ability_row.addStretch(1)
-        ability_row.addWidget(self.btn_probe)
         self.btn_refresh_models = QPushButton("刷新模型列表", self)
         self.btn_refresh_models.clicked.connect(lambda: self._request_models(force=True))
         self.model_note = QLabel("", self)
@@ -362,9 +361,9 @@ class ProviderForm(QWidget):
         # 整行文字宽度。原来那句「显示高级字段（接口地址 / 协议 / 火山专用 / id / 代理）」
         # 要 598px，把整个表单的最小宽度顶到 768px > 视口 698px，于是保存按钮那一
         # 栏被切掉。枚举内容移到 tooltip。
-        self.advanced_toggle = QCheckBox("显示高级字段", self)
+        self.advanced_toggle = QCheckBox("进阶设置（接口地址、协议、模型参数）", self)
         self.advanced_toggle.setToolTip(
-            "接口地址 / 协议 / 火山专用字段 / 厂商 id / 代理设置"
+            "接口地址 / 协议 / 火山专用字段 / 厂商 id / 代理 / 模型清单与参数"
         )
         self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
         id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
@@ -387,57 +386,102 @@ class ProviderForm(QWidget):
         self.hint_label.setWordWrap(True)
         self.hint_label.setProperty("role", "muted")
 
-        self.btn_save = QPushButton("保存", self)
-        self.btn_save.setProperty("role", "primary")
+        self.btn_save = QPushButton("仅保存", self)
         self.btn_save.clicked.connect(self._on_save)
-        self.btn_revert = QPushButton("放弃改动", self)
+        self.btn_revert = QPushButton("撤销", self)
         self.btn_revert.clicked.connect(lambda: self._load_profile(self._profile_id))
+        self.btn_probe.setProperty("role", "primary")
 
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
+        actions.addWidget(self.btn_probe)
         actions.addWidget(self.btn_save)
         actions.addWidget(self.btn_revert)
-        actions.addWidget(self.advanced_toggle)
         # 动作排在卡片标题栏（右上角）而不是表单末尾：正文比一屏长时需要滚动，
         # 把「保存」放在文末等于每次改完都要先滚到底
         self.actions_host = QWidget(self)
         self.actions_host.setLayout(actions)
 
-        editor_card = Card("档案字段", parent=self)
+        # ---- 首屏：只回答"这是哪家厂商、凭据是否就绪" ----------------
+        #
+        # 旧版首屏同时出现 名称 / Key / 外发 / 两条能力 / 模型表 / 参数 / 保存，
+        # 用户不知道该先做什么。新版把选厂商、填 Key、确认外发许可放在首屏，
+        # 服务地址/协议/id/代理、模型清单和参数都收进进阶设置。
+        self.provider_title = QLabel("", self)
+        self.provider_title.setProperty("role", "provider-heading")
+        self.provider_subtitle = QLabel("", self)
+        self.provider_subtitle.setProperty("role", "muted")
+        self.provider_subtitle.setWordWrap(True)
+        self.provider_state = StatusPill("待配置", "muted", self)
+
+        heading = QHBoxLayout()
+        heading.setContentsMargins(0, 0, 0, 0)
+        heading.setSpacing(8)
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+        title_box.addWidget(self.provider_title)
+        title_box.addWidget(self.provider_subtitle)
+        heading.addLayout(title_box, 1)
+        heading.addWidget(self.provider_state, 0, Qt.AlignmentFlag.AlignTop)
+
+        step_key = QLabel("连接凭据", self)
+        step_key.setProperty("role", "provider-step")
+        step_key.setToolTip("先填写 API Key；它只会保存在本机配置文件中")
+        self.key_field.set_label("API Key")
+        key_note = QLabel(
+            "凭据只保存在本机，也可以改用输入框提示里的环境变量。",
+            self,
+        )
+        key_note.setProperty("role", "muted")
+        key_note.setWordWrap(True)
+        key_tail = QHBoxLayout()
+        key_tail.setContentsMargins(0, 0, 0, 0)
+        key_tail.setSpacing(10)
+        key_tail.addWidget(self.allow_upload)
+        key_tail.addWidget(key_note, 1)
+
+        editor_card = Card("配置这家厂商", parent=self)
         editor_card.add_header_widget(self.actions_host)
-        editor_card.body_layout.addWidget(label_field)
-        # Key 与「允许外发」并排：两者都是"这一家怎么被使用"的开关
-        key_row = QHBoxLayout()
-        key_row.setContentsMargins(0, 0, 0, 0)
-        key_row.setSpacing(12)
-        key_row.addWidget(self.key_field, 2)
-        key_row.addWidget(self.allow_upload, 1, Qt.AlignmentFlag.AlignBottom)
-        editor_card.body_layout.addLayout(key_row)
-        editor_card.body_layout.addLayout(ability_row)
-        # 结果提示紧跟在「保存并测试连通性」按钮下面，而不是表单末尾。
+        editor_card.body_layout.addLayout(heading)
+        editor_card.body_layout.addWidget(step_key)
+        editor_card.body_layout.addWidget(self.key_field)
+        editor_card.body_layout.addLayout(key_tail)
+        # 结果提示紧跟在主动作下方，而不是表单末尾。
         # 放在末尾时，用户点了按钮、结果写进了折叠线以下——**看上去就是"点了没反应"**。
         # 这一页正文比一屏长，滚动区之外的消息等于没有消息。
         self.hint_label.setVisible(False)
-        editor_card.body_layout.addWidget(self.hint_label)
-        editor_card.body_layout.addWidget(self.cloud_hint)
+        editor_card.body_layout.insertWidget(1, self.hint_label)
+        editor_card.body_layout.insertWidget(2, self.cloud_hint)
         # 模型清单：它可能很长（自带滚动），但排在配置项之后
-        models_title = QLabel("模型（该厂商 /models 拉回来的 + 你手填的）", editor_card)
+        models_title = QLabel("模型清单与参数（接口拉取 + 手填）", editor_card)
         models_title.setProperty("role", "muted")
         # QLabel 默认单行不换行，minimumSizeHint 即整行文字宽度——那是硬下限，
         # 布局压不下去。这几处长说明文字以前把厂商表单顶宽到超出对话框视口。
         models_title.setWordWrap(True)
-        editor_card.body_layout.addWidget(models_title)
-        editor_card.body_layout.addWidget(self.model_table)
-        editor_card.body_layout.addLayout(models_row)
-        editor_card.body_layout.addWidget(self.info_title)
-        editor_card.body_layout.addLayout(info_row)
-        editor_card.body_layout.addWidget(self.info_note)
-        editor_card.body_layout.addWidget(self.advanced_host)
+        self.models_host = QWidget(self)
+        models_layout = QVBoxLayout(self.models_host)
+        models_layout.setContentsMargins(0, 0, 0, 0)
+        models_layout.setSpacing(8)
+        models_layout.addWidget(models_title)
+        models_layout.addWidget(self.model_table)
+        models_layout.addLayout(models_row)
+        models_layout.addWidget(self.info_title)
+        models_layout.addLayout(info_row)
+        models_layout.addWidget(self.info_note)
+        models_layout.addWidget(label_field)
+        models_layout.addWidget(self.advanced_host)
+        self.advanced_toggle.blockSignals(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.blockSignals(False)
+        self.models_host.setVisible(False)
+        editor_card.body_layout.addWidget(self.advanced_toggle)
+        editor_card.body_layout.addWidget(self.models_host)
         editor_card.body_layout.addWidget(self.egress_preview)
 
         right_host = scrollable(editor_card)
-        right_host.setMinimumWidth(480)
+        right_host.setMinimumWidth(620)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
@@ -473,6 +517,14 @@ class ProviderForm(QWidget):
                 row = index
                 break
         self.profile_list.setCurrentRow(row)
+        self._apply_profile_filter(self.search.text())
+
+    def _apply_profile_filter(self, text: str) -> None:
+        """按厂商名过滤左列表；选中项若被筛掉则保留下方编辑区内容。"""
+        keyword = (text or "").strip().lower()
+        for index in range(self.profile_list.count()):
+            item = self.profile_list.item(index)
+            item.setHidden(bool(keyword) and keyword not in item.text().lower())
 
     def selected_id(self) -> str | None:
         item = self.profile_list.currentItem()
@@ -543,6 +595,7 @@ class ProviderForm(QWidget):
             return
         self._loading = True
         self._profile_id = profile.id
+        self._fetched_models = []
         self.edit_id.setText(profile.id)
         self.edit_id.setEnabled(not self._is_builtin(profile.id))
         self.edit_label.setText(profile.label)
@@ -575,14 +628,13 @@ class ProviderForm(QWidget):
         # 点下去才发现被拦——不如一开始就置灰。
         self.btn_delete.setEnabled(not builtin)
         self.btn_restore.setEnabled(builtin)
-        self.use_judge.setChecked(self._capability_uses_cloud(profile, CAP_JUDGE))
-        self.use_asr.setChecked(self._capability_uses_cloud(profile, CAP_ASR))
         self._refresh_cloud_hint()
         self._refresh_field_visibility()
-        self._refresh_info_panel()
         self._set_hint("")
         # 换厂先清掉上一家的清单：留着会让表格在新厂商名下短暂显示别人的模型
-        self._fetched_models = []
+        self._show_models([])
+        self._refresh_info_panel()
+        self._refresh_header()
         # 切到一家厂商就顺手拉一次它的模型列表（地址与 Key 齐了才会真发请求；
         # 同一对 (地址, Key) 命中缓存则不重复拉）
         self._request_models()
@@ -612,18 +664,20 @@ class ProviderForm(QWidget):
         self.edit_api_key.setText("")
         self.allow_upload.setChecked(False)
         self.use_system_proxy.setChecked(False)
-        self.use_judge.setChecked(False)
-        self.use_asr.setChecked(False)
         self.cloud_hint.setText("")
         self._loading = False
         self._refresh_info_panel()
+        self._refresh_header()
         self._loading = False
         self.profile_list.setCurrentItem(None)
         self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
         self.btn_restore.setEnabled(False)
-        self.advanced_toggle.setChecked(True)  # 新增必须先填 id，直接把高级区摊开
+        self.advanced_toggle.setChecked(True)  # 新增必须先填 id / 地址 / 协议
         self._refresh_field_visibility()
-        self._set_hint("填好 id 与名称后选协议；保存即写入配置。")
+        self._set_hint(
+            "填好名称、接口地址与协议后，点「保存并测试连接」。"
+            "模型用途请随后到「工具 → 模型设置…」中选择。"
+        )
 
     def _on_duplicate(self) -> None:
         """复制为自定义：同一家厂商两套 Key / 两个账号时用。"""
@@ -803,11 +857,32 @@ class ProviderForm(QWidget):
                 "没有拉到清单（没填 Key 或该厂商不提供 /models）：表格里是档案中已有的"
                 "模型名，也可以继续手动添加。"
             )
+        self._refresh_header()
+
+    # ---- 首屏摘要 -------------------------------------------------------
+
+    def _refresh_header(self) -> None:
+        """刷新厂商标题与连接状态；用途和具体模型由「模型设置」负责。"""
+        profile = self._stored_profile(self._profile_id)
+        profile_label = profile.label if profile is not None else "尚未选择厂商"
+        self.provider_title.setText(profile_label)
+        self.provider_subtitle.setText(
+            "API Key、外发许可与连接参数都在这里；保存后测试一次连接。"
+            if profile is not None
+            else "从左侧选择一家厂商，或点「新增」接入自建服务。"
+        )
+        enabled = profile is not None and profile.enabled
+        self.provider_state.set_text("已连通" if enabled else "待测试")
+        self.provider_state.set_tone("success" if enabled else "muted")
 
     # ---- 模型表格（指派 / 添加 / 删除）----------------------------------
 
     def _on_model_assigned(self, name: str, capability: str) -> None:
-        """把某个模型名指派给一条能力。与其它字段一样，等「保存」才写进配置。"""
+        """把某个模型名写进档案的对应字段。
+
+        这只是准备候选模型名，不代表这项能力立刻改走云端；是否使用它由
+        「模型设置」页的 ``backend_prefs`` 决定。
+        """
         if capability == CAP_ASR:
             self._asr_model = name
         else:
@@ -815,7 +890,11 @@ class ProviderForm(QWidget):
         self.model_table.set_assignment(self._judge_model, self._asr_model)
         self._refresh_egress_preview()
         label = CAP_LABELS.get(capability, capability)
-        self._set_hint(f"{label}模型已改为「{name}」（点「保存」后写入配置）。")
+        self._set_hint(
+            f"{label}候选模型已改为「{name}」。点「保存并测试连接」写入配置。"
+            if name
+            else f"{label}候选模型已清空。"
+        )
         # 模态可能与这条能力冲突（比如把纯文本模型指给了转写），说清比事后报错好
         self._warn_if_modality_conflicts()
 
@@ -834,12 +913,12 @@ class ProviderForm(QWidget):
             if needed == "文本" and not info.can_judge():
                 self._set_hint(
                     f"「{name}」的模态里没有文本，不能做{CAP_LABELS[capability]}——"
-                    "在下面「模型参数」里改，或换一个模型。"
+                    "在「进阶设置 → 模型参数」里改，或换一个模型。"
                 )
             elif needed == "音频" and not info.can_transcribe():
                 self._set_hint(
                     f"「{name}」的模态里没有音频，不能做{CAP_LABELS[capability]}——"
-                    "在下面「模型参数」里改，或换一个模型。"
+                    "在「进阶设置 → 模型参数」里改，或换一个模型。"
                 )
 
     # ---- 模型参数 -------------------------------------------------------
@@ -982,7 +1061,7 @@ class ProviderForm(QWidget):
         for box in self.info_modalities.values():
             box.setEnabled(enabled)
         if not enabled:
-            self.info_title.setText("模型参数：先在上面选中一个模型")
+            self.info_title.setText("模型参数：先在模型清单里选中一个模型")
             self.info_note.setText("")
             self.info_context.setValue(0)
             self.info_reasoning.setCurrentIndex(0)
@@ -1054,7 +1133,7 @@ class ProviderForm(QWidget):
     def _validated_draft(self) -> ProviderProfile | None:
         """校验当前编辑的档案；有问题返回 None（原因写进提示行）。
 
-        「保存」与「保存并测试连通性」共用这一处：两条路径各写一遍校验，
+        「仅保存」与「保存并测试连接」共用这一处：两条路径各写一遍校验，
         迟早出现"一个按钮放行、另一个拦下"。
         """
         draft = self.current_draft()
@@ -1089,15 +1168,19 @@ class ProviderForm(QWidget):
         self._config.providers = items
         self._save_config()
 
-    # ---- 云端能力：开关 / 测通 / 切换后端 --------------------------------
+    # ---- 厂商连接：测通状态 ----------------------------------------------
 
-    def _cloud_switches(self):
-        """能力 → 勾选框（顺序固定，界面与测试都按这个顺序读）。"""
-        return ((CAP_JUDGE, self.use_judge), (CAP_ASR, self.use_asr))
+    def _configured_capabilities(self, profile: ProviderProfile) -> list[str]:
+        """这份档案的协议与字段实际覆盖了哪几条能力。
 
-    def _capability_uses_cloud(self, profile: ProviderProfile, capability: str) -> bool:
-        """该能力此刻是否真的走这家云端（选了 + 档案已测通）。"""
-        return profile.enabled and self._config.backend_for(capability) == profile.id
+        用"配置是否齐全"而不是"backend_prefs 是否指向它"来决定测什么：
+        厂商档案和模型用途已经解耦，连接测试不应因为模型设置暂时选了本地就跳过。
+        """
+        return [
+            capability
+            for capability in (CAP_JUDGE, CAP_ASR)
+            if missing_config_reason(profile, capability) is None
+        ]
 
     def _set_hint(self, text: str) -> None:
         """写提示行，并同步显隐。
@@ -1109,10 +1192,11 @@ class ProviderForm(QWidget):
         self.hint_label.setVisible(bool(text))
 
     def _save_and_probe(self) -> None:
-        """保存 + 逐能力测连通：**只把测通的能力切到云端**。
+        """保存厂商档案并测试连接，不在这里切换任何模型用途。
 
-        失败一律不允许启用：否则用户会以为通了，直到真正分析时才回退本地并
-        看到一次"莫名其妙的回退"。测不通的勾选框会自动取消，并写明原因。
+        测哪些能力由档案的实际配置决定：协议启用了、地址和模型名也齐了，
+        才算这项连接值得测试。全部已配置能力都通过时写 ``enabled=True``；
+        任何一项失败就不把整份档案标记为可用，并在提示行逐项写明原因。
         """
         draft = self._validated_draft()
         if draft is None:
@@ -1120,39 +1204,40 @@ class ProviderForm(QWidget):
         self._write_profile(draft)
         self._profile_id = draft.id
 
-        results: dict[str, str | None] = {}
-        for capability, checkbox in self._cloud_switches():
-            if not checkbox.isChecked():
-                results[capability] = None       # 没勾就不测（也不算启用）
-                continue
-            error = self._probe(draft, capability)
-            results[capability] = error
-            if error is not None:
-                checkbox.setChecked(False)
+        capabilities = self._configured_capabilities(draft)
+        if not capabilities:
+            self._write_profile(draft.with_updates(enabled=False))
+            self.reload(select=draft.id)
+            self._set_hint(
+                "已保存；这份档案还没有配置完整的云端能力。"
+                "展开「进阶设置」补齐接口、协议与候选模型后再测试。"
+            )
+            return
 
-        enabled_any = False
-        passed: list[str] = []
         failures: list[str] = []
-        for capability, checkbox in self._cloud_switches():
-            uses_cloud = checkbox.isChecked() and results.get(capability) is None
+        passed: list[str] = []
+        for capability in capabilities:
+            error = self._probe(draft, capability)
             label = CAP_LABELS.get(capability, capability)
-            if uses_cloud:
-                enabled_any = True
+            if error is None:
                 passed.append(label)
-            elif results.get(capability) is not None:
-                failures.append(f"{label}：{results[capability]}")
-            self._set_cloud_backend(capability, draft.id if uses_cloud else LOCAL_BACKEND)
+            else:
+                failures.append(f"{label}：{error}")
 
-        self._write_profile(draft.with_updates(enabled=enabled_any))
+        connected = not failures
+        self._write_profile(draft.with_updates(enabled=connected))
         self.reload(select=draft.id)
         if failures:
-            self._set_hint("连通性测试未通过——" + "；".join(failures) + "。")
-        elif enabled_any:
             self._set_hint(
-                f"连通性正常：{draft.label}。已切到云端的是：{'、'.join(passed)}。"
+                "连接测试未通过——" + "；".join(failures) + "。"
+                + (f"已通过：{'、'.join(passed)}。" if passed else "")
             )
         else:
-            self._set_hint("已保存字段；未勾选任何能力，这条能力仍走本地模型。")
+            self._set_hint(
+                f"连接成功：{draft.label}。已通过：{'、'.join(passed)}。"
+                "现在可以到「工具 → 模型设置…」选择要使用它的模型。"
+            )
+        self._refresh_cloud_hint()
 
     def _probe(self, profile: ProviderProfile, capability: str) -> str | None:
         """连通性测试的接缝：返回错误描述；可用时返回 None。
@@ -1191,25 +1276,26 @@ class ProviderForm(QWidget):
             return str(exc)
         return None
 
-    def _set_cloud_backend(self, capability: str, backend: str) -> None:
-        prefs = dict(self._config.backend_prefs)
-        prefs[capability] = backend
-        self._config.backend_prefs = prefs
-        self._save_config()
-
     def _refresh_cloud_hint(self) -> None:
+        """只报告厂商档案的连接状态，不把"模型设置"的选择混进来。"""
         profile = self._stored_profile(self._profile_id)
         if profile is None:
             self.cloud_hint.setText("")
             return
-        used = [
-            CAP_LABELS[capability]
-            for capability, _ in self._cloud_switches()
-            if self._capability_uses_cloud(profile, capability)
-        ]
-        self.cloud_hint.setText(
-            ("已启用：" + "、".join(used)) if used else "未启用（走本地模型）"
-        )
+        capabilities = self._configured_capabilities(profile)
+        if not capabilities:
+            text = "这份厂商档案还没有配置完整的云端能力。"
+            tone = "muted"
+        elif profile.enabled:
+            text = f"连接已测试通过：{'、'.join(CAP_LABELS[c] for c in capabilities)}。"
+            tone = "ok"
+        else:
+            text = "保存后请点「保存并测试连接」；通过后才能在模型设置中选用。"
+            tone = "muted"
+        self.cloud_hint.setText(text)
+        self.cloud_hint.setProperty("tone", tone)
+        self.cloud_hint.style().unpolish(self.cloud_hint)
+        self.cloud_hint.style().polish(self.cloud_hint)
 
     def _save_config(self) -> None:
         try:
@@ -1235,6 +1321,7 @@ class ProviderForm(QWidget):
         volcano = asr_protocol == PROTO_VOLC_ARK
 
         self.advanced_host.setVisible(self.advanced_toggle.isChecked())
+        self.models_host.setVisible(self.advanced_toggle.isChecked())
         self.volcano_host.setVisible(volcano)
         self.base_field.setVisible(
             judge_protocol != PROTO_DISABLED or asr_protocol == PROTO_OPENAI

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -138,6 +139,12 @@ class CloudAsrEngine(AsrEngine):
         cancel_check=None,
         ffmpeg=None,
     ):
+        # 每次转写都从干净的工作目录开始。上一次 _cleanup() 已删掉旧目录，
+        # 若这里不重置，复用同一个引擎时抽音会写入一个已不存在的路径，
+        # 表现成"源片没有音轨"——这是测试缓存路径暴露出来的真实缺陷。
+        self._cleanup()
+        self._upload_seq = 0
+        self._warned_word_timestamps = False
         self._source = Path(media).resolve()
         self.last_chunk_failure = None
         try:
@@ -287,7 +294,13 @@ class CloudAsrEngine(AsrEngine):
             self._upload_seq += 1
             extracted = work / f"src{self._upload_seq:03d}.wav"
             if not extract_audio(ffmpeg, audio, extracted, 0.0, span_seconds):
-                raise ProviderError("音轨提取失败：ffmpeg 没有输出音频（源片可能没有音轨）")
+                # 不能把一切抽音失败都归因成“源片没有音轨”：临时目录不可写、
+                # ffmpeg 被拦截同样是常见原因。让用户看到真正可行动的细节。
+                env_name = "TMP" if sys.platform == "win32" else "TMPDIR"
+                raise ProviderError(
+                    f"音轨提取失败：ffmpeg 没有产出音频文件。"
+                    f"请确认源片含音轨，且临时目录可写（当前 {env_name}={os.environ.get(env_name, '')!r}）。"
+                )
             audio = extracted
         return self._maybe_compress(audio, work, ffmpeg)
 

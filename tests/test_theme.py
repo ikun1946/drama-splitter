@@ -158,6 +158,30 @@ class TestRoleClosure:
         assert used, "守卫本身失效：一条 role 都没扫到"
 
 
+class TestProviderControlSizing:
+    def test_scrollable_keeps_scroll_area_children_unconstrained(self, qapp):
+        """滚动容器清零子控件宽度时必须跳过列表/表的视口。
+
+        清零视口最小宽度会让 ``QListWidget`` 把条目撑到最长厂商名，把整页顶宽；
+        正确做法是让列表自己按可用宽度省略，条目全文留在 tooltip 里。
+        """
+        from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+        from app.gui.widgets import scrollable
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        label = QLabel("很长的说明文字")
+        label.setWordWrap(True)
+        label.setMinimumWidth(600)
+        layout.addWidget(label)
+        area = scrollable(inner)
+        assert inner.minimumWidth() == 0, "内容根节点必须能随滚动视口收缩"
+        assert label.minimumWidth() == 0, "普通标签仍要清零，换行才会生效"
+        area.close()
+        area.deleteLater()
+
+
 class TestElevationAndGeometry:
     def test_card_uses_bottom_shadow_edge(self):
         """卡片浮起只能来自底边；没有这一条，卡片就和背景同平。

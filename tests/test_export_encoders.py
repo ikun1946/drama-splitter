@@ -100,6 +100,179 @@ class TestFastCopyAudioMapping:
         assert result.message != "已取消"
         assert "模拟编码失败" in result.message
 
+    def test_fast_copy_keeps_source_stream_parameters(
+        self, binaries, assets, tmp_path
+    ):
+        """原生编码必须保持视频/音频编码、音轨参数不变，且命令里没有编码器。"""
+        media = probe_media(binaries, assets["cfr"])
+        keyframes = probe_keyframe_frames(binaries, media)
+        plan = make_plan(media, [28, 60])
+        snapped, _, problems = snap_plan_to_keyframes(plan, media, keyframes)
+        assert problems == ()
+
+        exporter = Exporter(
+            binaries, media, ExportPreset(), cut_mode=CutMode.FAST_COPY
+        )
+        jobs = exporter.prepare_jobs(
+            snapped, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        command = exporter.build_command(jobs[0], tmp_path / "native.mp4")
+        text = " ".join(command)
+        assert "-c copy" in text
+        assert "-c:v" not in text and "-c:a" not in text
+        assert "-crf" not in text and "-b:a" not in text
+
+        batch = exporter.export_plan(
+            snapped, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        assert batch.all_succeeded, batch.summary()
+        for result in batch.succeeded:
+            source = probe_media(binaries, result.output_path)
+            assert source.video.codec_name == media.video.codec_name
+            assert source.video.width == media.video.width
+            assert source.video.height == media.video.height
+            assert source.audio_tracks[0].codec_name == media.audio_tracks[0].codec_name
+            assert source.audio_tracks[0].sample_rate == media.audio_tracks[0].sample_rate
+            assert source.audio_tracks[0].channels == media.audio_tracks[0].channels
+
+    def test_fast_copy_preserves_video_packet_payloads(
+        self, binaries, assets, tmp_path
+    ):
+        """视频包内容逐字节一致：原生编码没有编码器参与。"""
+        import subprocess
+
+        media = probe_media(binaries, assets["cfr"])
+        keyframes = probe_keyframe_frames(binaries, media)
+        plan = make_plan(media, [28, 60])
+        snapped, _, _ = snap_plan_to_keyframes(plan, media, keyframes)
+        exporter = Exporter(
+            binaries, media, ExportPreset(), cut_mode=CutMode.FAST_COPY
+        )
+        batch = exporter.export_plan(
+            snapped, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        assert batch.all_succeeded, batch.summary()
+
+        def video_packet_hashes(path, start=None, end=None):
+            select = []
+            if start is not None:
+                select = ["-read_intervals", f"{start}%{end}"]
+            proc = subprocess.run(
+                [
+                    str(binaries.ffprobe),
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    *select,
+                    "-show_entries", "packet=pts,size,flags,data_hash",
+                    "-show_data_hash", "sha256",
+                    "-of", "csv=p=0",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            return [line for line in proc.stdout.splitlines() if line.strip()]
+
+        # 第二集切点已吸附到关键帧。源片对应区间按 pts 过滤后，比较
+        # 每个视频包的 data_hash（哈希的是包 payload，不是解码后画面）。
+        second = snapped.episodes()[1]
+        start = float(second.start_seconds)
+        dur = float(second.duration_seconds)
+        exported = video_packet_hashes(batch.succeeded[1].output_path)
+        source = video_packet_hashes(media.path, start, start + dur)
+        assert exported, "没有读到导出视频的包哈希"
+        assert source, "没有读到源片对应区间的包哈希"
+        exported_hashes = [line.rsplit(",", 1)[-1] for line in exported]
+        source_hashes = [line.rsplit(",", 1)[-1] for line in source]
+        assert exported_hashes == source_hashes[-len(exported_hashes):]
+
+
+class TestRecap:
+    """前情回顾：只在导出层重复上一集片尾，不改方案切点。"""
+
+    def test_precise_recap_moves_start_but_keeps_episode_boundaries(
+        self, binaries, assets, tmp_path
+    ):
+        media = probe_media(binaries, assets["cfr"])
+        plan = make_plan(media, [28, 60])
+        before = list(plan.boundary_ticks)
+        exporter = Exporter(
+            binaries, media, ExportPreset(), recap_seconds=3
+        )
+        jobs = exporter.prepare_jobs(
+            plan, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+
+        assert plan.boundary_ticks == before, "回顾不能修改方案本身"
+        assert jobs[0].recap_seconds == 0, "第 1 集没有上一集可回顾"
+        assert jobs[1].start_seconds == Fraction(25), "28 秒正片前带 3 秒回顾"
+        assert jobs[1].episode.start_seconds == Fraction(28)
+        assert jobs[1].recap_seconds == 3
+        assert jobs[1].duration_seconds == Fraction(35)
+        assert exporter.recap_by_episode == {
+            2: Fraction(3),
+            3: Fraction(3),
+        }, "第 2、3 集都以各自上一集片尾作回顾"
+
+    def test_recap_frame_count_includes_the_repeated_tail(
+        self, binaries, assets, tmp_path
+    ):
+        media = probe_media(binaries, assets["cfr"])
+        plan = make_plan(media, [28, 60])
+        base = Exporter(binaries, media, ExportPreset())
+        recap = Exporter(binaries, media, ExportPreset(), recap_seconds=3)
+        plain_jobs = base.prepare_jobs(
+            plan, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        recap_jobs = recap.prepare_jobs(
+            plan, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+
+        assert recap_jobs[0].frame_count == plain_jobs[0].frame_count
+        assert recap_jobs[1].frame_count == plain_jobs[1].frame_count + 3 * 25
+
+    def test_native_recap_snaps_back_to_a_keyframe(
+        self, binaries, assets, tmp_path
+    ):
+        """原生编码只能从关键帧开始：回顾起点向前吸附，不会从任意帧切。"""
+        media = probe_media(binaries, assets["cfr"])
+        plan = make_plan(media, [30, 60])
+        exporter = Exporter(
+            binaries,
+            media,
+            ExportPreset(),
+            cut_mode=CutMode.FAST_COPY,
+            recap_seconds=4,
+        )
+        jobs = exporter.prepare_jobs(
+            plan, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        keyframes = set(probe_keyframe_frames(binaries, media))
+        start_frame = media.frame_index_at_or_after(jobs[1].start_seconds)
+        assert start_frame in keyframes
+        assert jobs[1].recap_seconds >= 4, "吸附只会让回顾更长，不会更短"
+        command = " ".join(
+            str(item)
+            for item in exporter.build_command(jobs[1], tmp_path / "recap.mp4")
+        )
+        assert "-c copy" in command
+
+    def test_recap_never_reaches_into_the_episode_before_previous(
+        self, binaries, assets, tmp_path
+    ):
+        """回顾最多取到上一集片头，不能拖进更早的一集。"""
+        media = probe_media(binaries, assets["cfr"])
+        plan = make_plan(media, [5, 8])
+        exporter = Exporter(binaries, media, ExportPreset(), recap_seconds=10)
+        jobs = exporter.prepare_jobs(
+            plan, tmp_path, audio_stream_index=media.audio_tracks[0].index
+        )
+        assert jobs[1].start_seconds == 0
+        assert jobs[1].recap_seconds == 5, "上一集只有 5 秒，回顾不能更早"
+
 
 class TestKeyframeSnap:
     """合成素材关键帧每 250 帧（10 秒）一个：0 / 250 / 500 / 750 …"""

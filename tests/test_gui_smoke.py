@@ -1406,11 +1406,11 @@ class TestImportPreview:
         assert preview.view.text() == "" and not preview.view.pixmap().isNull()
 
 
-class TestCloudCapabilitySwitches:
-    """云端能力开关（在「模型管理 → 云端厂商」页签）：默认零外发，没测通不许启用。
+class TestProviderConnection:
+    """厂商连接（「模型管理 → 云端模型」）：只保存与测通，不决定模型用途。
 
-    连通性探测被替换成假实现——界面测试不允许真联网（也不该要求 Key）。
-    合并前这些开关在「模型管理」的云端卡片上，逻辑没变，只是搬到了厂商页签。
+    语义判断/语音转写各用哪个模型统一由「模型设置」负责。连通性探测在每个
+    用例里都替换成假实现——界面测试不允许真联网，也不该要求 Key。
     """
 
     @staticmethod
@@ -1432,13 +1432,27 @@ class TestCloudCapabilitySwitches:
         from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        assert form.use_judge.isChecked() is False
         assert form.allow_upload.isChecked() is False
         assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND, "默认仍走本地"
-        assert "未启用" in form.cloud_hint.text()
+        assert "测试连接" in form.cloud_hint.text()
         assert "不含画面" in form.allow_upload.toolTip(), "外发范围在勾选那一刻就要能读到"
 
-    def test_probe_failure_refuses_to_enable(self, window, tmp_path, monkeypatch):
+    def test_page_does_not_duplicate_model_usage_choices(
+        self, window, tmp_path, monkeypatch
+    ):
+        """厂商页不选用途：没有用途下拉，也不写 backend_prefs。"""
+        from app.core.app_config import LOCAL_BACKEND
+
+        form = self._form(window, tmp_path, monkeypatch)
+        for name in ("judge_choice", "asr_choice", "use_judge", "use_asr"):
+            assert not hasattr(form, name), f"厂商页不该再有 {name}"
+        self._assign(form, "deepseek-chat", "judge")
+        assert form._judge_model == "deepseek-chat"
+        assert form._config.backend_for("judge") == LOCAL_BACKEND
+
+    def test_probe_failure_refuses_to_mark_connected(
+        self, window, tmp_path, monkeypatch
+    ):
         from app.core.app_config import LOCAL_BACKEND, AppConfig
         from app.core.providers import CAP_JUDGE
 
@@ -1446,7 +1460,6 @@ class TestCloudCapabilitySwitches:
         self._assign(form, "ep-test", CAP_JUDGE)
         form.edit_api_key.setText("sk-test")
         form.allow_upload.setChecked(True)
-        form.use_judge.setChecked(True)
         monkeypatch.setattr(
             type(form),
             "_probe",
@@ -1455,7 +1468,6 @@ class TestCloudCapabilitySwitches:
 
         form._save_and_probe()
 
-        assert form.use_judge.isChecked() is False, "测不通就不该保持勾选"
         assert form._config.backend_for(CAP_JUDGE) == LOCAL_BACKEND
         assert "未通过" in form.hint_label.text()
 
@@ -1465,57 +1477,61 @@ class TestCloudCapabilitySwitches:
         assert profile.enabled is False, "失败的档案不得被标记为已启用"
         assert profile.judge_model == "ep-test", "字段本身应已保存，用户不用重填"
 
-    def test_probe_success_enables_and_persists(self, window, tmp_path, monkeypatch):
-        from app.core.app_config import AppConfig
-        from app.core.providers import CAP_JUDGE
+    def test_probe_success_marks_connected_without_selecting_usage(
+        self, window, tmp_path, monkeypatch
+    ):
+        from app.core.app_config import LOCAL_BACKEND, AppConfig
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._assign(form, "ep-test", CAP_JUDGE)
+        self._assign(form, "ep-test", "judge")
         form.edit_api_key.setText("sk-test")
         form.allow_upload.setChecked(True)
-        form.use_judge.setChecked(True)
         monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
 
         form._save_and_probe()
 
-        assert form.use_judge.isChecked() is True
-        assert "已启用" in form.cloud_hint.text()
+        assert "连接已测试通过" in form.cloud_hint.text()
+        assert "模型设置" in form.hint_label.text()
         saved = AppConfig.load()
-        assert saved.backend_for("judge") == "volc"
+        assert saved.backend_for("judge") == LOCAL_BACKEND, "厂商页不应替用户切换后端"
         profile = saved.profiles().get("volc")
         assert profile.enabled is True and profile.allow_upload is True
         assert profile.api_key == "sk-test"
 
-    def test_asr_capability_switches_independently(self, window, tmp_path, monkeypatch):
-        """两条能力各自测通、各自切换：只勾转写时语义判断仍走本地。"""
+    def test_only_fully_configured_capabilities_are_probed(
+        self, window, tmp_path, monkeypatch
+    ):
+        """没有完整配置的能力不探测，也不会拖累这项测试的结果。"""
         from app.core.app_config import AppConfig
 
         form = self._form(window, tmp_path, monkeypatch)
         form.edit_api_key.setText("sk-test")
         form.allow_upload.setChecked(True)
-        form.use_asr.setChecked(True)      # 只勾转写
-        monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
+        seen: list[str] = []
+
+        def probe(self, profile, capability):
+            seen.append(capability)
+            return None
+
+        monkeypatch.setattr(type(form), "_probe", probe)
 
         form._save_and_probe()
 
+        assert seen == ["asr"], "火山默认只有转写字段完整，不该去测缺模型名的语义判断"
         saved = AppConfig.load()
-        assert saved.backend_for("asr") == "volc"
-        assert saved.backend_for("judge") == "local", "没勾的能力不许被切到云端"
-        assert "转写" in form.cloud_hint.text() and "语义判断" not in form.cloud_hint.text()
+        assert saved.backend_for("asr") == "local", "厂商页不负责切换用途"
+        assert saved.profiles().get("volc").enabled is True
 
-    def test_asr_probe_failure_keeps_local_and_judge_stays(
+    def test_any_failed_probe_keeps_the_profile_disabled(
         self, window, tmp_path, monkeypatch
     ):
-        """转写测不通只影响转写：语义判断已测通的不该被连带取消。"""
+        """两条能力都完整时，任意一条失败都不能把整份档案标成已连通。"""
         from app.core.app_config import AppConfig
-        from app.core.providers import CAP_JUDGE
 
         form = self._form(window, tmp_path, monkeypatch)
-        self._assign(form, "ep-test", CAP_JUDGE)
+        self._assign(form, "ep-test", "judge")
         form.edit_api_key.setText("sk-test")
         form.allow_upload.setChecked(True)
-        form.use_judge.setChecked(True)
-        form.use_asr.setChecked(True)
 
         def probe(self, profile, capability):
             return "识别失败（45000151）" if capability == "asr" else None
@@ -1524,10 +1540,55 @@ class TestCloudCapabilitySwitches:
         form._save_and_probe()
 
         saved = AppConfig.load()
-        assert saved.backend_for("asr") == "local"
-        assert saved.backend_for("judge") == "volc"
-        assert form.use_asr.isChecked() is False
-        assert form.use_judge.isChecked() is True
+        assert saved.profiles().get("volc").enabled is False
+        assert "转写" in form.hint_label.text()
+        assert "语义判断" in form.hint_label.text()
+
+    def test_connection_test_does_not_rewrite_backend_prefs(
+        self, window, tmp_path, monkeypatch
+    ):
+        """已有用途选择必须原样保留，不能因为来厂商页测了一次连接就被改掉。"""
+        from app.core.app_config import AppConfig
+        from app.core.providers import CAP_ASR
+
+        form = self._form(window, tmp_path, monkeypatch)
+        config = form._config
+        config.backend_prefs = {CAP_ASR: "openai", "judge": "deepseek"}
+        config.save()
+        form.reload(select="volc")
+        form.allow_upload.setChecked(True)
+        monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
+
+        form._save_and_probe()
+
+        saved = AppConfig.load()
+        assert saved.backend_for(CAP_ASR) == "openai"
+        assert saved.backend_for("judge") == "deepseek"
+
+    def test_disabled_profile_does_not_look_connected(
+        self, window, tmp_path, monkeypatch
+    ):
+        """保存过字段但没测通的档案，状态必须仍是「待测试」。"""
+        from app.core.app_config import AppConfig
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr(
+            "app.core.app_config.config_path", lambda: config_file
+        )
+        config = AppConfig()
+        config.providers = [
+            {"id": "deepseek", "judge_model": "deepseek-chat", "enabled": False}
+        ]
+        config.save(config_file)
+        dialog = window.build_model_dialog(config_path=config_file, providers_tab=True)
+        dialog.show()
+        try:
+            form = dialog.providers
+            form.select_profile("deepseek")
+            assert form.provider_state.text() == "待测试"
+            assert "测试连接" in form.cloud_hint.text()
+        finally:
+            dialog.close()
 
     def test_project_snapshot_never_carries_the_key(self, window, tmp_path, monkeypatch):
         """§6：方案快照只记"能否复现这次分集"，不含任何凭据。"""
@@ -1539,7 +1600,6 @@ class TestCloudCapabilitySwitches:
         self._assign(form, "ep-test", CAP_JUDGE)
         form.edit_api_key.setText("sk-secret-value")
         form.allow_upload.setChecked(True)
-        form.use_judge.setChecked(True)
         monkeypatch.setattr(type(form), "_probe", lambda self, profile, capability: None)
         form._save_and_probe()
         assert AppConfig.load().providers, "前置：确实写进了配置"
@@ -2018,42 +2078,115 @@ class TestExportCodecOptions:
         qapp.processEvents()
         return dialog, dialog.form
 
-    def test_three_modes_with_x264_default(self, window, qapp):
+    def test_three_modes_with_native_copy_default(self, window, qapp):
+        from app.core.plan import BoundaryPlan
+        from app.core.timebase import TimeBase
+        window.state.plans = [BoundaryPlan.uniform(2, TimeBase(1, 25), 100)]
+        window.state.plan_cursor = 0
         dialog, form = self._form(window, qapp)
         try:
             assert form.codec_combo.count() == 3
-            assert form.codec_combo.currentData() == "libx264"
+            assert form.codec_combo.currentData() == "fast_copy", (
+                "默认必须原生复制：不重新编码，画质/音质/码率不变"
+            )
+            assert "原生编码" in form.codec_combo.currentText()
+            assert "画质 / 音质 / 码率不变" in form.summary_detail.text()
+            assert not form.crf_spin.isEnabled()
+            assert not form.preset_combo.isEnabled()
+            assert not form.audio_bitrate_combo.isEnabled()
+        finally:
+            dialog.close()
+
+    def test_advanced_encoding_is_collapsed_by_default(self, window, qapp):
+        """首屏不摊编码器参数：用户先看到集数 / 集长 / 输出位置 / 队列。"""
+        dialog, form = self._form(window, qapp)
+        try:
+            assert form.advanced_toggle.isChecked() is False
+            assert form.advanced_host.isHidden()
+            form.advanced_toggle.setChecked(True)
+            assert not form.advanced_host.isHidden()
+            assert form.codec_combo.isVisible()
+            assert form._side_by_side is True, "展开编码时切两栏，队列不被挤走"
+            form.advanced_toggle.setChecked(False)
+            assert form._side_by_side is False
+            # 小屏上表格可用高度约 100px（表头 + 2~3 行）；关键是它拿满
+            # 队列卡给的空间，而不是被整页滚动或底栏压住。
+            assert form.queue.height() >= 100, "收起后队列应保留足够高度"
+        finally:
+            dialog.close()
+
+    def test_summary_reports_episodes_and_duration(self, window, qapp, binaries, assets):
+        TestStep5Refinement()._seed(window, binaries, assets)
+        dialog, form = self._form(window, qapp)
+        try:
+            form.refresh()
+            assert "第01集" in form.queue.item(0, 0).text()
+            assert form.queue.rowCount() == window.state.current_plan.episode_count
+            assert form.metric_episodes.text().endswith("集")
+            assert form.metric_duration.text()
+            assert form.queue_count.text().endswith("集")
+        finally:
+            dialog.close()
+
+    def test_without_plan_shows_empty_state_instead_of_blank_table(self, window, qapp):
+        window.state.plans = []
+        window.state.plan_cursor = 0
+        dialog, form = self._form(window, qapp)
+        try:
+            assert form.queue_empty.isVisible()
+            assert not form.queue.isVisible()
+            assert not form.btn_start.isEnabled()
+        finally:
+            dialog.close()
+
+    def test_close_button_closes_dialog_when_idle(self, window, qapp):
+        """空闲时底部「关闭」应发 close_requested，而不是假装取消。"""
+        dialog, form = self._form(window, qapp)
+        try:
+            seen = []
+            form.close_requested.connect(lambda: seen.append(True))
+            form.btn_cancel.click()
+            assert seen == [True]
         finally:
             dialog.close()
 
     def test_fast_copy_disables_encoder_fields(self, window, qapp):
         dialog, form = self._form(window, qapp)
         try:
-            form.codec_combo.setCurrentIndex(2)     # 零损失快速复制
+            form.codec_combo.setCurrentIndex(0)     # 原生编码
             qapp.processEvents()
             assert not form.crf_spin.isEnabled()
             assert not form.preset_combo.isEnabled()
             assert not form.audio_bitrate_combo.isEnabled()
-            assert "不重新编码" in form.codec_hint.text()
+            assert "原样复制" in form.codec_hint.text()
+            assert "画质、音质和码率保持源片不变" in form.codec_hint.text()
 
-            form.codec_combo.setCurrentIndex(0)     # 切回 x264
+            x264 = form.codec_combo.findData("libx264")
+            form.codec_combo.setCurrentIndex(x264)  # 切回 x264
             qapp.processEvents()
             assert form.crf_spin.isEnabled() and form.preset_combo.isEnabled()
             assert form.audio_bitrate_combo.isEnabled()
-            assert form.codec_hint.text() == ""
+            assert "重新编码" in form.codec_hint.text(), "切到重编码要说清代价"
         finally:
             dialog.close()
 
     def test_nvenc_mode_switches_to_cq_and_disables_preset(self, window, qapp):
+        from app.core.plan import BoundaryPlan
+        from app.core.timebase import TimeBase
+        window.state.plans = [BoundaryPlan.uniform(2, TimeBase(1, 25), 100)]
+        window.state.plan_cursor = 0
         dialog, form = self._form(window, qapp)
         try:
-            form.codec_combo.model().item(1).setEnabled(True)   # 无视本机探测结果
-            form.codec_combo.setCurrentIndex(1)
+            nvenc = form.codec_combo.findData("h264_nvenc")
+            form.codec_combo.model().item(nvenc).setEnabled(True)   # 无视本机探测结果
+            form.codec_combo.setCurrentIndex(nvenc)
             qapp.processEvents()
             assert not form.preset_combo.isEnabled(), "GPU 模式下速度档无意义"
             assert form.crf_spin.isEnabled()
             assert "CQ" in form._crf_field._title.text()
             assert form._preset().video_codec == "h264_nvenc"
+            assert "重新编码" in form.summary_detail.text()
+            assert "画质 / 音质 / 码率不变" not in form.summary_detail.text()
         finally:
             dialog.close()
 
@@ -2063,7 +2196,8 @@ class TestExportCodecOptions:
         monkeypatch.setattr(ep, "nvenc_cached", lambda binaries: False)
         dialog, form = self._form(window, qapp)
         try:
-            assert not form.codec_combo.model().item(1).isEnabled(), (
+            nvenc = form.codec_combo.findData("h264_nvenc")
+            assert not form.codec_combo.model().item(nvenc).isEnabled(), (
                 "本机没有可用 NVENC 时必须禁用该条目（不静默钻坑）"
             )
         finally:
@@ -2086,6 +2220,30 @@ class TestExportCodecOptions:
         finally:
             dialog.close()
 
+    def test_default_start_uses_fast_copy(
+        self, window, qapp, binaries, assets, tmp_path, monkeypatch
+    ):
+        """默认开始导出必须真正走流复制，而不是只改了界面文案。"""
+        from app.core.export import CutMode
+        from app.gui.panes import export_form as ep
+
+        TestStep5Refinement()._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+        window.state.audio_stream_index = window.state.media.audio_tracks[0].index
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        dialog, form = self._form(window, qapp)
+        try:
+            form.precheck = lambda warnings, unreviewed: "continue"
+            form._confirm_fast_copy = lambda detail: True
+            assert form.codec_combo.currentData() == "fast_copy"
+            form.start_export()
+            assert len(_FakeWorker.instances) == 1
+            assert _FakeWorker.instances[0].kwargs.get("cut_mode") is CutMode.FAST_COPY
+        finally:
+            dialog.close()
+
     def test_start_export_fast_copy_passes_cut_mode(
         self, window, qapp, binaries, assets, tmp_path, monkeypatch
     ):
@@ -2094,6 +2252,7 @@ class TestExportCodecOptions:
 
         TestStep5Refinement()._seed(window, binaries, assets)
         window.state.output_root = tmp_path
+        window.state.audio_stream_index = window.state.media.audio_tracks[0].index
 
         monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
         _FakeWorker.instances = []
@@ -2102,11 +2261,90 @@ class TestExportCodecOptions:
         try:
             form.precheck = lambda warnings, unreviewed: "continue"
             form._confirm_fast_copy = lambda detail: True
-            form.codec_combo.setCurrentIndex(2)
+            form.codec_combo.setCurrentIndex(0)
             qapp.processEvents()
             form.start_export()
             assert len(_FakeWorker.instances) == 1
             assert _FakeWorker.instances[0].kwargs.get("cut_mode") is CutMode.FAST_COPY
+        finally:
+            dialog.close()
+
+
+class TestExportRecapUi:
+    """前情回顾的界面契约：默认关闭、时长联动、传给导出线程。"""
+
+    def _form(self, window, qapp):
+        dialog = window.build_export_dialog()
+        dialog.show()
+        qapp.processEvents()
+        return dialog, dialog.form
+
+    def test_recap_is_off_by_default(self, window, qapp, binaries, assets):
+        TestStep5Refinement()._seed(window, binaries, assets)
+        dialog, form = self._form(window, qapp)
+        try:
+            assert form.recap_toggle.isChecked() is False
+            assert form.recap_seconds.isEnabled() is False
+            assert form._recap_value() == 0
+            assert not form.recap_hint.isVisible()
+            assert "前情回顾" not in form.summary_detail.text()
+            assert form.recap_seconds.value() == 5
+        finally:
+            dialog.close()
+
+    def test_enabling_recap_updates_duration_and_queue(
+        self, window, qapp, binaries, assets
+    ):
+        from app.core.timebase import format_seconds_brief
+
+        TestStep5Refinement()._seed(window, binaries, assets)
+        dialog, form = self._form(window, qapp)
+        try:
+            plan = window.state.current_plan
+            original = format_seconds_brief(plan.episodes()[1].duration_seconds)
+            original_total = form.metric_duration.text()
+            form.recap_toggle.setChecked(True)
+            form.recap_seconds.setValue(4)
+            qapp.processEvents()
+
+            assert form.recap_seconds.isEnabled() is True
+            assert "4 秒" in form.recap_hint.text()
+            assert "前情" in form.summary_detail.text()
+            assert form.queue.item(0, 4).text() == "", "第 1 集不带回顾"
+            assert "4 秒" in form.queue.item(1, 4).text()
+            assert form.queue.item(1, 3).text() != original
+            assert form.metric_duration.text() != original_total
+
+            form.recap_toggle.setChecked(False)
+            qapp.processEvents()
+            assert form.queue.item(1, 3).text() == original
+            assert form.queue.item(1, 4).text() == ""
+            assert form.metric_duration.text() == original_total
+        finally:
+            dialog.close()
+
+    def test_selected_recap_seconds_reach_export_worker(
+        self, window, qapp, binaries, assets, tmp_path, monkeypatch
+    ):
+        from app.gui.panes import export_form as ep
+
+        TestStep5Refinement()._seed(window, binaries, assets)
+        window.state.output_root = tmp_path
+        window.state.audio_stream_index = window.state.media.audio_tracks[0].index
+        monkeypatch.setattr(ep, "ExportWorker", _FakeWorker)
+        _FakeWorker.instances = []
+
+        dialog, form = self._form(window, qapp)
+        try:
+            form.precheck = lambda warnings, unreviewed: "continue"
+            form._confirm_fast_copy = lambda detail: True
+            form.recap_toggle.setChecked(True)
+            form.recap_seconds.setValue(6)
+            qapp.processEvents()
+            form.start_export()
+
+            assert len(_FakeWorker.instances) == 1
+            assert _FakeWorker.instances[0].kwargs["recap_seconds"] == 6
         finally:
             dialog.close()
 
@@ -2269,6 +2507,8 @@ class TestStep5Refinement:
 
         dialog = window.build_export_dialog()
         dialog.show()
+        # 默认是原生编码：先确认关键帧吸附，再走 §37 的前置检查。
+        dialog.form._confirm_fast_copy = lambda detail: True
         dialog.start_export()
         qapp.processEvents()
 
@@ -2292,6 +2532,7 @@ class TestStep5Refinement:
 
         dialog = window.build_export_dialog()
         dialog.show()
+        dialog.form._confirm_fast_copy = lambda detail: True
         dialog.start_export()
 
         assert len(_FakeWorker.instances) == 1, "继续导出应启动一次导出线程"
@@ -2690,7 +2931,7 @@ class TestActiveModelWiring:
 class TestProviderDialog:
     """厂商页签（合并进「模型管理」）：内置不可删、id 不可改，自定义可增删。
 
-    合并后厂商不再是独立对话框，而是「模型管理 → 云端厂商」页签；这里仍用
+    合并后厂商不再是独立对话框，而是「模型管理 → 云端模型」页签；这里仍用
     ``provider_form`` 这个夹具名，取的正是那页的表单。
     """
 

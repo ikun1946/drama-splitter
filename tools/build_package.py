@@ -12,6 +12,14 @@
 依赖：PyInstaller 属构建期依赖，不在 requirements.txt 里，打包前需先
     pip install pyinstaller
 
+为什么固定 Qt 6.8
+----------------
+PySide6 6.12 改成以命名空间包方式延迟初始化 Qt 扩展模块。源码环境能正常
+导入，但 PyInstaller 6.16/6.22 的冻结产物只带 ``QtWidgets.pyd`` 等扩展，
+不带初始化所需的包代码，启动时统一报
+``ImportError: DLL load failed while importing QtWidgets``。v1.0.29 发布
+构建使用已验证的 Qt 6.8.3；requirements.txt 同步把上限钉在 6.12 之前。
+
 为什么要显式排除一批模块
 ------------------------
 faster-whisper / scenedetect / llama_cpp 都是**在函数内部延迟导入**的，
@@ -172,6 +180,80 @@ def zhconv_data_args() -> list[str]:
     return command
 
 
+def build_pythonpath() -> str:
+    """返回打包时优先使用的模块搜索路径。
+
+    发布机同时装了多个 PySide6 版本和独立 PyInstaller 目录时，``python -m
+    PyInstaller`` 只会选中其中一套。这里允许通过环境变量显式指定，避免
+    “源码里是 6.8、打包时却收进 6.12”这类不可见漂移。
+
+    环境变量（可选）：
+    - ``DRAMA_BUILD_PYTHONPATH``：额外的模块根目录，多个用 ``os.pathsep`` 连接；
+    - ``DRAMA_BUILD_QT_ROOT``：PySide6 所在的模块根目录（通常是一份
+      ``pip install --target`` 的输出目录）。
+    """
+    parts: list[str] = []
+    override = os.environ.get("DRAMA_BUILD_PYTHONPATH", "")
+    if override:
+        parts.extend(path for path in override.split(os.pathsep) if path)
+    qt_root = os.environ.get("DRAMA_BUILD_QT_ROOT", "")
+    if qt_root:
+        parts.append(qt_root)
+
+    existing = os.environ.get("PYTHONPATH", "")
+    if existing:
+        parts.extend(path for path in existing.split(os.pathsep) if path)
+    return os.pathsep.join(dict.fromkeys(parts))
+
+
+def packaging_env() -> dict[str, str]:
+    """构造只影响本次 PyInstaller 子进程的环境变量。"""
+    env = os.environ.copy()
+    pythonpath = build_pythonpath()
+    if pythonpath:
+        env["PYTHONPATH"] = pythonpath
+    return env
+
+
+def verify_qt_runtime() -> bool:
+    """在打包前确认当前解释器实际选中的 PySide6 是冻结链兼容版本。"""
+    probe = (
+        "import PySide6; "
+        "from PySide6.QtWidgets import QApplication; "
+        "print(PySide6.__version__)"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(ROOT),
+        env=packaging_env(),
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        print("PySide6 运行库导入失败，拒绝继续打包：")
+        print((proc.stderr or proc.stdout).strip())
+        return False
+
+    version = (proc.stdout or "").strip().splitlines()
+    if not version:
+        print("无法确认 PySide6 版本，拒绝继续打包。")
+        return False
+    try:
+        major, minor = (int(part) for part in version[-1].split(".")[:2])
+    except (ValueError, TypeError):
+        print(f"无法解析 PySide6 版本：{version[-1]!r}")
+        return False
+    if (major, minor) >= (6, 12):
+        print(
+            f"当前 PySide6 {version[-1]} 会被 PyInstaller 打成无法启动的产物。\n"
+            "请安装 6.8.x（requirements.txt 已限制 <6.12），或设置 "
+            "DRAMA_BUILD_QT_ROOT 指向兼容版本目录。"
+        )
+        return False
+    print(f"Qt 版本检查通过：PySide6 {version[-1]}")
+    return True
+
+
 def main() -> int:
     name = "drama-splitter"
     dist = ROOT / "dist"
@@ -240,7 +322,10 @@ def main() -> int:
     print("执行打包：")
     print("  " + " ".join(command))
     print()
-    proc = subprocess.run(command, cwd=str(ROOT))
+    if not verify_qt_runtime():
+        return 1
+
+    proc = subprocess.run(command, cwd=str(ROOT), env=packaging_env())
     if proc.returncode != 0:
         print()
         print("打包失败。")

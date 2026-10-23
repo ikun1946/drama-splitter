@@ -348,10 +348,10 @@ _ASSET = str((Path(__file__).resolve().parents[1] / "testdata" / "cfr_120s_25fps
 
 
 class TestProviderDialogFits:
-    """「模型管理 → 云端厂商」这一页的裁剪回归。
+    """「模型管理 → 云端模型」这一页的裁剪回归。
 
     同一类病：内容最小宽度超过滚动视口，而横滚动条已关 → 静默裁切。
-    这里最隐蔽的是**按钮被切**：「保存并测试连通性」少一半的时候，界面看上去
+    这里最隐蔽的是**按钮被切**：「保存并测试连接」少一半的时候，界面看上去
     仍然「正常」，用户只会以为要点两下。
     """
 
@@ -390,14 +390,14 @@ class TestProviderDialogFits:
             dialog.close()
 
     def test_primary_button_is_fully_visible(self, qapp):
-        """「保存并测试连通性」是这一页唯一的主动作，被切一半等于没有。"""
+        """「保存并测试连接」是这一页唯一的主动作，被切一半等于没有。"""
         from PySide6.QtWidgets import QPushButton
 
         dialog = self._dialog(qapp)
         try:
             area = self._widest_area(dialog)
             for button in dialog.providers.findChildren(QPushButton):
-                if "保存并测试" not in button.text():
+                if "保存并测试连接" not in button.text():
                     continue
                 right = button.mapTo(area.viewport(), button.rect().topRight()).x()
                 assert right <= area.viewport().width(), (
@@ -405,7 +405,7 @@ class TestProviderDialogFits:
                     f"{area.viewport().width()}，按钮被切"
                 )
                 return
-            raise AssertionError("没找到「保存并测试」按钮")
+            raise AssertionError("没找到「保存并测试连接」按钮")
         finally:
             dialog.close()
 
@@ -418,7 +418,7 @@ class TestProviderDialogFits:
             dialog.close()
 
     def test_result_of_probing_appears_below_the_button(self, qapp):
-        """点了「保存并测试连通性」，结果必须出现在**看得到的地方**。
+        """点了「保存并测试连接」，结果必须出现在**看得到的地方**。
 
         这条钉的是一个很难用截图发现的毛病：结果原本写在长表单的最末尾，
         而按钮在首屏。用户点了按钮、什么也没发生——因为消息在折叠线以下。
@@ -428,7 +428,6 @@ class TestProviderDialogFits:
             area = self._widest_area(dialog)
             form = dialog.providers
             # 离线环境必定测不通，正好触发「要写失败原因」这条路径
-            form.use_judge.setChecked(True)
             form._save_and_probe()
             qapp.processEvents()
 
@@ -451,6 +450,24 @@ class TestProviderDialogFits:
             assert form.hint_label.isHidden()
             form._set_hint("有消息了")
             assert not form.hint_label.isHidden()
+        finally:
+            dialog.close()
+
+    def test_first_screen_has_only_connection_fields(self, qapp):
+        """首屏只处理厂商连接；模型用途与清单都进模型设置/进阶设置。"""
+        dialog = self._dialog(qapp)
+        try:
+            form = dialog.providers
+            area = self._widest_area(dialog)
+            assert not form.advanced_toggle.isChecked()
+            assert form.models_host.isHidden(), "模型清单默认收起"
+            for widget in (form.key_field, form.allow_upload, form.cloud_hint):
+                top = widget.mapTo(area.viewport(), widget.rect().topLeft()).y()
+                assert top < area.viewport().height(), (
+                    f"{widget.objectName() or widget.__class__.__name__} 首屏被截断"
+                )
+            assert not hasattr(form, "judge_choice")
+            assert not hasattr(form, "asr_choice")
         finally:
             dialog.close()
 

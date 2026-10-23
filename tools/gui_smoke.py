@@ -255,16 +255,41 @@ def main() -> int:
     app.processEvents()
     export = export_dialog.form
     window.state.output_root = out_dir
+    assert window.state.audio_stream_index is not None, "冒烟前提：主对白音轨已选"
+    assert window.state.binaries is not None, "冒烟前提：FFmpeg 已定位"
     export.output_edit.setText(str(out_dir))
-    export.crf_spin.setValue(20)
-    export.preset_combo.setCurrentText("veryfast")
+    assert export.codec_combo.currentData() == "fast_copy", (
+        "默认导出必须是原生编码（不重新编码）"
+    )
+    export._confirm_fast_copy = lambda detail: True
     export.refresh()
     app.processEvents()
     print(f"  {export.estimate.text()}")
     assert export.queue.rowCount() == plan.episode_count
+    print(f"  编码方式：{export.codec_combo.currentText()}")
+
+    # 原生编码要求切点落在关键帧上。先把审核后的方案吸附到最近关键帧，
+    # 与用户在界面点「开始导出」后看到的确认流程一致。
+    from app.core.export import snap_plan_to_keyframes
+    from app.core.probe import probe_keyframe_frames
+
+    keyframes = probe_keyframe_frames(window.state.binaries, window.state.media)
+    snapped, snaps, snap_problems = snap_plan_to_keyframes(
+        plan, window.state.media, keyframes
+    )
+    assert not snap_problems, snap_problems
+    window.state.plans[-1] = snapped
+    window.state.plan_cursor = len(window.state.plans) - 1
+    plan = snapped
+    moved = [s for s in snaps if s.moved]
+    print(f"  原生编码切点吸附：{len(moved)} 个切点调整")
 
     plan.semantic_review_status = "pending"  # 复位以便观察导出前检查触发
-    export_dialog.start_export()
+    # 原生编码分支在真实导出前还要再探一次关键帧；这里只绕过确认框，
+    # 仍完整走一遍“前置检查 → 吸附 → 导出”的实际链路。
+    export._confirm_fast_copy = lambda detail: True
+    export.precheck = lambda warnings, unreviewed: "continue"
+    export.start_export()
     ok = wait_until(
         app,
         lambda: export.worker and not export.worker.isRunning(),
@@ -272,18 +297,24 @@ def main() -> int:
     )
     assert ok, "导出未完成"
     app.processEvents()
+    print(f"  导出汇总：{export.summary_detail.text()}")
 
-    exported_dir = out_dir / "episodes" / plan.export_directory_name()
+    exported_dir = out_dir / "episodes" / plan.episode_videos_dir()
     files = sorted(exported_dir.glob("*.mp4"))
     print(f"  产物：{len(files)} 个文件于 {exported_dir}")
-    assert len(files) == plan.episode_count, f"应有 {plan.episode_count} 个成片"
 
     # 必须逐行确认导出**本轮**成功，不能只看文件存在
     statuses = [
         export.queue.item(row, 1).text() for row in range(export.queue.rowCount())
     ]
+    notes = [
+        export.queue.item(row, 4).text() for row in range(export.queue.rowCount())
+    ]
+    assert len(files) == plan.episode_count, (
+        f"应有 {plan.episode_count} 个成片；状态 {statuses}；说明 {notes}"
+    )
     assert all(status == "成功" for status in statuses), (
-        f"导出队列表存在非成功项：{statuses}"
+        f"导出队列表存在非成功项：{statuses}；说明 {notes}"
     )
     print(f"  导出队列状态：{statuses}")
 
@@ -389,7 +420,7 @@ def main() -> int:
     print("  本地项全部排在云端项之前（用户指定的核心排序）")
     setup_dialog.close()
 
-    # ---- 云端厂商页签（合并前的「厂商管理」）--------------------------------
+    # ---- 云端模型页签（合并前的「厂商管理」）--------------------------------
     # 同样用一份空配置：本机若存了 API Key，切到这页就会真去拉各家的 /models
     print("[厂商] 页签：内置不可删、按协议显隐字段、模型表格可指派…")
     from app.core.providers import DEFAULT_PROFILES, PROTO_OPENAI, PROTO_VOLC_ARK
@@ -400,7 +431,7 @@ def main() -> int:
     provider_dialog.show()
     app.processEvents()
     assert provider_dialog.isVisible(), "模型管理对话框未显示"
-    assert provider_dialog.tabs.currentIndex() == 1, "应直接停在「云端厂商」页签"
+    assert provider_dialog.tabs.currentIndex() == 1, "应直接停在「云端模型」页签"
     providers = provider_dialog.providers
     count = providers.profile_list.count()
     print(f"  厂商数：{count}（预置 {len(DEFAULT_PROFILES)} 家 + 自定义）")
@@ -428,13 +459,29 @@ def main() -> int:
     assert providers.model_note.text(), "提示行要说清怎么拿到模型清单"
     print(f"  模型提示：{providers.model_note.text()}")
     assert providers.btn_refresh_models.isEnabled(), "刷新按钮默认可用"
-    assert providers.btn_probe.isEnabled(), "「保存并测试连通性」默认可用"
+    assert providers.btn_probe.isEnabled(), "「保存并测试连接」默认可用"
     print(f"  云端能力：{providers.cloud_hint.text()}")
     print(f"  外发预览：{providers.egress_preview.text().splitlines()[0]}")
     providers.reload()
     app.processEvents()
     print("  厂商列表刷新正常")
     provider_dialog.close()
+
+    print("[导出] 前情回顾默认关闭，开启后第 2 集起带上上一集片尾…")
+    recap_dialog = window.build_export_dialog()
+    recap_dialog.show()
+    app.processEvents()
+    export_form = recap_dialog.form
+    assert export_form.recap_toggle.isChecked() is False, "前情回顾必须默认关闭"
+    export_form.recap_toggle.setChecked(True)
+    export_form.recap_seconds.setValue(5)
+    app.processEvents()
+    assert "前情回顾" in export_form.queue.item(1, 4).text()
+    assert export_form.queue.item(0, 4).text() == ""
+    print(f"  回顾提示：{export_form.recap_hint.text()}")
+    export_form.recap_toggle.setChecked(False)
+    app.processEvents()
+    recap_dialog.close()
     export_dialog.close()
     app.processEvents()
 

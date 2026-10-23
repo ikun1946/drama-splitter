@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QScrollArea, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QScrollArea, QWidget
 
 __all__ = ["scrollable", "h_scrollable"]
 
@@ -35,7 +35,10 @@ def scrollable(widget: QWidget) -> QScrollArea:
     # 清零后 QLabel 的 setWordWrap 才有机会生效。
     widget.setMinimumWidth(0)
     for child in widget.findChildren(QWidget):
-        child.setMinimumWidth(0)
+        # 列表/表格的横向滚动条已由各自的策略控制；把它们的视口最小宽度也清零，
+        # 内容能换行，但条目本身仍会按列宽省略，不会把整页顶宽。
+        if not isinstance(child, QAbstractScrollArea):
+            child.setMinimumWidth(0)
     return area
 
 

@@ -51,7 +51,7 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 class CutMode(str, Enum):
     """§14.1 / §14.2 裁切方式。"""
 
-    PRECISE = "precise"      # 精确裁切（默认）
+    PRECISE = "precise"      # 精确裁切（重编码）
     FAST_COPY = "fast_copy"  # 快速复制（第一阶段不提供）
 
 
@@ -100,10 +100,22 @@ class ExportJob:
     seek_offset: Fraction
     frame_count: int
     audio_stream_index: int | None
+    #: 本集片头额外带上的上一集片尾时长（秒）。0 = 不带前情回顾。
+    recap_seconds: Fraction = Fraction(0)
+    #: 实际导出起点；带前情回顾时早于 ``episode.start_seconds``。
+    output_start_seconds: Fraction | None = None
+
+    @property
+    def start_seconds(self) -> Fraction:
+        """本集导出文件的起点（含前情回顾）。"""
+        if self.output_start_seconds is not None:
+            return self.output_start_seconds
+        return self.episode.start_seconds
 
     @property
     def duration_seconds(self) -> Fraction:
-        return self.episode.duration_seconds
+        """导出文件实际时长：前情回顾 + 正片。"""
+        return self.episode.end_seconds - self.start_seconds
 
 
 @dataclass
@@ -117,6 +129,8 @@ class ExportResult:
     actual_frame_count: int | None = None
     expected_frame_count: int | None = None
     actual_duration: Fraction | None = None
+    #: 本次导出实际带上的前情回顾时长（原生编码可能因关键帧吸附而变长）
+    recap_seconds: Fraction = Fraction(0)
 
     def to_json(self) -> dict:
         return {
@@ -132,6 +146,9 @@ class ExportResult:
                 f"{self.actual_duration.numerator}/{self.actual_duration.denominator}"
                 if self.actual_duration
                 else None
+            ),
+            "recap_seconds": (
+                f"{self.recap_seconds.numerator}/{self.recap_seconds.denominator}"
             ),
         }
 
@@ -172,6 +189,7 @@ class Exporter:
         *,
         max_parallel: int = 1,
         cut_mode: CutMode = CutMode.PRECISE,
+        recap_seconds: int | Fraction = 0,
     ) -> None:
         # 快速复制（流复制）不做重新编码，因此**只能从关键帧开始切**。
         # 这不是"性能选项"，而是正确性前提：边界落在非关键帧上必然造成
@@ -181,9 +199,22 @@ class Exporter:
         self.media = media
         self.preset = preset or ExportPreset()
         self.cut_mode = cut_mode
+        #: 每集片头带上的上一集片尾时长；0 = 关闭。只影响导出文件，
+        #: 不改方案边界和审核切点。
+        self.recap_seconds = Fraction(recap_seconds)
+        if self.recap_seconds < 0:
+            raise ValueError("前情回顾时长不能为负数")
+        #: 实际用于每集的回顾时长（原生流复制会吸附到关键帧）。
+        self._recap_by_episode: dict[int, Fraction] = {}
+        self._keyframes: list[int] | None = None
         # §15.2 限制同时运行的编码任务数；默认串行，避免长片导出打满机器
         self.max_parallel = max(1, max_parallel)
         self._cancel = threading.Event()
+
+    @property
+    def recap_by_episode(self) -> dict[int, Fraction]:
+        """最近一次 prepare_jobs 得到的实际回顾时长（按集号）。"""
+        return dict(self._recap_by_episode)
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -227,9 +258,9 @@ class Exporter:
         if self.cut_mode is CutMode.FAST_COPY:
             return self._build_copy_command(job, tmp_path)
 
-        seek = job.episode.start_seconds + job.seek_offset
+        seek = job.start_seconds + job.seek_offset
         span = self.media.frame_span_seconds(
-            self.media.frame_index_at_or_after(job.episode.start_seconds),
+            self.media.frame_index_at_or_after(job.start_seconds),
             job.frame_count,
         )
 
@@ -310,9 +341,9 @@ class Exporter:
 
         依然**不使用** `-avoid_negative_ts make_zero`（见 build_command 的实测说明）。
         """
-        seek = job.episode.start_seconds + job.seek_offset
+        seek = job.start_seconds + job.seek_offset
         span = self.media.frame_span_seconds(
-            self.media.frame_index_at_or_after(job.episode.start_seconds),
+            self.media.frame_index_at_or_after(job.start_seconds),
             job.frame_count,
         )
         args: list[str] = [
@@ -391,6 +422,7 @@ class Exporter:
             output_path=None,
             success=False,
             expected_frame_count=job.frame_count,
+            recap_seconds=job.recap_seconds,
         )
 
         final_path = job.output_path
@@ -485,18 +517,85 @@ class Exporter:
         directory = output_root / "episodes" / plan.episode_videos_dir()
         counts = plan.frame_counts(self.media)
         jobs: list[ExportJob] = []
-        for episode, count in zip(plan.episodes(), counts):
+        episodes = plan.episodes()
+        self._recap_by_episode = {}
+        for position, (episode, count) in enumerate(zip(episodes, counts)):
+            recap = Fraction(0)
+            start = episode.start_seconds
+            if self.recap_seconds > 0 and position > 0:
+                recap, start = self._recap_window(episodes, position)
+            start_frame = self.media.frame_index_at_or_after(start)
+            main_start_frame = self.media.frame_index_at_or_after(episode.start_seconds)
+            recap_frames = max(0, main_start_frame - start_frame)
             jobs.append(
                 ExportJob(
                     episode=episode,
                     output_path=directory / f"第{episode.index:02d}集.{self.preset.container}",
                     time_base_seconds=self.media.video_time_base.seconds_per_tick,
                     seek_offset=self.media.seek_offset_seconds,
-                    frame_count=count,
+                    frame_count=count + recap_frames,
                     audio_stream_index=audio_stream_index,
+                    recap_seconds=recap,
+                    output_start_seconds=start,
                 )
             )
+            if recap:
+                self._recap_by_episode[episode.index] = recap
         return jobs
+
+    # ------------------------------------------------------------------
+    # 前情回顾
+    # ------------------------------------------------------------------
+
+    def _recap_window(
+        self, episodes: list[Episode], position: int
+    ) -> tuple[Fraction, Fraction]:
+        """计算第 ``position`` 集的回顾时长与对齐后的起点。
+
+        - 回顾不能越过上一集片头，最多取到上一集全片；
+        - 精确编码吸附到起点帧；
+        - 原生流复制吸附到**前方关键帧**（宁可回顾长一点，也不能从非关键帧
+          流复制，否则会带出画面错位）；关键帧较稀时实际时长可能明显更长。
+        """
+        episode = episodes[position]
+        previous = episodes[position - 1]
+        desired = max(previous.start_seconds, episode.start_seconds - self.recap_seconds)
+        frame = self._frame_at_or_before(desired)
+        previous_frame = self.media.frame_index_at_or_after(previous.start_seconds)
+        episode_frame = self.media.frame_index_at_or_after(episode.start_seconds)
+        frame = max(previous_frame, min(frame, episode_frame))
+
+        if self.cut_mode is CutMode.FAST_COPY:
+            keyframes = self._keyframe_frames()
+            inside = [
+                item
+                for item in keyframes
+                if previous_frame <= item <= frame
+            ]
+            # 没有关键帧落在回顾区间内时，起点就是正片起点（不带回顾），
+            # 绝不允许流复制从任意帧开始，也不允许把上一集整集拖进来。
+            if not inside:
+                return Fraction(0), episode.start_seconds
+            frame = max(inside)
+
+        start = self.media.frame_start_seconds(frame)
+        start = max(previous.start_seconds, min(start, episode.start_seconds))
+        return episode.start_seconds - start, start
+
+    def _frame_at_or_before(self, seconds: Fraction) -> int:
+        """不晚于给定时间的最近一帧（用于保证回顾至少有所需时长）。"""
+        frame = self.media.frame_index_at_or_after(seconds)
+        if frame > 0 and self.media.frame_start_seconds(frame) > seconds:
+            frame -= 1
+        return max(0, frame)
+
+    def _keyframe_frames(self) -> list[int]:
+        """探测并缓存关键帧，供原生流复制计算前情回顾起点。"""
+        if self._keyframes is None:
+            from .probe import probe_keyframe_frames
+
+            self._keyframes = list(probe_keyframe_frames(self.binaries, self.media))
+        return self._keyframes
 
     def export_plan(
         self,

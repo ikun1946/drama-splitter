@@ -850,10 +850,17 @@ class ExportWorker(BaseWorker):
         only_episodes: list[int] | None = None,
         transcript=None,
         cut_mode: CutMode = CutMode.PRECISE,
+        recap_seconds: int = 0,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._exporter = Exporter(binaries, media, preset, cut_mode=cut_mode)
+        self._exporter = Exporter(
+            binaries,
+            media,
+            preset,
+            cut_mode=cut_mode,
+            recap_seconds=recap_seconds,
+        )
         self._plan = plan
         self._output_root = Path(output_root)
         self._audio_stream_index = audio_stream_index
@@ -874,7 +881,10 @@ class ExportWorker(BaseWorker):
         )
         try:
             self.subtitle_results = export_episode_subtitles(
-                self._plan, self._transcript, directory
+                self._plan,
+                self._transcript,
+                directory,
+                recap_by_episode=self._exporter.recap_by_episode,
             )
         except OSError as exc:
             self.subtitle_results = []

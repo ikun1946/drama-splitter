@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
     ) -> ModelDialog:
         """构建模型管理对话框（不 exec，供测试 / 冒烟 / 截图使用）。
 
-        ``providers_tab=True`` 时直接停在「云端厂商」页签（合并前的厂商管理）。
+        ``providers_tab=True`` 时直接停在「云端模型」页签（合并前的厂商管理）。
         """
         self.model_dialog = ModelDialog(
             self.state, self, config_path=config_path, providers_tab=providers_tab
@@ -238,7 +238,7 @@ class MainWindow(QMainWindow):
         self.model_setup_dialog = ModelSetupDialog(
             self.state, self, config_path=config_path
         )
-        # 「去配置 Key…」从这里直接跳到「模型管理 → 云端厂商」：填 Key 是选云端模型
+        # 「去配置 Key…」从这里直接跳到「模型管理 → 云端模型」：填 Key 是选云端模型
         # 的前置条件，让用户在两个窗口之间自己找是白跑一趟。
         self.model_setup_dialog.form.configure_providers_requested.connect(
             self._open_providers_tab
@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
             self.model_dialog.providers.reload()
 
     def _open_providers_tab(self) -> None:
-        """打开「模型管理」并直接停在「云端厂商」页签。"""
+        """打开「模型管理」并直接停在「云端模型」页签。"""
         if self.model_setup_dialog is not None:
             self.model_setup_dialog.close()
         self.build_model_dialog(providers_tab=True).exec()

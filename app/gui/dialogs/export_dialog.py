@@ -1,6 +1,6 @@
 """导出对话框。
 
-承载 ``ExportForm``（编码预设 / 输出目录 / 队列 / 进度 / 重试），并承接
+承载 ``ExportForm``（导出概览 / 输出目录 / 进阶编码 / 队列 / 进度 / 重试），并承接
 §37 导出前置检查的**决策点**：``request_precheck`` 是唯一可覆写的方法，
 测试与离屏冒烟覆写它来模拟用户选择，而不是去弹一个会永久阻塞的模态框。
 
@@ -26,16 +26,21 @@ class ExportDialog(DialogShell):
     review_requested = Signal(int, int)   # (集号, 毫秒位置)；集号 0 表示不定位
 
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
-        super().__init__("导出", parent, width=960, height=720)
+        super().__init__("导出", parent, width=1120, height=900)
         self.state = state
 
         self.form = ExportForm(state, self, precheck=self.request_precheck)
         self.form.review_requested.connect(self._on_review_requested)
-        self.form.refresh()
 
         self.add_body(self.form)
-        self.footer_hint.setText("精确裁切（重新编码）；事务式落盘，失败可单独重试。")
-        self.add_close_button()
+        self.form.refresh()
+        self.footer_hint.setText(
+            "默认原生编码：视频与音频不重新编码，画质、音质和码率保持源片不变；"
+            "事务式落盘，失败可单独重试。"
+        )
+        # 关闭按钮由表单底部的操作行承担：「取消」在空闲时关闭对话框，
+        # 避免同一屏出现两个语义相近的“取消/关闭”。
+        self.form.close_requested.connect(self.close)
         self.install_footer()
 
     # ---- §37 前置检查 --------------------------------------------------

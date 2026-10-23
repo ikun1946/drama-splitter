@@ -5,6 +5,6 @@ norecursedirs = ["testdata", ".pytest_cache", "__pycache__"]
 
 [project]
 name = "drama-splitter"
-version = "1.0.28"
+version = "1.0.29"
 requires-python = ">=3.12"
 description = "AI 短剧智能分集器：AI 辅助分集、用户审核、程序精确导出"

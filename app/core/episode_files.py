@@ -2,8 +2,10 @@
 
 归属规则
 --------
-一条字幕属于"其**起点**所在的那一集"——与视频帧的归属规则一致
+一条字幕属于"其**起点**所在的导出区间"——与视频帧的归属规则一致
 （帧属于包含它的那一集）。这样字幕与画面的内容归属就不会错位。
+开启前情回顾后，第 2 集起的导出区间会提前若干秒；回顾段的对白随该集
+一起导出，时间轴同样从导出文件开头算起。
 
 时间换算
 --------
@@ -23,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from typing import Mapping
 
 from .asr import Transcript
 from .plan import BoundaryPlan
@@ -63,14 +66,22 @@ def export_episode_subtitles(
     output_dir: Path,
     *,
     filename_pattern: str = "第{:02d}集.srt",
+    recap_by_episode: Mapping[int, Fraction] | None = None,
 ) -> list[EpisodeSubtitleResult]:
     """为方案里的每一集导出 SRT 字幕。
 
     返回与集数等长的结果列表。转写缺失时返回的每条结果都带说明（不产出文件），
     让调用方能如实呈现"为什么没有字幕"，而不是静默跳过。
+
+    ``recap_by_episode`` 给出各集片头带上的上一集片尾时长。带前情回顾时，
+    字幕起点随之提前、时间轴整体平移，否则观众听到的回顾段会没有字幕。
     """
     output_dir = Path(output_dir)
     results: list[EpisodeSubtitleResult] = []
+    recaps = {
+        int(index): max(Fraction(0), Fraction(seconds))
+        for index, seconds in (recap_by_episode or {}).items()
+    }
 
     if transcript is None or not transcript.sentences:
         for episode in plan.episodes():
@@ -88,14 +99,16 @@ def export_episode_subtitles(
     ]
 
     for episode in plan.episodes():
-        start = boundaries[episode.index - 1]
+        main_start = boundaries[episode.index - 1]
         end = boundaries[episode.index]
+        start = max(Fraction(0), main_start - recaps.get(episode.index, Fraction(0)))
         lines: list[str] = []
         clipped: list[str] = []
         order = 0
 
         for sentence in transcript.sentences:
-            # 按起点归属：句子起点落在 [start, end) 即属于本集
+            # 按起点归属：句子起点落在导出区间 [start, end) 即属于本集。
+            # 带前情回顾时 start 早于正片起点，因此回顾段对白也会被带上。
             if not (start <= sentence.start < end):
                 continue
             subtitle_start = sentence.start - start
