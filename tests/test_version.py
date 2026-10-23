@@ -145,6 +145,23 @@ def test_installer_verifies_main_exe_under_app_dir():
     )
 
 
+def test_installer_cleans_old_runtime_before_upgrade():
+    """升级前必须清掉旧 _internal，不能只覆盖同名文件。
+
+    v1.0.29 的真实故障：旧 PySide6 6.12 的 shiboken6.abi3.dll 不在新版本
+    文件清单里，覆盖安装后继续留在 ``_internal/shiboken6``，Windows 加载器优先
+    找到它，和新 Shiboken.pyd 版本不匹配，程序启动即弹出
+    “DLL load failed while importing Shiboken”。
+
+    只删 _internal：配置、模型、缓存和 deps 都在它的上一级，必须保留。
+    """
+    text = installer_iss_code()
+    assert "[InstallDelete]" in text, "安装器没有升级前清理段"
+    assert 'Type: filesandordirs; Name: "{app}\\_internal"' in text, (
+        "升级前没有清理旧 _internal，会继续残留已经不随新包分发的 DLL"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 卸载时的可选数据清理
 #

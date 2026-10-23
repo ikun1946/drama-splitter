@@ -17,7 +17,7 @@
 PySide6 6.12 改成以命名空间包方式延迟初始化 Qt 扩展模块。源码环境能正常
 导入，但 PyInstaller 6.16/6.22 的冻结产物只带 ``QtWidgets.pyd`` 等扩展，
 不带初始化所需的包代码，启动时统一报
-``ImportError: DLL load failed while importing QtWidgets``。v1.0.29 发布
+``ImportError: DLL load failed while importing QtWidgets``。v1.0.29 起发布
 构建使用已验证的 Qt 6.8.3；requirements.txt 同步把上限钉在 6.12 之前。
 
 为什么要显式排除一批模块

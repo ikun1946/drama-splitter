@@ -29,13 +29,13 @@
 [Setup]
 AppId={{8F3C2A17-6D94-4E2B-9C51-7A0D3E68B412}
 AppName=AI 短剧智能分集器
-AppVersion=1.0.29
-AppVerName=AI 短剧智能分集器 1.0.29
+AppVersion=1.0.30
+AppVerName=AI 短剧智能分集器 1.0.30
 AppPublisher=ikun1946
 AppPublisherURL=https://github.com/ikun1946/drama-splitter
 AppSupportURL=https://github.com/ikun1946/drama-splitter/issues
 AppUpdatesURL=https://github.com/ikun1946/drama-splitter/releases
-VersionInfoVersion=1.0.29.0
+VersionInfoVersion=1.0.30.0
 VersionInfoDescription=AI 短剧智能分集器 安装程序
 
 ; 按用户安装，免管理员
@@ -54,7 +54,7 @@ CloseApplications=yes
 CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
-OutputBaseFilename=drama-splitter-1.0.29-setup
+OutputBaseFilename=drama-splitter-1.0.30-setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -72,6 +72,18 @@ Name: "chinesesimplified"; MessagesFile: "i18n\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; 覆盖升级时清掉旧运行库，防止新旧 Qt/Shiboken DLL 混用。
+;
+; v1.0.29 从 PySide6 6.12 切到 6.8.3 时，安装器只覆盖同名新文件：
+; 6.12 的 _internal\shiboken6\shiboken6.abi3.dll 不在新清单里，因此留了下来。
+; Windows 加载器会先找到这份旧 DLL，再与新 Shiboken.pyd 搭配，启动时报
+; “DLL load failed while importing Shiboken: 找不到指定的程序”。
+;
+; _internal 只放随包程序与运行库；config.json / models / cache / deps 都在
+; 它的上一级，删除这里不会碰用户数据。
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; onedir 打包产物（204 个文件）。ignoreversion：PyInstaller 每次构建时间戳都变，
