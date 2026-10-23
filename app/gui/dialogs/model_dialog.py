@@ -48,9 +48,9 @@ class ModelDialog(DialogShell):
             self.tabs.setCurrentIndex(1)
         self.add_body(self.tabs)
         self.footer_hint.setText(
-            "本地模型按需下载。云端模型页只负责厂商连接：选择厂商、填写 Key，"
-            "点「保存并测试连接」。具体用途与模型请在「工具 → 模型设置…」中选择；"
-            "连接测试通过后，模型设置里才能选用这家厂商。"
+            "本地模型按需下载。云端模型页负责厂商连接：内置厂商填 Key；"
+            "自建或聚合服务点「自定义接入」，填写 API 地址与密钥并选择协议。"
+            "具体用途与模型请在「工具 → 模型设置…」中选择。"
         )
         self.add_close_button()
         self.install_footer()

@@ -123,6 +123,27 @@ HIDDEN_STDLIB = [
     "io", "codecs", "unicodedata", "locale", "gettext",
 ]
 
+#: setuptools 71+ 把 ``jaraco.*`` 等依赖放进 ``setuptools._vendor``，再由
+#: ``pkg_resources`` 在运行时从那个目录导入。PyInstaller 的 setuptools 钩子
+#: 会处理 ``setuptools._vendor`` 里的常规模块，但本机的 zhconv 仍会触发
+#: ``pkg_resources``，而冻结启动脚本最先执行的就是它：只要 jaraco 没进包，
+#: 程序连 ``--version`` 都会在 Qt 之前退出（报 ``No module named 'jaraco'``）。
+#: 显式收集这一小簇模块比依赖构建机上的 setuptools / hooks 版本更稳。
+HIDDEN_SETUPTOOLS_VENDOR = [
+    "setuptools._vendor",
+    "setuptools._vendor.jaraco",
+    "setuptools._vendor.jaraco.collections",
+    "setuptools._vendor.jaraco.context",
+    "setuptools._vendor.jaraco.functools",
+    "setuptools._vendor.jaraco.text",
+    "setuptools._vendor.jaraco.text.layouts",
+    "setuptools._vendor.packaging",
+    "setuptools._vendor.platformdirs",
+    "setuptools._vendor.platformdirs.api",
+    "setuptools._vendor.platformdirs.version",
+    "setuptools._vendor.platformdirs.windows",
+]
+
 
 def stable_abi_dll() -> Path | None:
     """定位当前解释器的 ``python3.dll``（稳定 ABI 转发库）；找不到返回 None。
@@ -316,6 +337,8 @@ def main() -> int:
         command += ["--exclude-module", module]
     # 外挂依赖需要的标准库要显式带上（EXCLUDES 让 PyInstaller 分析不到它们）
     for module in HIDDEN_STDLIB:
+        command += ["--hidden-import", module]
+    for module in HIDDEN_SETUPTOOLS_VENDOR:
         command += ["--hidden-import", module]
     command.append(str(ROOT / "run.py"))
 

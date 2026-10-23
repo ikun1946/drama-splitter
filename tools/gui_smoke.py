@@ -264,7 +264,7 @@ def main() -> int:
     export._confirm_fast_copy = lambda detail: True
     export.refresh()
     app.processEvents()
-    print(f"  {export.estimate.text()}")
+    print(f"  预计占用：{export.metric_size.text()}")
     assert export.queue.rowCount() == plan.episode_count
     print(f"  编码方式：{export.codec_combo.currentText()}")
 

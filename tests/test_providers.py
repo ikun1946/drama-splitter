@@ -22,7 +22,9 @@ from app.core.providers import (
     CAP_JUDGE,
     DEFAULT_PROFILES,
     PROTOCOLS_BY_CAP,
+    PROTO_ANTHROPIC,
     PROTO_DISABLED,
+    PROTO_GEMINI,
     PROTO_LABELS,
     PROTO_OPENAI,
     PROTO_VOLC_ARK,
@@ -32,9 +34,12 @@ from app.core.providers import (
     chat_completions_url,
     describe_egress,
     egress_host,
+    gemini_generate_url,
     merge_profiles,
+    messages_url,
     missing_config_reason,
     resolve_api_key,
+    suggest_custom_id,
     validate_profile,
 )
 
@@ -306,6 +311,18 @@ class TestProtocols:
         again = ProviderProfile.from_json(profile.to_json())
         assert again == profile
 
+    def test_native_text_protocols_roundtrip(self):
+        for protocol in (PROTO_ANTHROPIC, PROTO_GEMINI):
+            profile = ProviderProfile(
+                id="custom",
+                label="自定义接入",
+                base_url="https://api.example.com/v1",
+                judge_model="model-x",
+                judge_protocol=protocol,
+            )
+            assert ProviderProfile.from_json(profile.to_json()) == profile
+            assert profile.supports(CAP_JUDGE)
+
 
 class TestProtocolUrls:
     def test_urls_are_built_from_base_url(self):
@@ -326,6 +343,26 @@ class TestProtocolUrls:
         text = describe_egress(profile)
         assert "api.example.com" in text
         assert "（未配置地址）" not in text
+
+    def test_anthropic_and_gemini_use_their_own_paths(self):
+        assert messages_url("https://api.anthropic.com/v1/") == (
+            "https://api.anthropic.com/v1/messages"
+        )
+        assert gemini_generate_url(
+            "https://generativelanguage.googleapis.com/v1beta",
+            "models/gemini-2.5-flash",
+        ) == (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            "models/gemini-2.5-flash:generateContent"
+        )
+
+
+class TestCustomId:
+    def test_generates_a_stable_unique_id_without_asking_the_user(self):
+        assert suggest_custom_id("Example Gateway") == "example-gateway"
+        assert suggest_custom_id("自定义接入", ["custom"]) == "custom-2"
+        used = ["custom", "custom-2"]
+        assert suggest_custom_id("中文名称", used) == "custom-3"
 
 
 class TestBlockReasons:

@@ -10,20 +10,96 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pathlib
 
 import pytest
 
 from app.core import cloud
+from app.core.cloud_anthropic import AnthropicChatTransport
+from app.core.cloud_gemini import GeminiChatTransport
 from app.core.cloud_openai import OpenAiAsrTransport, OpenAiChatTransport
 from app.core.cloud_volc import VolcFlashAsrTransport
 from app.core.providers import (
     DEFAULT_PROFILES,
+    PROTO_ANTHROPIC,
     PROTO_DISABLED,
+    PROTO_GEMINI,
     PROTO_OPENAI,
     PROTO_VOLC_ARK,
     ProviderProfile,
 )
+
+
+class _Gateway:
+    """最小本地网关：记录请求并按 OpenAI / Anthropic / Gemini 形状回包。"""
+
+    def __init__(self) -> None:
+        outer = self
+        self.requests: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server 约定
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                outer.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": {key.lower(): value for key, value in self.headers.items()},
+                        "body": json.loads(body or b"{}"),
+                    }
+                )
+                if self.path.endswith("/messages"):
+                    payload = {
+                        "content": [
+                            {"type": "text", "text": '{"verdict":'},
+                            {"type": "text", "text": ' "good_cut"}'},
+                        ]
+                    }
+                else:
+                    payload = {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {"text": '{"verdict":'},
+                                        {"text": ' "good_cut"}'},
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):  # noqa: A003 - 静音测试日志
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def gateway():
+    fake = _Gateway()
+    yield fake
+    fake.close()
 
 
 def _profile(**changes) -> ProviderProfile:
@@ -54,6 +130,44 @@ class TestJudgeDispatch:
     def test_unknown_protocol_returns_none(self):
         """协议写了个不认识的字符串：不许猜，回退本地由调用方处理。"""
         assert cloud.build_judge_transport(_profile(judge_protocol="magic")) is None
+
+    def test_anthropic_protocol_builds_messages_transport(self):
+        transport = cloud.build_judge_transport(_profile(judge_protocol=PROTO_ANTHROPIC))
+        assert isinstance(transport, AnthropicChatTransport)
+
+    def test_gemini_protocol_builds_generate_content_transport(self):
+        transport = cloud.build_judge_transport(_profile(judge_protocol=PROTO_GEMINI))
+        assert isinstance(transport, GeminiChatTransport)
+
+    def test_anthropic_request_uses_messages_auth_and_parses_text(self, gateway):
+        profile = _profile(
+            base_url=gateway.base_url,
+            judge_protocol=PROTO_ANTHROPIC,
+            judge_model="claude-test",
+        )
+        transport = cloud.build_judge_transport(profile)
+        assert transport is not None
+        assert transport.complete("判断这个切点") == '{"verdict": "good_cut"}'
+        request = gateway.requests[-1]
+        assert request["path"].endswith("/v1/messages")
+        assert request["headers"]["x-api-key"] == "sk-x"
+        assert request["headers"]["anthropic-version"] == "2023-06-01"
+        assert request["body"]["model"] == "claude-test"
+        assert request["body"]["messages"][0]["content"] == "判断这个切点"
+
+    def test_gemini_request_uses_model_path_and_parses_parts(self, gateway):
+        profile = _profile(
+            base_url=gateway.base_url,
+            judge_protocol=PROTO_GEMINI,
+            judge_model="models/gemini-test",
+        )
+        transport = cloud.build_judge_transport(profile)
+        assert transport is not None
+        assert transport.complete("判断这个切点") == '{"verdict": "good_cut"}'
+        request = gateway.requests[-1]
+        assert request["path"].endswith("/models/gemini-test:generateContent")
+        assert request["headers"]["x-goog-api-key"] == "sk-x"
+        assert request["body"]["contents"][0]["parts"][0]["text"] == "判断这个切点"
 
 
 class TestAsrDispatch:

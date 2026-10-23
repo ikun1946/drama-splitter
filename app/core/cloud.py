@@ -16,10 +16,14 @@
 
 from __future__ import annotations
 
+from .cloud_anthropic import AnthropicChatTransport
+from .cloud_gemini import GeminiChatTransport
 from .cloud_openai import OpenAiAsrTransport, OpenAiChatTransport, list_models as _list_openai_models
 from .cloud_volc import VolcFlashAsrTransport
 from .providers import (
     PROTO_LABELS,
+    PROTO_ANTHROPIC,
+    PROTO_GEMINI,
     PROTO_OPENAI,
     PROTO_VOLC_ARK,
     AsrTransport,
@@ -33,6 +37,22 @@ __all__ = ["build_asr_transport", "build_judge_transport", "list_models"]
 #: 语义判断协议 → 适配器工厂。方舟的 chat 也是 OpenAI 形态，所以没有"火山"这一项。
 JUDGE_BUILDERS = {
     PROTO_OPENAI: lambda profile: OpenAiChatTransport(
+        profile.base_url,
+        profile.resolved_api_key(),
+        profile.judge_model,
+        label=profile.label,
+        use_system_proxy=profile.use_system_proxy,
+        info=profile.info_for(profile.judge_model),
+    ),
+    PROTO_ANTHROPIC: lambda profile: AnthropicChatTransport(
+        profile.base_url,
+        profile.resolved_api_key(),
+        profile.judge_model,
+        label=profile.label,
+        use_system_proxy=profile.use_system_proxy,
+        info=profile.info_for(profile.judge_model),
+    ),
+    PROTO_GEMINI: lambda profile: GeminiChatTransport(
         profile.base_url,
         profile.resolved_api_key(),
         profile.judge_model,
@@ -90,7 +110,12 @@ def list_models(profile: ProviderProfile) -> list[str]:
             profile.resolved_api_key(),
             use_system_proxy=profile.use_system_proxy,
         )
-    protocol = PROTO_LABELS.get(profile.asr_protocol, profile.asr_protocol)
+    protocol = (
+        profile.judge_protocol
+        if profile.judge_protocol != "disabled"
+        else profile.asr_protocol
+    )
+    label = PROTO_LABELS.get(protocol, protocol)
     raise ProviderError(
-        f"「{protocol}」协议没有模型清单接口，请手动填写模型名"
+        f"「{label}」协议没有通用的 /models 清单接口，请手动填写模型名"
     )

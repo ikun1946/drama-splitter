@@ -51,6 +51,25 @@ def test_built_product_is_checked_for_the_dictionary():
     assert "dict_files" in text, "没有校验词典是否真的落进产物"
 
 
+def test_setuptools_vendored_imports_are_explicit():
+    """v1.0.31 冻结启动在 Qt 之前就报 ``No module named 'jaraco'``。
+
+    setuptools 71+ 把 jaraco 放在 ``setuptools._vendor``，而 PyInstaller 的
+    钩子是否收集它取决于构建机的 setuptools / hooks 组合。打包脚本必须显式
+    钉住这一组，否则用户双击后看到的只是一个没有主窗口的进程。
+    """
+    text = SOURCE.read_text(encoding="utf-8")
+    assert "HIDDEN_SETUPTOOLS_VENDOR" in text
+    for module in (
+        "setuptools._vendor.jaraco",
+        "setuptools._vendor.jaraco.text",
+        "setuptools._vendor.packaging",
+        "setuptools._vendor.platformdirs",
+    ):
+        assert module in text, f"打包脚本没有收集 {module}"
+    assert "for module in HIDDEN_SETUPTOOLS_VENDOR:" in text, "清单没有接进 PyInstaller 参数"
+
+
 def test_helper_points_at_installed_zhconv():
     module = build_package_module()
     if importlib.util.find_spec("zhconv") is None:

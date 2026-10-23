@@ -163,6 +163,8 @@ Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方�
 | 协议 | 覆盖什么 | 说明 |
 |---|---|---|
 | **OpenAI 兼容** | 对话补全 `/chat/completions`；音频转写 `/audio/transcriptions` | 绝大多数厂商都提供；转写固定带 `response_format=verbose_json` + `timestamp_granularities[]=word` |
+| **Anthropic Messages** | 对话补全 `/messages`（`x-api-key` + `anthropic-version`） | 原生 Claude / Anthropic 兼容网关；用于语义判断 |
+| **Google Gemini** | `models/{model}:generateContent`（`x-goog-api-key`） | 原生 Gemini；用于语义判断 |
 | **火山方舟** | 豆包「大模型录音文件识别极速版」 | 转写专有协议；方舟的语义判断本身是 OpenAI 形态，走上一行 |
 | 停用 | — | 该能力不配云端 |
 
@@ -172,7 +174,9 @@ Mistral / DeepInfra / OpenRouter，自建 Ollama / LM Studio，以及火山方�
   Key、外发许可与连接参数**只有这一处**能改——
   早先它们分散在「模型管理」的云端卡片与独立的「厂商管理」对话框里，同一份档案
   两处都能改，实测会撞上"到底哪个算数"。
-- **厂商可增删改**：「新增 / 复制为自定义 / 删除 / 恢复默认」；内置厂商 id 不可改、
+- **自定义接入**：点「自定义接入」直接填写服务名称、API 地址、API Key 与协议，
+  模型名可在清单中手动添加；内部 id 会按名称自动生成，不需要用户理解。
+  也可以「复制为自定义 / 删除 / 恢复默认」；内置厂商 id 不可改、
   不可删（可改字段或恢复默认），删除/恢复会把引用它的能力回落本地。
 - **模型清单可以筛选**：切换厂商或改完地址 / Key 会自动拉一次该厂商的
   `GET {base_url}/models` 填进表格（同一厂商第二次进直接读内存缓存，也可点

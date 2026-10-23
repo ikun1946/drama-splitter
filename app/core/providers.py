@@ -46,7 +46,9 @@ __all__ = [
     "DEFAULT_PROFILES",
     "ENV_KEY_TEMPLATE",
     "PROTOCOLS_BY_CAP",
+    "PROTO_ANTHROPIC",
     "PROTO_DISABLED",
+    "PROTO_GEMINI",
     "PROTO_LABELS",
     "PROTO_OPENAI",
     "PROTO_VOLC_ARK",
@@ -65,10 +67,13 @@ __all__ = [
     "chat_completions_url",
     "describe_egress",
     "egress_host",
+    "gemini_generate_url",
     "judge_target_url",
     "merge_profiles",
+    "messages_url",
     "missing_config_reason",
     "resolve_api_key",
+    "suggest_custom_id",
     "validate_profile",
 ]
 
@@ -81,18 +86,27 @@ CAP_LABELS = {CAP_ASR: "转写", CAP_JUDGE: "语义判断"}
 #: 协议取值。封闭集合：只有新增一种协议才需要写适配器（见 `cloud.py`）。
 PROTO_DISABLED = "disabled"
 PROTO_OPENAI = "openai"
+PROTO_ANTHROPIC = "anthropic"
+PROTO_GEMINI = "gemini"
 PROTO_VOLC_ARK = "volc_ark"
 
 PROTO_LABELS = {
     PROTO_DISABLED: "停用",
     PROTO_OPENAI: "OpenAI 兼容",
+    PROTO_ANTHROPIC: "Anthropic Messages",
+    PROTO_GEMINI: "Google Gemini",
     PROTO_VOLC_ARK: "火山方舟",
 }
 
 #: 能力 → 可用协议（顺序即下拉顺序）。语义判断不需要"火山方舟"这一项：
 #: 方舟的 chat 本身就是 OpenAI 形态，再列一项只会让同一种请求有两个名字。
 PROTOCOLS_BY_CAP = {
-    CAP_JUDGE: (PROTO_DISABLED, PROTO_OPENAI),
+    CAP_JUDGE: (
+        PROTO_DISABLED,
+        PROTO_OPENAI,
+        PROTO_ANTHROPIC,
+        PROTO_GEMINI,
+    ),
     CAP_ASR: (PROTO_DISABLED, PROTO_OPENAI, PROTO_VOLC_ARK),
 }
 
@@ -104,6 +118,27 @@ DEFAULT_TIMEOUT = 120.0
 
 #: 自定义厂商 id 的合法形式：ASCII 小写字母/数字，可含 - 与 _，首字符非连字符
 _PROFILE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def suggest_custom_id(label: str, existing_ids: Iterable[str] = ()) -> str:
+    """按显示名生成一个未占用的内部 id。
+
+    自定义接入是给用户填 API 与 Key 的，不该让他先理解内部 id。英文名会转成
+    小写 slug；中文或其他无法转写的名称统一用 ``custom``，再按需追加序号。
+    """
+    text = (label or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)[:32].strip("-")
+    base = slug or "custom"
+    if not _PROFILE_ID_RE.fullmatch(base):
+        base = "custom"
+    taken = {str(item).strip() for item in existing_ids if str(item).strip()}
+    if base not in taken:
+        return base
+    index = 2
+    while f"{base}-{index}" in taken:
+        index += 1
+    return f"{base}-{index}"
 
 
 class ProviderError(RuntimeError):
@@ -710,6 +745,26 @@ def chat_completions_url(base_url: str) -> str:
     return f"{base}/chat/completions" if base else ""
 
 
+def messages_url(base_url: str) -> str:
+    """Anthropic Messages 地址；base_url 为空时返回空串。"""
+    base = (base_url or "").strip().rstrip("/")
+    return f"{base}/messages" if base else ""
+
+
+def gemini_generate_url(base_url: str, model: str) -> str:
+    """Gemini ``generateContent`` 地址；地址或模型为空时返回空串。"""
+    from urllib.parse import quote
+
+    base = (base_url or "").strip().rstrip("/")
+    name = (model or "").strip()
+    if not base or not name:
+        return ""
+    if name.startswith("models/"):
+        name = name[len("models/"):]
+    # 模型名只允许作为单个路径段，避免未校验的配置改变请求目标。
+    return f"{base}/models/{quote(name, safe='-_.')}:generateContent"
+
+
 def audio_transcriptions_url(base_url: str) -> str:
     """OpenAI 兼容的转写地址；base_url 为空时返回空串。"""
     base = (base_url or "").strip().rstrip("/")
@@ -720,7 +775,13 @@ def judge_target_url(profile: ProviderProfile) -> str:
     """语义判断实际请求的 URL（按协议）。"""
     if profile.judge_protocol == PROTO_DISABLED:
         return ""
-    return chat_completions_url(profile.base_url)
+    if profile.judge_protocol == PROTO_OPENAI:
+        return chat_completions_url(profile.base_url)
+    if profile.judge_protocol == PROTO_ANTHROPIC:
+        return messages_url(profile.base_url)
+    if profile.judge_protocol == PROTO_GEMINI:
+        return gemini_generate_url(profile.base_url, profile.judge_model)
+    return ""
 
 
 def asr_target_url(profile: ProviderProfile) -> str:

@@ -3009,6 +3009,34 @@ class TestProviderDialog:
         assert form.advanced_toggle.isChecked() is True
         assert not form.advanced_host.isHidden()
 
+    def test_custom_entry_exposes_address_key_and_protocol(self, provider_form):
+        """自定义接入要把用户真正需要填的东西直接摆出来，不让先理解内部 id。"""
+        from app.core.providers import PROTO_OPENAI
+
+        form, _ = provider_form
+        form._on_custom()
+        assert form.edit_label.text() == "自定义接入"
+        assert form.edit_id.isEnabled()
+        assert form.key_field.isVisibleTo(form)
+        assert form.custom_intro.isVisibleTo(form)
+        assert not form.id_field.isVisibleTo(form), "内部 id 不应出现在自定义接入里"
+        assert form.edit_base_url.isVisibleTo(form)
+        assert form.edit_api_key.isVisibleTo(form)
+        assert form.edit_judge_protocol.isVisibleTo(form)
+        assert form.models_host.isVisibleTo(form)
+        assert form.edit_judge_protocol.currentData() == PROTO_OPENAI
+        assert "API 地址" in form.hint_label.text() or "服务名称" in form.hint_label.text()
+
+    def test_builtin_still_has_a_visible_key_field(self, provider_form):
+        """自定义字段搬进独立容器后，内置厂商的首屏 Key 仍不能被一起藏掉。"""
+        form, _ = provider_form
+        form._on_custom()
+        self._pick(form, "deepseek")
+        assert form.key_field.isVisibleTo(form)
+        assert form.edit_api_key.isVisibleTo(form)
+        assert not form.custom_intro.isVisibleTo(form)
+        assert not form.label_field.isVisibleTo(form)
+
     def test_protocol_switching_shows_relevant_fields(self, provider_form):
         from app.core.providers import PROTO_DISABLED, PROTO_OPENAI
 
@@ -3044,14 +3072,15 @@ class TestProviderDialog:
         # 常用区里这两个必须一直在（Key 是首屏唯一的必填项）
         assert not form.key_field.isHidden()
         assert not form.model_table.isHidden()
-        # 收进去的字段：确实住在高级区里（isHidden 只看自身开关，父级折叠它不知道，
-        # 所以这里查父子关系而不是可见性）
-        for field in (form.base_field, form.judge_protocol_field, form.asr_endpoint_field):
-            assert form.advanced_host.isAncestorOf(field)
+        # 地址/协议/火山字段住在“自定义接入”首屏；模型表在模型区。
+        assert form.custom_host.isAncestorOf(form.base_field)
+        assert form.custom_host.isAncestorOf(form.judge_protocol_field)
+        assert form.custom_host.isAncestorOf(form.asr_endpoint_field)
+        assert form.models_host.isAncestorOf(form.model_table)
 
         form.advanced_toggle.setChecked(True)
         assert not form.advanced_host.isHidden()
-        assert not form.base_field.isHidden(), "展开后地址要能改"
+        assert form.custom_host.isAncestorOf(form.base_field), "地址仍在首屏容器里"
 
     def test_validation_error_expands_the_advanced_section(self, provider_form):
         """缺必填项时自动摊开高级区：不会"看不到却必须填"。"""
@@ -3124,7 +3153,8 @@ class TestProviderDialog:
         assert form.edit_id.text() == "", "复制出的档案必须让用户自己填新 id"
         assert form.edit_id.isEnabled() is True
         assert "副本" in form.edit_label.text()
-        assert "重复" in form.hint_label.text()
+        assert form.custom_intro.isVisibleTo(form), "副本是自定义接入，应显示名称/地址"
+        assert "自动生成" in form.hint_label.text()
 
     def test_delete_reverts_referencing_capability(self, provider_form, monkeypatch):
         from app.core.app_config import LOCAL_BACKEND, AppConfig

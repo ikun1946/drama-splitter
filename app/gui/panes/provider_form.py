@@ -56,12 +56,15 @@ from ...core.providers import (
     PROTO_DISABLED,
     PROTO_LABELS,
     PROTO_OPENAI,
+    PROTO_ANTHROPIC,
+    PROTO_GEMINI,
     PROTO_VOLC_ARK,
     ProviderError,
     ProviderProfile,
     describe_egress,
     merge_model_choices,
     missing_config_reason,
+    suggest_custom_id,
     validate_profile,
 )
 from ..state import ProjectState
@@ -100,6 +103,8 @@ class ProviderForm(QWidget):
         #: 测试注入点：默认写真实 config.json，测试指到临时文件
         self._config_path = config_path
         self._profile_id: str | None = None
+        #: 当前是否处于「自定义接入」引导（地址/密钥/协议/模型直接展示）。
+        self.custom_mode = False
         self._loading = False
         self._models_worker = None
         #: (base_url, key) → 模型清单。同一家不重复拉：切换厂商来回点时不该反复打网络
@@ -133,12 +138,12 @@ class ProviderForm(QWidget):
         self.search.setPlaceholderText("搜索厂商")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_profile_filter)
-        self.btn_new = QPushButton("新增")
+        self.btn_new = QPushButton("自定义接入")
         self.btn_duplicate = QPushButton("复制为自定义")
         self.btn_delete = QPushButton("删除")
         self.btn_delete.setProperty("role", "danger")
         self.btn_restore = QPushButton("恢复默认")
-        self.btn_new.clicked.connect(self._on_new)
+        self.btn_new.clicked.connect(self._on_custom)
         self.btn_duplicate.clicked.connect(self._on_duplicate)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_restore.clicked.connect(self._on_restore)
@@ -189,16 +194,21 @@ class ProviderForm(QWidget):
             (self.edit_asr_protocol, "asr"),
         ):
             for protocol in PROTOCOLS_BY_CAP[capability]:
-                combo.addItem(PROTO_LABELS[protocol], protocol)
+                label = PROTO_LABELS[protocol]
+                if protocol == PROTO_DISABLED:
+                    label = "不使用云端"
+                combo.addItem(label, protocol)
             combo.currentIndexChanged.connect(self._refresh_field_visibility)
         self.edit_id.textChanged.connect(self._refresh_field_visibility)
         # 填完地址或 Key 失焦时自动拉模型列表：这是"我配好了"最自然的时刻
         self.edit_base_url.editingFinished.connect(self._request_models)
         self.edit_api_key.editingFinished.connect(self._request_models)
 
-        label_field = LabeledField("名称（界面上显示）")
-        label_field.attach(self.edit_label)
-        self.base_field = LabeledField("接口地址（base_url，OpenAI 兼容要带 /v1）")
+        self.label_field = LabeledField("服务名称")
+        self.label_field.attach(self.edit_label)
+        self.base_field = LabeledField(
+            "API 地址（OpenAI / Anthropic 通常以 /v1 结尾）"
+        )
         self.base_field.attach(self.edit_base_url)
         self.judge_protocol_field = LabeledField("语义判断协议")
         self.judge_protocol_field.attach(self.edit_judge_protocol)
@@ -208,7 +218,7 @@ class ProviderForm(QWidget):
         self.asr_endpoint_field.attach(self.edit_asr_endpoint)
         self.asr_resource_field = LabeledField("火山资源 ID（asr_resource_id）")
         self.asr_resource_field.attach(self.edit_asr_resource)
-        self.key_field = LabeledField("API Key")
+        self.key_field = LabeledField("API Key / 密钥")
         self.key_field.attach(self.edit_api_key)
 
         # 「刷新模型列表」：`GET {base_url}/models`；表格里的"自动"行就是它拉回来的。
@@ -366,8 +376,8 @@ class ProviderForm(QWidget):
             "接口地址 / 协议 / 火山专用字段 / 厂商 id / 代理 / 模型清单与参数"
         )
         self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
-        id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
-        id_field.attach(self.edit_id)
+        self.id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
+        self.id_field.attach(self.edit_id)
         self.advanced_host = QWidget(self)
         advanced = QVBoxLayout(self.advanced_host)
         advanced.setContentsMargins(0, 0, 0, 0)
@@ -375,7 +385,7 @@ class ProviderForm(QWidget):
         advanced.addWidget(self.base_field)
         advanced.addLayout(pair(self.judge_protocol_field, self.asr_protocol_field))
         advanced.addWidget(self.volcano_host)
-        advanced.addWidget(id_field)
+        advanced.addWidget(self.id_field)
         advanced.addWidget(self.use_system_proxy)
         self.advanced_host.setVisible(False)
 
@@ -454,28 +464,58 @@ class ProviderForm(QWidget):
         self.hint_label.setVisible(False)
         editor_card.body_layout.insertWidget(1, self.hint_label)
         editor_card.body_layout.insertWidget(2, self.cloud_hint)
+
+        # ---- 自定义接入首屏 ------------------------------------------------
+        # 内置厂商仍有“选厂商 → 填 Key”的快捷路径；自定义接入则把真正需要
+        # 用户填写的服务名称、API 地址、密钥、协议和模型一次性放在首屏。
+        # 所有字段只挂在一个布局里：Qt 控件只能有一个父布局，重复 addWidget
+        # 会把控件从原位置悄悄搬走，最终表现为内置/自定义模式互相串字段。
+        self.custom_intro = QWidget(self)
+        custom_intro_layout = QVBoxLayout(self.custom_intro)
+        custom_intro_layout.setContentsMargins(0, 4, 0, 0)
+        custom_intro_layout.setSpacing(4)
+        self.custom_host = QWidget(self)
+        custom = QVBoxLayout(self.custom_host)
+        custom.setContentsMargins(0, 0, 0, 0)
+        custom.setSpacing(6)
+        self.custom_title = QLabel("自定义 API 接入", self)
+        self.custom_title.setProperty("role", "provider-step")
+        self.custom_note = QLabel(
+            "填写服务名称、API 地址与密钥，再选择协议。"
+            "协议决定请求格式；模型可在下方清单里手动添加。",
+            self,
+        )
+        self.custom_note.setWordWrap(True)
+        self.custom_note.setProperty("role", "muted")
+        custom_intro_layout.addWidget(self.custom_title)
+        custom_intro_layout.addWidget(self.custom_note)
+        custom.addWidget(self.custom_intro)
+        custom.addWidget(self.label_field)
+        custom.addWidget(self.advanced_host)
+        self.custom_intro.setVisible(False)
+        self.label_field.setVisible(False)
+
         # 模型清单：它可能很长（自带滚动），但排在配置项之后
-        models_title = QLabel("模型清单与参数（接口拉取 + 手填）", editor_card)
-        models_title.setProperty("role", "muted")
+        self.models_title = QLabel("模型清单与参数（接口拉取 + 手填）", editor_card)
+        self.models_title.setProperty("role", "muted")
         # QLabel 默认单行不换行，minimumSizeHint 即整行文字宽度——那是硬下限，
         # 布局压不下去。这几处长说明文字以前把厂商表单顶宽到超出对话框视口。
-        models_title.setWordWrap(True)
+        self.models_title.setWordWrap(True)
         self.models_host = QWidget(self)
         models_layout = QVBoxLayout(self.models_host)
         models_layout.setContentsMargins(0, 0, 0, 0)
         models_layout.setSpacing(8)
-        models_layout.addWidget(models_title)
+        models_layout.addWidget(self.models_title)
         models_layout.addWidget(self.model_table)
         models_layout.addLayout(models_row)
         models_layout.addWidget(self.info_title)
         models_layout.addLayout(info_row)
         models_layout.addWidget(self.info_note)
-        models_layout.addWidget(label_field)
-        models_layout.addWidget(self.advanced_host)
         self.advanced_toggle.blockSignals(True)
         self.advanced_toggle.setChecked(False)
         self.advanced_toggle.blockSignals(False)
         self.models_host.setVisible(False)
+        editor_card.body_layout.insertWidget(6, self.custom_host)
         editor_card.body_layout.addWidget(self.advanced_toggle)
         editor_card.body_layout.addWidget(self.models_host)
         editor_card.body_layout.addWidget(self.egress_preview)
@@ -593,6 +633,7 @@ class ProviderForm(QWidget):
         profile = self._stored_profile(profile_id)
         if profile is None:
             return
+        self.custom_mode = not self._is_builtin(profile.id)
         self._loading = True
         self._profile_id = profile.id
         self._fetched_models = []
@@ -641,6 +682,7 @@ class ProviderForm(QWidget):
 
     def _on_new(self) -> None:
         """新增：把所有字段清空、两个协议都置停用，等用户自己填。"""
+        self.custom_mode = False
         self._loading = True
         self._profile_id = None
         self.edit_id.setText("")
@@ -679,18 +721,46 @@ class ProviderForm(QWidget):
             "模型用途请随后到「工具 → 模型设置…」中选择。"
         )
 
+    def _on_custom(self) -> None:
+        """从「自定义接入」开始：清除内置档案状态，直接进入可填写的连接表单。
+
+        自定义接入是用户自己提供 API 地址与密钥，因此不能再让用户先理解
+        “新增/复制”或内部 id。名称和 id 都可以自动生成，协议预填最常见的一种，
+        用户只需要按实际服务改协议、地址和 Key。
+        """
+        self._on_new()
+        self.custom_mode = True
+        self.profile_list.setCurrentItem(None)
+        self.edit_label.setText("自定义接入")
+        self.edit_base_url.setPlaceholderText(
+            "例如 https://api.example.com/v1（按服务文档填写）"
+        )
+        self.edit_judge_protocol.setCurrentIndex(
+            self.edit_judge_protocol.findData(PROTO_OPENAI)
+        )
+        self.advanced_toggle.setChecked(True)
+        self._refresh_field_visibility()
+        self.edit_label.setFocus()
+        self._set_hint(
+            "填写服务名称、API 地址、密钥并选择协议；"
+            "保存后到「工具 → 模型设置…」选择这条能力要用的模型。"
+        )
+
     def _on_duplicate(self) -> None:
         """复制为自定义：同一家厂商两套 Key / 两个账号时用。"""
         source = self._stored_profile(self._profile_id)
         if source is None:
             return
+        self.custom_mode = True
         self._profile_id = None
         self.edit_id.setText("")
         self.edit_id.setEnabled(True)
         self.edit_label.setText(f"{source.label} 副本")
         self.edit_label.setFocus()
+        self._refresh_field_visibility()
         self._set_hint(
-            f"从「{source.label}」复制：请填一个新的 id（不能与已有 id 重复）。"
+            f"从「{source.label}」复制：修改服务名称、API 地址或密钥后保存；"
+            "内部 id 会自动生成。"
         )
 
     def _on_delete(self) -> None:
@@ -867,9 +937,11 @@ class ProviderForm(QWidget):
         profile_label = profile.label if profile is not None else "尚未选择厂商"
         self.provider_title.setText(profile_label)
         self.provider_subtitle.setText(
-            "API Key、外发许可与连接参数都在这里；保存后测试一次连接。"
+            "自定义接入：填写服务名称、API 地址与密钥，选择协议并添加模型。"
+            if self.custom_mode
+            else "API Key、外发许可与连接参数都在这里；保存后测试一次连接。"
             if profile is not None
-            else "从左侧选择一家厂商，或点「新增」接入自建服务。"
+            else "从左侧选择一家厂商，或点「自定义接入」连接自建服务。"
         )
         enabled = profile is not None and profile.enabled
         self.provider_state.set_text("已连通" if enabled else "待测试")
@@ -1137,6 +1209,16 @@ class ProviderForm(QWidget):
         迟早出现"一个按钮放行、另一个拦下"。
         """
         draft = self.current_draft()
+        # 自定义接入不把内部 id 当作使用者需要理解的概念：
+        # 名称填好后自动生成一个稳定、不重复的 id。
+        if not draft.id and draft.label:
+            taken_ids = [
+                profile.id for profile in self._config.profiles().all()
+            ]
+            draft = draft.with_updates(
+                id=suggest_custom_id(draft.label, taken_ids)
+            )
+            self.edit_id.setText(draft.id)
         taken = [
             profile.id
             for profile in self._config.profiles().all()
@@ -1320,9 +1402,33 @@ class ProviderForm(QWidget):
         asr_protocol = self.edit_asr_protocol.currentData() or PROTO_DISABLED
         volcano = asr_protocol == PROTO_VOLC_ARK
 
-        self.advanced_host.setVisible(self.advanced_toggle.isChecked())
-        self.models_host.setVisible(self.advanced_toggle.isChecked())
+        # 自定义接入是例外：地址/协议就是用户来这里的全部目的，放进折叠区
+        # 等于把表单藏起来。字段容器始终存在，只切换内部字段，避免控件在
+        # 两套布局之间被 Qt 重父化。
+        expanded = self.advanced_toggle.isChecked()
+        self.custom_host.setVisible(self.custom_mode or expanded)
+        self.custom_intro.setVisible(self.custom_mode)
+        self.label_field.setVisible(self.custom_mode)
+        self.advanced_host.setVisible(self.custom_mode or expanded)
+        self.models_host.setVisible(
+            self.custom_mode or expanded
+        )
+        self.advanced_toggle.setVisible(not self.custom_mode)
+        self.id_field.setVisible(not self.custom_mode)
+        self.models_title.setText(
+            "选择模型（接口清单 + 手填；点行内按钮指派用途）"
+            if self.custom_mode
+            else "模型清单与参数（接口拉取 + 手填）"
+        )
         self.volcano_host.setVisible(volcano)
+        self.base_field.set_label(
+            "API 地址（按服务文档填写）"
+            if self.custom_mode
+            else "接口地址（base_url，OpenAI 兼容要带 /v1）"
+        )
+        self.key_field.set_label(
+            "API Key / 密钥" if self.custom_mode else "API Key"
+        )
         self.base_field.setVisible(
             judge_protocol != PROTO_DISABLED or asr_protocol == PROTO_OPENAI
         )
