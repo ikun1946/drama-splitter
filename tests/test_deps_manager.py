@@ -59,6 +59,71 @@ class TestManifest:
         )
 
 
+class TestGroups:
+    def test_registry_has_three_groups(self):
+        assert set(dm.GROUPS) == {"asr", "scene", "llama"}
+        assert dm.group_label("scene") == "镜头检测（scenedetect）"
+        assert dm.group_label("llama") == "本地语义推理栈"
+        assert dm.group_label("nope") == "nope"
+
+    def test_scene_group_pins_scenedetect_and_headless_opencv(self):
+        names = {dm._normalize(n) for n, _ in dm.SCENE_GROUP.packages}
+        assert "scenedetect" in names
+        assert "opencv-python-headless" in names, "headsless 才能避免 GUI 依赖"
+        assert "click" in names and "tqdm" in names and "platformdirs" in names
+        assert dm.SCENE_GROUP.required_imports == ("scenedetect", "cv2")
+
+    def test_llama_group_has_cpu_wheel_and_python_deps(self):
+        names = {dm._normalize(n) for n, _ in dm.LLAMA_GROUP.packages}
+        assert {"diskcache", "jinja2", "markupsafe", "typing-extensions"} <= names
+        wheel = dm.LLAMA_GROUP.direct[0]
+        assert wheel.version == "0.3.36"
+        assert wheel.filename.endswith("py3-none-win_amd64.whl")
+        assert "v0.3.36" in wheel.url
+        assert "api.github.com" in wheel.fallback_url
+        assert ("Accept", "application/octet-stream") in wheel.headers
+        assert "llama_cpp" not in dm.LLAMA_GROUP.required_imports, (
+            "安装校验不能抢先 import llama_cpp，否则 CPU 后端注册补丁失效"
+        )
+
+    def test_deps_present_uses_the_group_probe(self, tmp_path):
+        root = tmp_path / "deps"
+        for name in dm.SCENE_GROUP.probe_dirs:
+            (root / name).mkdir(parents=True)
+        assert dm.deps_present(root, group="scene")
+        assert not dm.deps_present(root, group="asr")
+        assert not dm.deps_present(root, group="llama")
+
+    def test_plan_includes_direct_wheels(self, monkeypatch):
+        monkeypatch.setattr(
+            dm, "resolve_wheel_url", lambda *a, **k: ("pkg.whl", "https://example/pkg.whl")
+        )
+        plan, failed = dm._plan("https://index", dm.LLAMA_GROUP)
+        assert failed == []
+        assert len(plan) == len(dm.LLAMA_GROUP.packages) + 1
+        assert any(item.package == "llama-cpp-python" for item in plan)
+
+    def test_unknown_group_returns_readable_failure(self, tmp_path):
+        result = dm.install_deps(tmp_path / "deps", group="nope")
+        assert result.ok is False
+        assert "未知的依赖组" in result.message
+
+    def test_ensure_llama_runtime_copies_only_complete_source(self, tmp_path):
+        target = tmp_path / "deps" / "llama_cpp" / "lib"
+        target.mkdir(parents=True)
+        incomplete = tmp_path / "incomplete"
+        incomplete.mkdir()
+        (incomplete / "msvcp140.dll").write_bytes(b"x")
+        complete = tmp_path / "pyside"
+        complete.mkdir()
+        for name in dm._MSVC_RUNTIME:
+            (complete / name).write_bytes(b"runtime")
+        assert dm.ensure_llama_runtime(target, sources=[incomplete, complete]) == 3
+        for name in dm._MSVC_RUNTIME:
+            assert (target / name).is_file()
+        assert dm.ensure_llama_runtime(tmp_path / "missing", sources=[complete]) == 0
+
+
 class TestVersionHelpers:
     def test_normalize_equates_hyphen_and_underscore(self):
         assert dm._normalize("faster-whisper") == dm._normalize("faster_whisper")

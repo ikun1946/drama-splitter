@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from ...core.env_check import (
     FIX_DOWNLOAD,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_EXTRA,
     FIX_INSTALL_FFMPEG,
     FIX_NAVIGATE,
     FIX_OPEN_URL,
@@ -101,6 +102,7 @@ class _ItemRow(QFrame):
                 FIX_INSTALL_FFMPEG,
                 FIX_DOWNLOAD,
                 FIX_INSTALL_ENGINE,
+                FIX_INSTALL_EXTRA,
             ):
                 # 这几种是**真的会在应用内动手装东西**的，样式给足分量
                 self.btn_fix.setProperty("role", "primary")
@@ -127,6 +129,8 @@ class EnvCheckDialog(DialogShell):
     download_requested = Signal(str)
     #: 用户点了"安装转写引擎"（应用内下载运行期依赖）
     install_engine_requested = Signal()
+    #: 用户点了"安装可选依赖组"（payload = "scene" / "llama"）
+    install_extra_requested = Signal(str)
     #: 用户点了"下载并配置 FFmpeg"（应用内下载完整构建）
     install_ffmpeg_requested = Signal()
     #: 用户点了"打开网页"类修复（payload = URL）
@@ -306,6 +310,8 @@ class EnvCheckDialog(DialogShell):
             self.download_requested.emit(payload)
         elif kind == FIX_INSTALL_ENGINE:
             self.install_engine_requested.emit()
+        elif kind == FIX_INSTALL_EXTRA:
+            self.install_extra_requested.emit(payload)
         elif kind == FIX_OPEN_URL:
             self.open_url_requested.emit(payload)
         elif kind == FIX_NAVIGATE:

@@ -319,6 +319,7 @@ class MainWindow(QMainWindow):
         self.env_check_dialog.recheck_requested.connect(self._start_env_check)
         self.env_check_dialog.download_requested.connect(self._on_env_fix_download)
         self.env_check_dialog.install_engine_requested.connect(self._on_env_install_engine)
+        self.env_check_dialog.install_extra_requested.connect(self._on_env_install_extra)
         self.env_check_dialog.install_ffmpeg_requested.connect(self._on_env_install_ffmpeg)
         self.env_check_dialog.open_url_requested.connect(self._on_env_fix_open_url)
         self.env_check_dialog.navigate_requested.connect(self._on_env_fix_navigate)
@@ -359,48 +360,66 @@ class MainWindow(QMainWindow):
         )
 
     def _on_env_install_engine(self) -> None:
-        """「安装转写引擎」：后台下载官方预编译依赖到 exe 同级的 deps/。
+        """「安装转写引擎」：后台下载官方预编译依赖到 exe 同级的 deps/。"""
+        self._install_deps_group("asr")
+
+    def _on_env_install_extra(self, group: str) -> None:
+        """「安装镜头检测 / 本地推理栈」：与转写引擎共用依赖安装链路。"""
+        self._install_deps_group(group)
+
+    def _install_deps_group(self, group: str) -> None:
+        """后台安装一组运行期依赖，装完立刻重新自检。
 
         与「下载模型」不同——那是把用户送到模型管理页自己点；这里是真的在应用内
-        把依赖装上（不需要 pip / 编译器）。装完立刻重新自检，让那一项变绿。
+        把依赖装上（不需要 pip / 编译器）。
         """
+        from ..core.deps_manager import group_label
         from .workers import DepsInstallWorker
 
+        label = group_label(group)
         if self.is_busy():
-            self.bottom.set_hint("有后台任务在跑，等它结束再安装引擎。")
+            self.bottom.set_hint(f"有后台任务在跑，等它结束再安装{label}。")
             return
 
-        worker = DepsInstallWorker(parent=self)
+        self._deps_label = label
+        worker = DepsInstallWorker(group=group, parent=self)
         worker.progress.connect(self._on_deps_progress)
         worker.log.connect(lambda text: self.workbench.inspector.append_log(text))
         worker.finished_with.connect(self._on_deps_finished)
         self.register_worker("deps_install", worker)
-        self.bottom.set_hint("正在下载语音转写引擎（约 80 MB），可继续用其它功能…")
+        self.bottom.set_hint(f"正在安装{label}，可继续用其它功能…")
         self.bottom.set_progress(0)
         worker.start()
 
     def _on_deps_progress(self, done: int, total: int, name: str, index: int, count: int) -> None:
         pct = int(done / total * 100) if total else 0
         self.bottom.set_progress(max(0, min(100, pct)))
-        self.bottom.set_hint(f"安装转写引擎：{index}/{count} {name}")
+        label = getattr(self, "_deps_label", "运行期依赖")
+        self.bottom.set_hint(f"安装{label}：{index}/{count} {name}")
 
     def _on_deps_finished(self, result) -> None:
         self.bottom.set_progress(None)
         from .widgets import message
 
         if result.ok:
-            self.bottom.set_hint("语音转写引擎已安装，重新检测中…")
+            label = getattr(result, "label", "运行期依赖")
+            note = {
+                "asr": "现在可以做语音转写了（还需要有转写模型）。",
+                "scene": "现在可以检测镜头切换了。",
+                "llama": "本地语义判断已可用；还需要下载/选择语义模型。",
+            }.get(getattr(result, "group", "asr"), "相关能力已可用。")
+            self.bottom.set_hint(f"{label}已安装，重新检测中…")
             message.information(
                 self,
                 "安装完成",
-                "语音转写引擎已安装到：\n"
+                f"{label}已安装到：\n"
                 f"{result.deps_root}\n\n"
-                "现在可以做语音转写了（还需要有转写模型）。"
-                "点「重新检测」可看到该状态更新。",
+                f"{note}点「重新检测」可看到该状态更新。",
             )
             self._start_env_check()
         else:
-            self.bottom.set_hint("转写引擎安装未完成。")
+            label = getattr(result, "label", "运行期依赖")
+            self.bottom.set_hint(f"{label}安装未完成。")
             message.warning(self, "安装未完成", result.message or "未知原因")
 
     # ---- 一键修复环境 ----------------------------------------------------

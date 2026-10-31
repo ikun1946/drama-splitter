@@ -1,14 +1,26 @@
-"""运行期依赖安装：让打包版也能装上语音转写引擎（faster-whisper）。
+"""运行期依赖安装：让打包版也能装上转写引擎、镜头检测与本地推理栈。
 
 为什么需要这个模块
 ------------------
 打包版是个 PyInstaller 冻结的 exe，**里面没有 pip**，而 faster-whisper 及其
 依赖（ctranslate2 / av / onnxruntime / tokenizers …）因为体积（实测约 227 MB）
 被有意排除在包外。结果是：用户下载好了 whisper 模型，却因为没有转写引擎而
-根本跑不了转写——界面只能给一句"改用源码版"，对多数人等于没救。
+根本跑不了转写——界面只能给一句"改用源码版"，对多数人等于没救。同样的道理
+也适用于 scenedetect（镜头检测）和 llama-cpp-python（本地语义判断）。
 
 本模块把这条路补上：**在应用内下载官方预编译 wheel、解压到一个独立目录、
 挂上 sys.path**，不改动打包产物、不需要 pip、不需要编译器。
+
+依赖组
+------
+同一个 ``deps/`` 目录承载多组互不冲突的依赖，用 ``group`` 区分：
+
+- ``asr``：faster-whisper 及转写链（默认组，保持旧调用完全兼容）；
+- ``scene``：scenedetect + OpenCV headless；
+- ``llama``：llama-cpp-python CPU 预编译轮子及其 Python 依赖。
+
+每组有自己的包清单、文件级检查目录和导入验证项；``install_deps`` 默认仍装
+``asr``，现有调用方无需改动。
 
 关键设计：外挂目录必须**追加**到 sys.path 末尾
 --------------------------------------------
@@ -24,10 +36,10 @@ numpy 2.5.4 满足 faster-whisper 的 ``numpy>=2``，故无需降级，只需别
 
 为什么用固定清单而不是通用依赖解析
 --------------------------------
-真做依赖解析（版本回溯、冲突求解）是 pip 的活，代价与风险都不成比例。转写
-引擎的依赖集是**已知且收敛**的：钉死一组实测可用的版本，缺什么补什么即可。
-清单里的版本以 :data:`DEPS_MANIFEST` 为准；若将来 faster-whisper 升级，改这
-一处即可（`tests/test_deps_manager.py` 会盯住清单与选择逻辑）。
+真做依赖解析（版本回溯、冲突求解）是 pip 的活，代价与风险都不成比例。三组
+依赖的集合都是**已知且收敛**的：钉死实测可用的版本，缺什么补什么即可。清单
+以 :data:`GROUPS` 为准；升级某个上游包时改对应组一处即可
+（`tests/test_deps_manager.py` 会盯住清单与选择逻辑）。
 
 与 ``model_manager`` 的分工
 --------------------------
@@ -38,6 +50,8 @@ numpy 2.5.4 满足 faster-whisper 的 ``numpy>=2``，故无需降级，只需别
 
 from __future__ import annotations
 
+import importlib.util
+import shutil
 import sys
 import zipfile
 from dataclasses import dataclass
@@ -48,11 +62,15 @@ from .model_manager import _curl  # 复用 curl 封装（含 --noproxy 与超时
 
 __all__ = [
     "DEPS_MANIFEST",
+    "GROUPS",
     "DepsFile",
+    "DepsGroup",
     "DepsInstallResult",
     "default_deps_root",
     "deps_installed",
     "deps_present",
+    "ensure_llama_runtime",
+    "group_label",
     "install_deps",
     "register_deps",
     "resolve_wheel_url",
@@ -253,11 +271,146 @@ class DepsFile:
     version: str
     filename: str
     url: str
+    #: 主地址失败时的回退（如 GitHub API 资产地址；github.com 直连被墙时用）
+    fallback_url: str = ""
+    #: 下载请求头（回退地址需要 ``Accept: application/octet-stream``）
+    headers: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class DepsGroup:
+    """一组可独立安装的运行期依赖。"""
+
+    key: str
+    label: str
+    packages: tuple[tuple[str, str], ...]      # PyPI 包与钉死版本
+    probe_dirs: tuple[str, ...]                # 文件级检查：这些目录存在
+    required_imports: tuple[str, ...]          # 安装后必须真能导入的模块
+    direct: tuple[DepsFile, ...] = ()          # 不走 PyPI 的直接轮子
+
+
+#: 转写引擎组（旧行为）：清单与导入项保持原样。
+ASR_GROUP = DepsGroup(
+    key="asr",
+    label="语音转写引擎",
+    packages=DEPS_MANIFEST,
+    probe_dirs=("faster_whisper", "ctranslate2", "tokenizers", "onnxruntime", "av"),
+    required_imports=REQUIRED_IMPORTS,
+)
+
+#: 镜头检测组：scenedetect 本身很小，体积主要是 OpenCV headless（约 39 MB）。
+#: 用 headless 而不是 opencv-python：只需要 cv2 模块，不拉 GUI 依赖。
+SCENE_GROUP = DepsGroup(
+    key="scene",
+    label="镜头检测（scenedetect）",
+    packages=(
+        ("scenedetect", "0.7.2"),
+        ("opencv-python-headless", "4.14.0.94"),
+        ("click", "8.5.0"),
+        ("tqdm", "4.70.1"),
+        ("platformdirs", "4.14.0"),
+    ),
+    probe_dirs=("scenedetect", "cv2", "click", "tqdm", "platformdirs"),
+    required_imports=("scenedetect", "cv2"),
+)
+
+#: 本地语义推理栈：官方 CPU 预编译轮子只有 7.4 MB，且是 py3-none（不挑 Python
+#: 版本）。GPU 用户仍可改用 Ollama/云端，或手动替换 CUDA 轮子。
+#:
+#: 主地址是 GitHub Release；回退地址是同一个资产的 API 端点（带
+#: ``Accept: application/octet-stream``）。当前网络实测 github.com 直连会超时，
+#: 而 api.github.com 可达，所以回退是实打实需要的。
+LLAMA_GROUP = DepsGroup(
+    key="llama",
+    label="本地语义推理栈",
+    packages=(
+        ("diskcache", "5.6.3"),
+        ("jinja2", "3.1.6"),
+        ("markupsafe", "3.0.4"),
+        ("typing-extensions", "4.16.0"),
+    ),
+    probe_dirs=("llama_cpp", "diskcache", "jinja2", "markupsafe"),
+    # 故意**不**在这里导入 llama_cpp：官方 CPU 轮子必须先由
+    # semantic._register_llama_cpu_backend() 登记 ggml-cpu 后端，再 import；
+    # 安装校验若抢先 import，后端补丁就失效了（后续 Llama() 会空指针崩溃）。
+    # llama_cpp 的真实可用性由装完后的环境自检（_import_llama）验证。
+    required_imports=("diskcache", "jinja2", "markupsafe"),
+    direct=(
+        DepsFile(
+            package="llama-cpp-python",
+            version="0.3.36",
+            filename="llama_cpp_python-0.3.36-py3-none-win_amd64.whl",
+            url=(
+                "https://github.com/abetlen/llama-cpp-python/releases/download/"
+                "v0.3.36/llama_cpp_python-0.3.36-py3-none-win_amd64.whl"
+            ),
+            fallback_url=(
+                "https://api.github.com/repos/abetlen/llama-cpp-python/"
+                "releases/assets/602608402"
+            ),
+            headers=(("Accept", "application/octet-stream"),),
+        ),
+    ),
+)
+
+GROUPS: dict[str, DepsGroup] = {
+    group.key: group for group in (ASR_GROUP, SCENE_GROUP, LLAMA_GROUP)
+}
+
+
+def group_label(key: str) -> str:
+    """组名 → 界面标签；未知组原样返回。"""
+    group = GROUPS.get(key)
+    return group.label if group is not None else key
+
+
+#: llama.cpp 轮子没有随包带 MSVC 运行库；系统自带的 14.30 会让它的 CPU 后端
+#: 注册以空指针崩溃。应用/ PySide6 里带的是 14.44，复制到轮子的 lib 目录后
+#: Windows 会优先用本地这一份。
+_MSVC_RUNTIME = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+
+
+def ensure_llama_runtime(target_dir: str | Path, sources=None) -> int:
+    """把新版 MSVC 运行库复制到 llama.cpp 的 lib 目录，返回复制个数。
+
+    ``sources`` 仅测试用；生产环境按「PySide6 包目录 → PyInstaller _MEIPASS →
+    exe 同级 / _internal」顺序找。找不到就跳过——系统运行库凑合能用时不应阻断安装。
+    """
+    target = Path(target_dir)
+    if not target.is_dir():
+        return 0
+    if sources is None:
+        found: list[Path] = []
+        try:
+            spec = importlib.util.find_spec("PySide6")
+            if spec is not None and spec.origin:
+                found.append(Path(spec.origin).parent)
+        except (ImportError, ValueError):
+            pass
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            found.append(Path(meipass))
+        exe_dir = Path(sys.executable).resolve().parent
+        found.extend([exe_dir, exe_dir / "_internal"])
+        sources = found
+    for source in sources:
+        source = Path(source)
+        if not all((source / name).is_file() for name in _MSVC_RUNTIME):
+            continue
+        copied = 0
+        for name in _MSVC_RUNTIME:
+            try:
+                shutil.copy2(source / name, target / name)
+                copied += 1
+            except OSError:
+                pass
+        return copied
+    return 0
 
 
 @dataclass
 class DepsInstallResult:
-    """一次"装引擎"的结果。契约与 model_manager.DownloadResult 一致：不抛异常。"""
+    """一次安装的结果。契约与 model_manager.DownloadResult 一致：不抛异常。"""
 
     ok: bool
     installed: int = 0            # 成功装上的 wheel 数
@@ -266,49 +419,54 @@ class DepsInstallResult:
     cancelled: bool = False
     message: str = ""
     deps_root: Path | None = None
+    group: str = "asr"
+    label: str = "语音转写引擎"
 
     def describe(self) -> str:
         if self.ok:
             return (
-                f"语音转写引擎安装完成（{self.installed} 个包，"
+                f"{self.label}安装完成（{self.installed} 个包，"
                 f"{self.downloaded_bytes / 1024 / 1024:.0f} MB）→ {self.deps_root}"
             )
         if self.cancelled:
-            return "语音转写引擎安装已取消"
-        return f"语音转写引擎安装失败：{self.message}"
+            return f"{self.label}安装已取消"
+        return f"{self.label}安装失败：{self.message}"
 
 
-def deps_present(deps_root: str | Path | None = None) -> bool:
-    """依赖目录里是否**看起来**装齐了（查关键包目录存在，不导入）。
+def deps_present(
+    deps_root: str | Path | None = None, *, group: str = "asr"
+) -> bool:
+    """依赖目录里该组是否**看起来**装齐了（查关键包目录存在，不导入）。
 
     只做文件级判断——供环境自检这类不能有副作用、也不该真加载重型模块的地方
     使用。真正的可用性判定见 :func:`deps_installed`（会真的 import）。
     """
+    spec = GROUPS.get(group)
+    if spec is None:
+        return False
     root = Path(deps_root) if deps_root is not None else default_deps_root()
-    probe = {
-        "faster_whisper": "faster_whisper",
-        "ctranslate2": "ctranslate2",
-        "tokenizers": "tokenizers",
-        "onnxruntime": "onnxruntime",
-        "av": "av",
-    }
-    for package_dir in probe.values():
+    for package_dir in spec.probe_dirs:
         if not (root / package_dir).is_dir():
             return False
     return True
 
 
-def deps_installed(deps_root: str | Path | None = None) -> bool:
-    """:func:`deps_present` 之外，**真的把关键包导一遍**，确认真能用。
+def deps_installed(
+    deps_root: str | Path | None = None, *, group: str = "asr"
+) -> bool:
+    """:func:`deps_present` 之外，**真的把该组的关键包导一遍**，确认真能用。
 
     导入失败（DLL 缺失、ABI 不匹配等）都要如实返回 False——"文件在"不等于
     "能用"，这正是本功能此前最容易骗人的地方。
     """
+    spec = GROUPS.get(group)
+    if spec is None:
+        return False
     root = Path(deps_root) if deps_root is not None else default_deps_root()
-    if not deps_present(root):
+    if not deps_present(root, group=group):
         return False
     register_deps(root)
-    for name in REQUIRED_IMPORTS:
+    for name in spec.required_imports:
         try:
             __import__(name)
         except Exception:  # noqa: BLE001 - 任何导入失败都算"没装好"
@@ -410,43 +568,73 @@ DepsProgressCallback = Callable[[int, int, str, int, int], None]
 #: (已下载字节, 总字节, 当前文件, 第几个, 共几个)
 
 
-def _plan(endpoint: str) -> tuple[list[DepsFile], list[str]]:
-    """解析清单，列出要下的 wheel。返回 (待装列表, 解析失败的包名)。
+def _plan(endpoint: str, group: DepsGroup) -> tuple[list[DepsFile], list[str]]:
+    """解析指定组的清单，列出要下的 wheel。返回 (待装列表, 解析失败的包名)。
 
     解析失败的包不直接当致命错误抛——统一在 :func:`install_deps` 里报告，
-    便于一次性把"哪些包在镜像上找不到"讲清楚。
+    便于一次性把"哪些包在镜像上找不到"讲清楚。``direct`` 里的轮子不走
+    PyPI 解析（如 llama.cpp 的 GitHub Release 资产）。
     """
     plan: list[DepsFile] = []
     failed: list[str] = []
-    for package, version in DEPS_MANIFEST:
+    for package, version in group.packages:
         resolved = resolve_wheel_url(package, version, index=endpoint)
         if resolved is None:
             failed.append(package)
             continue
         filename, url = resolved
         plan.append(DepsFile(package, version, filename, url))
+    plan.extend(group.direct)
     return plan, failed
 
 
 def install_deps(
     deps_root: str | Path | None = None,
     *,
+    group: str = "asr",
     endpoint: str = DEFAULT_INDEX,
     on_progress: DepsProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> DepsInstallResult:
-    """下载并解压转写引擎的全部依赖。**永不抛异常**，失败以结果返回。
+    """下载并解压指定依赖组的全部 wheel。**永不抛异常**，失败以结果返回。
 
-    幂等且可续装：已解压到位的 wheel（同名目录/文件存在）会跳过，所以取消后
-    再点一次不会重下已经下好的部分。下载走 ``.part`` 临时文件，中断不留半成品。
+    默认 ``group="asr"`` 保持旧调用完全兼容；``scene`` / ``llama`` 供环境自检
+    的可选能力安装使用。幂等且可续装：已解压到位的 wheel（同名目录/文件存在）
+    会跳过，所以取消后再点一次不会重下已经下好的部分。下载走 ``.part`` 临时
+    文件，中断不留半成品。
     """
+    spec = GROUPS.get(group)
+    if spec is None:
+        return DepsInstallResult(
+            ok=False, message=f"未知的依赖组：{group}", group=group, label=group
+        )
+    result = _install_group(
+        spec,
+        deps_root,
+        endpoint=endpoint,
+        on_progress=on_progress,
+        cancel_check=cancel_check,
+    )
+    result.group = spec.key
+    result.label = spec.label
+    return result
+
+
+def _install_group(
+    spec: DepsGroup,
+    deps_root: str | Path | None = None,
+    *,
+    endpoint: str = DEFAULT_INDEX,
+    on_progress: DepsProgressCallback | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> DepsInstallResult:
     root = Path(deps_root) if deps_root is not None else default_deps_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return DepsInstallResult(ok=False, message=f"依赖目录不可写：{exc}")
 
-    plan, failed = _plan(endpoint)
+    plan, failed = _plan(endpoint, spec)
     if failed and not plan:
         return DepsInstallResult(
             ok=False,
@@ -478,9 +666,18 @@ def install_deps(
         wheel_path = cache / item.filename
         if not wheel_path.is_file() or wheel_path.stat().st_size < 1024:
             part = wheel_path.with_name(wheel_path.name + ".part")
-            code, detail = _download(item.url, part, timeout=1800)
-            if code != 0:
+            urls = [item.url]
+            if item.fallback_url:
+                urls.append(item.fallback_url)
+            code, detail = -1, ""
+            for url in urls:
+                code, detail = _download(
+                    url, part, timeout=1800, headers=item.headers
+                )
+                if code == 0:
+                    break
                 _quiet_unlink(part)
+            if code != 0:
                 return DepsInstallResult(
                     ok=False, installed=installed, total=total,
                     downloaded_bytes=downloaded, deps_root=root,
@@ -509,13 +706,18 @@ def install_deps(
             message=f"以下包在镜像上没找到，安装不完整：{'、'.join(failed)}",
         )
 
+    # llama.cpp 轮子不带 MSVC 运行库；先把应用/PySide6 里的新版运行库放进
+    # 轮子的 lib 目录，否则 CPU 后端注册会在旧系统运行库上空指针崩溃。
+    if spec.key == "llama":
+        ensure_llama_runtime(root / "llama_cpp" / "lib")
+
     # 装完立刻挂载并真导一遍——"文件在"不等于"能用"，这里必须验到底
     register_deps(root)
-    if not deps_installed(root):
+    if not deps_installed(root, group=spec.key):
         return DepsInstallResult(
             ok=False, installed=installed, total=total,
             downloaded_bytes=downloaded, deps_root=root,
-            message="依赖已下载，但引擎仍无法导入（可能是 DLL 缺失或版本不匹配）。",
+            message="依赖已下载，但仍无法导入（可能是 DLL 缺失或版本不匹配）。",
         )
 
     return DepsInstallResult(
@@ -524,11 +726,24 @@ def install_deps(
     )
 
 
-def _download(url: str, target: Path, *, timeout: int) -> tuple[int, str]:
-    """下载单个文件到 target（支持断点续传：curl ``-C -``）。"""
-    code, output = _curl(
-        ["-L", "--fail", "-C", "-", "-o", str(target), url], timeout=timeout
-    )
+def _download(
+    url: str,
+    target: Path,
+    *,
+    timeout: int,
+    headers: tuple[tuple[str, str], ...] = (),
+) -> tuple[int, str]:
+    """下载单个文件到 target（支持断点续传：curl ``-C -``）。
+
+    ``headers`` 用于 GitHub API 资产地址：没有 ``Accept: application/octet-stream``
+    时它返回 JSON 元数据而不是轮子。连接超时单独压到 20 秒，避免被墙的源把
+    用户挂在一分钟以上才换回退地址。
+    """
+    args = ["-L", "--fail", "--connect-timeout", "20", "-C", "-", "-o", str(target)]
+    for key, value in headers:
+        args.extend(["-H", f"{key}: {value}"])
+    args.append(url)
+    code, output = _curl(args, timeout=timeout)
     return code, output
 
 

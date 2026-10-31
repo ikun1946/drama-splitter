@@ -4991,6 +4991,41 @@ class TestEnvCheckDialog:
         finally:
             dialog.close()
 
+    def test_install_extra_button_emits_group(self, window, qapp):
+        """点「安装镜头检测 / 本地推理栈」应带出对应的依赖组。"""
+        from app.core.env_check import (
+            FIX_INSTALL_EXTRA,
+            LEVEL_WARN,
+            EnvCheckItem,
+            EnvFix,
+        )
+
+        dialog = self._dialog(window, qapp)
+        got = []
+        # 与引擎安装同理：断开主窗口那条会真的联网下载的连接。
+        dialog.install_extra_requested.disconnect()
+        dialog.install_extra_requested.connect(got.append)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem(
+                    "scenedetect", "镜头检测", LEVEL_WARN, "未安装",
+                    fix=EnvFix(FIX_INSTALL_EXTRA, "安装镜头检测", "scene"),
+                ),
+            ))
+            dialog._rows[0].btn_fix.click()
+            assert got == ["scene"]
+        finally:
+            dialog.close()
+
+    def test_install_extra_wired_to_main_window(self, window, qapp):
+        dialog = window.build_env_check_dialog()
+        calls = []
+        dialog.install_extra_requested.disconnect()
+        dialog.install_extra_requested.connect(calls.append)
+        dialog.install_extra_requested.emit("llama")
+        assert calls == ["llama"]
+        assert callable(getattr(window, "_on_env_install_extra", None))
+
     def test_install_engine_wired_to_main_window(self, window, qapp):
         """主窗口构建对话框时必须已把 install_engine_requested 接上处理器。
 
@@ -5070,6 +5105,41 @@ class TestEnvCheckDialog:
             steps = dialog.repair_steps()
             assert [s.kind for s in steps] == [FIX_INSTALL_ENGINE, FIX_DOWNLOAD]
             assert [s.payload for s in steps] == ["", "whisper:small"]
+        finally:
+            dialog.close()
+
+    def test_repair_plan_includes_extra_groups(self, window, qapp):
+        """一键修复计划要含 scene / llama，且排在模型下载之前。"""
+        from app.core.env_check import (
+            FIX_DOWNLOAD,
+            FIX_INSTALL_EXTRA,
+            LEVEL_WARN,
+            EnvCheckItem,
+            EnvFix,
+        )
+
+        dialog = self._dialog(window, qapp)
+        try:
+            dialog.apply_report(self._report(
+                EnvCheckItem(
+                    "llm_model", "语义模型", LEVEL_WARN, "未下载",
+                    fix=EnvFix(FIX_DOWNLOAD, "下载语义模型", "llm:2B:Q4_K_M"),
+                ),
+                EnvCheckItem(
+                    "scenedetect", "镜头检测", LEVEL_WARN, "未安装",
+                    fix=EnvFix(FIX_INSTALL_EXTRA, "安装镜头检测", "scene"),
+                ),
+                EnvCheckItem(
+                    "llm_stack", "本地语义推理栈", LEVEL_WARN, "未安装",
+                    fix=EnvFix(FIX_INSTALL_EXTRA, "安装本地推理栈", "llama"),
+                ),
+            ))
+            steps = dialog.repair_steps()
+            assert [s.kind for s in steps] == [
+                FIX_INSTALL_EXTRA, FIX_INSTALL_EXTRA, FIX_DOWNLOAD
+            ]
+            assert [s.payload for s in steps] == ["llama", "scene", "llm:2B:Q4_K_M"]
+            assert "3" in dialog.btn_repair_all.text()
         finally:
             dialog.close()
 

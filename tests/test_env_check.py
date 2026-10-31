@@ -17,6 +17,7 @@ import pytest  # noqa: E402
 
 from app.core.env_check import (  # noqa: E402
     FIX_DOWNLOAD,
+    FIX_INSTALL_EXTRA,
     FIX_INSTALL_FFMPEG,
     LEVEL_BLOCK,
     LEVEL_OK,
@@ -157,14 +158,10 @@ class TestRepairHonesty:
 
 
 class TestLlmStackFix:
-    """本地推理栈缺失项：给下载页，但**不给**应用内下载。"""
+    """本地推理栈缺失项：应用内安装 llama.cpp CPU 轮子。"""
 
-    def test_missing_stack_offers_release_url_not_download(self, monkeypatch):
-        """llama-cpp-python 缺失时应指向官方发布页，且绝不出现 download_model。
-
-        与 faster-whisper 同理：装不了包给个"下载"按钮是骗人。但也不能只留一句
-        "装不上"——发布页有 py3-none 轮子，把地址给到，用户能自己解决。
-        """
+    def test_missing_stack_offers_install_extra(self, monkeypatch):
+        """llama-cpp-python 缺失时应给 install_extra，payload 是 llama 组。"""
         import app.core.env_check as ec
         from app.core import semantic as sem
 
@@ -172,12 +169,12 @@ class TestLlmStackFix:
         report = ec.check_environment()
         item = report.by_key("llm_stack")
         assert item is not None and item.level == LEVEL_WARN
-        assert item.fix is not None, "缺推理栈却连指引都没有"
-        assert item.fix.kind == "open_url", "应给下载页（open_url），不是应用内下载"
+        assert item.fix is not None, "缺推理栈却连修复动作都没有"
+        assert item.fix.kind == FIX_INSTALL_EXTRA
+        assert item.fix.payload == "llama"
+        assert item.auto_fixable
         assert item.fix.kind != FIX_DOWNLOAD
-        assert item.fix.payload.startswith("https://github.com/abetlen/llama-cpp-python"), (
-            f"下载页地址不对：{item.fix.payload}"
-        )
+        assert "CPU" in item.detail and "10 MB" in item.detail
         assert item.fix.label, "有修复动作就必须有按钮文案"
 
     def test_present_stack_reports_ok_without_fix(self, monkeypatch):
@@ -190,6 +187,32 @@ class TestLlmStackFix:
         item = report.by_key("llm_stack")
         assert item is not None and item.level == LEVEL_OK
         assert item.fix is None or item.fix.kind != FIX_DOWNLOAD
+
+
+class TestSceneDetectFix:
+    def test_missing_scene_offers_install_extra(self, monkeypatch):
+        import app.core.env_check as ec
+
+        monkeypatch.setattr(ec, "_module_available", lambda name: False)
+        report = ec.check_environment()
+        item = report.by_key("scenedetect")
+        assert item is not None and item.level == LEVEL_WARN
+        assert item.fix is not None
+        assert item.fix.kind == FIX_INSTALL_EXTRA
+        assert item.fix.payload == "scene"
+        assert item.auto_fixable
+        assert "40 MB" in item.detail
+
+    def test_scene_needs_both_scenedetect_and_cv2(self, monkeypatch):
+        import app.core.env_check as ec
+
+        monkeypatch.setattr(
+            ec, "_module_available", lambda name: name == "scenedetect"
+        )
+        report = ec.check_environment()
+        item = report.by_key("scenedetect")
+        assert item is not None and item.level == LEVEL_WARN
+        assert item.fix is not None and item.fix.payload == "scene"
 
 
 class TestFfmpegDegradation:

@@ -28,6 +28,7 @@ from __future__ import annotations
 import gc
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -360,8 +361,76 @@ JUDGE_SYSTEM_PROMPT = "你是短剧剪辑助理。只输出一行 JSON（verdict
 _THINK_END_MARKERS = ("<｜end▁of▁thinking｜>", " response")
 
 
+#: 已登记的 llama.cpp CPU 后端（进程级只做一次）
+_LLAMA_CPU_BACKEND_READY = False
+#: CDLL / add_dll_directory 句柄必须持有，否则会被 GC 回收后 DLL 搜索失效
+_LLAMA_DLL_REFS: list[object] = []
+
+
+def _register_llama_cpu_backend() -> None:
+    """在 import llama_cpp **之前**手动登记 CPU 后端。
+
+    为什么需要这个补丁：官方 0.3.36 py3-none-win_amd64 CPU 轮子里，
+    ``llama_backend_init()`` 没有自动找到/注册 ``ggml-cpu.dll``，在 Windows 上
+    直接以空指针崩溃（``access violation reading 0x0``），而模型加载也走同一
+    初始化路径。手动把 ``ggml-cpu.dll`` 的 ``ggml_backend_cpu_reg`` 注册给
+    ``ggml.dll`` 后，``llama_backend_init`` / ``Llama(...)`` 都能正常工作。
+
+    顺序很关键：必须在 ``import llama_cpp`` **之前**做。导入后再加载同一批
+    DLL 会得到两份状态，调用 ``ggml_backend_cpu_reg`` 反而崩。
+    """
+    global _LLAMA_CPU_BACKEND_READY
+    if _LLAMA_CPU_BACKEND_READY:
+        return
+    # 已经 import 过就不要再碰 DLL（见上面“顺序很关键”）；此时由调用方承担
+    # 该版本自身的初始化行为。
+    if "llama_cpp" in sys.modules:
+        return
+    try:
+        import ctypes
+        import importlib.util
+        import os
+
+        spec = importlib.util.find_spec("llama_cpp")
+        if spec is None or not spec.origin:
+            return
+        lib = Path(spec.origin).parent / "lib"
+        base_dll = lib / "ggml-base.dll"
+        cpu_dll = lib / "ggml-cpu.dll"
+        ggml_dll = lib / "ggml.dll"
+        if not (base_dll.is_file() and cpu_dll.is_file() and ggml_dll.is_file()):
+            return
+
+        # 旧系统运行库（14.30）会让 ggml-cpu 的注册函数空指针崩溃；应用/PySide6
+        # 自带 14.44，先复制进 lib，Windows 会优先加载本地这一份。
+        from .deps_manager import ensure_llama_runtime
+
+        ensure_llama_runtime(lib)
+
+        _LLAMA_DLL_REFS.append(os.add_dll_directory(str(lib)))
+        base = ctypes.CDLL(str(base_dll))
+        cpu = ctypes.CDLL(str(cpu_dll))
+        ggml = ctypes.CDLL(str(ggml_dll))
+        _LLAMA_DLL_REFS.extend([base, cpu, ggml])
+
+        if not hasattr(cpu, "ggml_backend_cpu_reg") or not hasattr(
+            ggml, "ggml_backend_register"
+        ):
+            return
+        cpu.ggml_backend_cpu_reg.restype = ctypes.c_void_p
+        reg = cpu.ggml_backend_cpu_reg()
+        if not reg:
+            return
+        ggml.ggml_backend_register.argtypes = [ctypes.c_void_p]
+        ggml.ggml_backend_register(ctypes.c_void_p(reg))
+        _LLAMA_CPU_BACKEND_READY = True
+    except Exception:  # noqa: BLE001 - 补丁失败就退回库自身的初始化路径
+        return
+
+
 def _import_llama():
     """导入 llama_cpp.Llama；不可用时返回 None（允许测试注入替身）。"""
+    _register_llama_cpu_backend()
     try:
         from llama_cpp import Llama  # type: ignore
     except ImportError:
@@ -925,6 +994,7 @@ def release_judge(judge: "SemanticJudge | None") -> bool:
 
 def _gpu_offload_supported() -> bool | None:
     """装着的 llama.cpp 支不支持显卡卸载；老版本没有该接口时返回 None。"""
+    _register_llama_cpu_backend()
     try:
         import llama_cpp
 

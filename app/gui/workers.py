@@ -1171,23 +1171,33 @@ class FfmpegSetupWorker(BaseWorker):
 
 
 class DepsInstallWorker(BaseWorker):
-    """在应用内安装语音转写引擎（下载 wheel 到 exe 同级的 deps/）。
+    """在应用内安装一组运行期依赖（wheel 解压到 exe 同级的 deps/）。
 
-    为什么后台：全套约 80 MB，同步会冻住界面半分钟以上。可取消——``cancel_check``
-    会让 ``install_deps`` 在下一个包之前停下；已下好的部分留在缓存里，重试时跳过。
+    默认组仍然是语音转写引擎；``group="scene"`` / ``"llama"`` 供环境自检的
+    可选能力安装复用。为什么后台：全套几十 MB，同步会冻住界面。可取消——
+    ``cancel_check`` 会让 ``install_deps`` 在下一个包之前停下；已下好的部分
+    留在缓存里，重试时跳过。
     """
 
     progress = Signal(int, int, str, int, int)  # 已下载字节, 总字节, 当前文件, 第几个, 共几个
     log = Signal(str)
     finished_with = Signal(object)  # DepsInstallResult
 
-    def __init__(self, *, deps_root=None, endpoint: str | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        deps_root=None,
+        endpoint: str | None = None,
+        group: str = "asr",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._deps_root = deps_root
         self._endpoint = endpoint
+        self._group = group
 
     def work(self) -> None:  # noqa: D102
-        from app.core.deps_manager import DepsInstallResult, install_deps
+        from app.core.deps_manager import DepsInstallResult, group_label, install_deps
 
         try:
             kwargs = {"deps_root": self._deps_root} if self._deps_root else {}
@@ -1195,13 +1205,19 @@ class DepsInstallWorker(BaseWorker):
                 kwargs["endpoint"] = self._endpoint
             result = install_deps(
                 **kwargs,
+                group=self._group,
                 on_progress=lambda done, total, name, i, n: self.progress.emit(
                     done, total, name, i, n
                 ),
                 cancel_check=lambda: self.cancelled,
             )
         except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
-            result = DepsInstallResult(ok=False, message=f"安装过程异常：{exc}")
+            result = DepsInstallResult(
+                ok=False,
+                message=f"安装过程异常：{exc}",
+                group=self._group,
+                label=group_label(self._group),
+            )
         if result.cancelled:
             self.finish_cancelled()
         elif not result.ok:

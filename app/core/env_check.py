@@ -8,19 +8,17 @@
 
 诚实边界（重要，别让界面撒谎）
 ------------------------------
-自检能查出问题，可修的动作分三类，**kind 必须如实标注**：
+自检能查出问题，可修的动作分四类，**kind 必须如实标注**：
 
 - ``install_ffmpeg``：应用内下载完整 FFmpeg 构建（走 ``ffmpeg_setup``）；
 - ``download_model``：应用内下载**模型文件**（走 ``model_manager``，用 curl）；
-- ``install_engine``：应用内安装**运行期依赖**（走 ``deps_manager``，下载
-  wheel 解压到 exe 同级的 ``deps/``）——语音转写引擎走这条，不需要 pip。
+- ``install_engine``：应用内安装**转写引擎**（走 ``deps_manager`` 的 asr 组）；
+- ``install_extra``：应用内安装**可选依赖组**——``scene``（scenedetect +
+  OpenCV headless）与 ``llama``（llama-cpp-python CPU 轮子及依赖）。
 
 其余一律只能"检测 + 给指引"：
 
-- **可选 Python 包**（scenedetect / zhconv / pysubs2）：缺失只降级，给说明
-  （scenedetect 还会给 ``open_url`` 指到发布页）；
-- **llama-cpp-python**：给 ``open_url`` 指到官方发布页（有 prebuilt 轮子），
-  让用户自己下——不冒充应用内能装。
+- **可选 Python 包**（zhconv / pysubs2）：缺失只降级，给说明；
 
 历史教训：早期只有 ``download_model`` 能在应用内执行，那时的注释写成"Python
 包一律装不了"。**那是错的**——冻结 exe 的 sys.path 含 ``_internal``，把 wheel
@@ -47,6 +45,7 @@ __all__ = [
     "LEVEL_BLOCK",
     "FIX_DOWNLOAD",
     "FIX_INSTALL_ENGINE",
+    "FIX_INSTALL_EXTRA",
     "FIX_INSTALL_FFMPEG",
     "FIX_OPEN_URL",
     "FIX_NAVIGATE",
@@ -71,25 +70,29 @@ _ORDER = {LEVEL_OK: 0, LEVEL_WARN: 1, LEVEL_BLOCK: 2}
 #: - ``install_ffmpeg``：应用内下载 FFmpeg 到 ``<app_dir>/ffmpeg/bin``（走
 #:   ffmpeg_setup，curl + zipfile）——首次运行向导与环境自检共用；
 #: - ``download_model``：应用内下载**模型文件**（走 model_manager，curl）；
-#: - ``install_engine``：应用内安装**运行期依赖**（走 deps_manager，下载 wheel
-#:   并解压到 exe 同级的 ``deps/``）——这是给"转写引擎"用的，与下模型是两回事；
+#: - ``install_engine``：应用内安装**转写引擎**（走 deps_manager 的 asr 组）；
+#: - ``install_extra``：应用内安装**可选依赖组**（scene / llama，走
+#:   deps_manager 的对应组）；
 #: - ``open_url`` / ``navigate``：只能引导，应用内做不了；
 #: - ``none``：纯告知，连按钮都不画。
 FIX_INSTALL_FFMPEG = "install_ffmpeg"  # payload = ""（下载源在 ffmpeg_setup 里）
 FIX_DOWNLOAD = "download_model"   # payload = 模型 key（spec_by_key 能解析）
-FIX_INSTALL_ENGINE = "install_engine"  # payload = ""（清单在 deps_manager 里）
+FIX_INSTALL_ENGINE = "install_engine"  # payload = ""（asr 组）
+FIX_INSTALL_EXTRA = "install_extra"    # payload = 依赖组（"scene" / "llama"）
 FIX_OPEN_URL = "open_url"         # payload = 要打开的网址
 FIX_NAVIGATE = "navigate"         # payload = 目标对话框标识（如 "models"）
 FIX_NONE = "none"
 
-#: 能在应用内**真正自动修好**的 fix 种类（「一键修复环境」只收这三类）：
+#: 能在应用内**真正自动修好**的 fix 种类（「一键修复环境」只收这些）：
 #: - ``install_ffmpeg``：下载完整 FFmpeg 构建（ffmpeg_setup）；
-#: - ``install_engine``：装 / 重装转写引擎（deps_manager 把 wheel 解压到 deps/）；
+#: - ``install_engine``：装 / 重装转写引擎（deps_manager 的 asr 组）；
+#: - ``install_extra``：装镜头检测 / 本地推理栈（deps_manager 的 scene / llama 组）；
 #: - ``download_model``：下载转写 / 语义模型（model_manager 用 curl 下载）。
 #: 其余（open_url / navigate / none）只能引导——一键修复不承诺「全都能修」。
 AUTO_FIX_KINDS: tuple[str, ...] = (
     FIX_INSTALL_FFMPEG,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_EXTRA,
     FIX_DOWNLOAD,
 )
 
@@ -99,13 +102,14 @@ class EnvFix:
     """一条可执行的补救动作。
 
     ``kind`` 决定界面怎么处理，也决定"这条到底能不能在应用内修好"：只有
-    :data:`FIX_INSTALL_FFMPEG`、:data:`FIX_DOWNLOAD` 与
-    :data:`FIX_INSTALL_ENGINE` 会真的动手装，其余都是引导。
+    :data:`FIX_INSTALL_FFMPEG`、:data:`FIX_DOWNLOAD`、
+    :data:`FIX_INSTALL_ENGINE` 与 :data:`FIX_INSTALL_EXTRA` 会真的动手装，
+    其余都是引导。
     """
 
     kind: str
     label: str          # 按钮文案，如 "下载 whisper-small"
-    payload: str = ""   # 模型 key / URL / 目标页标识
+    payload: str = ""   # 模型 key / 依赖组 / URL / 目标页标识
 
 
 @dataclass(frozen=True)
@@ -374,11 +378,10 @@ def _check_llm_model() -> EnvCheckItem:
 def _check_llm_stack() -> EnvCheckItem:
     """本地语义推理栈（llama.cpp / Ollama）。缺失只降级，不阻断。
 
-    这一项**给不了** ``download_model``——缺的是 Python 包而不是模型，下模型
-    解决不了。但也不能只丢一句"装不上"：官方发布页有 ``py3-none-win_amd64``
-    的**预编译轮子**（``py3-none`` 不绑定具体 Python 版本，7 MB 的 CPU 版也
-    在内），没编译器的用户下回来 ``pip install`` 即可。所以给 ``open_url``
-    指向发布页——与 FFmpeg 那条同一处理：应用装不了，但把路指清楚。
+    缺的是 Python 包而不是模型，下模型解决不了。应用内会用官方
+    ``py3-none-win_amd64`` **CPU 预编译轮子**（约 7.4 MB，不挑 Python 版本）
+    装到 ``deps/``，与转写引擎走同一条「下载 wheel → 解压 → 挂 sys.path」链路。
+    需要显卡加速的用户仍可改用 Ollama / 云端语义，或手动换 CUDA 轮子。
     """
     from .semantic import _import_llama
 
@@ -391,14 +394,14 @@ def _check_llm_stack() -> EnvCheckItem:
         key="llm_stack", label="本地语义推理栈", level=LEVEL_WARN, required=False,
         summary="未安装 llama-cpp-python，本地语义判断不可用",
         detail=(
-            "可在发布页下载预编译轮子（win_amd64 有 py3-none 标签，不挑 Python "
-            "版本；CPU 版约 7 MB，CUDA 版更大），装好后本地语义判断即生效。"
-            "也可以改用云端语义，或直接装 Ollama。"
+            "可一键安装官方 CPU 预编译轮子及依赖（约 10 MB），装好后本地语义"
+            "判断即生效。CPU 版不启用显卡加速；需要 GPU 可改用 Ollama、云端"
+            "语义，或自行替换 CUDA 轮子。"
         ),
         fix=EnvFix(
-            kind=FIX_OPEN_URL,
-            label="打开下载页",
-            payload="https://github.com/abetlen/llama-cpp-python/releases",
+            kind=FIX_INSTALL_EXTRA,
+            label="安装本地推理栈",
+            payload="llama",
         ),
     )
 
@@ -442,11 +445,37 @@ def _check_inference_device() -> EnvCheckItem:
 
 
 def _check_optional_packages() -> list[EnvCheckItem]:
-    """可选能力依赖：缺失只降级，逐项如实说明。"""
+    """可选能力依赖：能应用内装的给按钮，其余只降级说明。"""
     items: list[EnvCheckItem] = []
+
+    scene_ok = _module_available("scenedetect") and _module_available("cv2")
+    items.append(
+        EnvCheckItem(
+            key="scenedetect",
+            label="镜头检测（scenedetect）",
+            level=LEVEL_OK if scene_ok else LEVEL_WARN,
+            required=False,
+            summary=(
+                "就绪" if scene_ok
+                else "未安装 scenedetect / OpenCV，镜头切换检测跳过"
+                     "（仍可凭对白与静音分集）"
+            ),
+            detail=(
+                "可一键安装 scenedetect 与 OpenCV headless（约 40 MB），"
+                "装好后镜头切换检测即生效。"
+            ) if not scene_ok else "",
+            fix=(
+                None if scene_ok
+                else EnvFix(
+                    kind=FIX_INSTALL_EXTRA,
+                    label="安装镜头检测",
+                    payload="scene",
+                )
+            ),
+        )
+    )
+
     specs = (
-        ("scenedetect", "镜头检测（scenedetect）",
-         "未安装 scenedetect，镜头切换检测跳过（仍可凭对白与静音分集）"),
         ("zhconv", "繁简转换（zhconv）",
          "未安装 zhconv，无法保证字幕输出为简体中文"),
         ("pysubs2", "ASS/SSA 字幕（pysubs2）",

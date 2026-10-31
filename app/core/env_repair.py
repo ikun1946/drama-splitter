@@ -5,19 +5,20 @@
 - ``env_check`` 只读：给出报告，并如实标注每一项是「应用内可修」还是
   「只能引导」；
 - 本模块负责动手：:func:`repair_steps` 把报告中的可修项排成一个有序计划，
-  :func:`execute_repair` 逐步执行——配置 FFmpeg、装 / 重装转写引擎、下载缺失的模型。
+  :func:`execute_repair` 逐步执行——配置 FFmpeg、装 / 重装转写引擎、装镜头检测
+  与本地推理栈、下载缺失的模型。
 
-计划只收三类动作
+计划只收四类动作
 ----------------
-``env_check.AUTO_FIX_KINDS``（配置 FFmpeg、安装转写引擎、下载模型）。可选 Python
-包、llama-cpp 轮子这些「应用内装不了」的项不出现在计划里——界面继续用单项
-按钮给指引。「一键修复」承诺的是「把能自动修的修掉」，不是「什么都能修」。
+``env_check.AUTO_FIX_KINDS``（配置 FFmpeg、安装转写引擎、安装可选依赖组、下载
+模型）。zhconv / pysubs2 这类仍无应用内安装的包不出现在计划里——界面继续用
+单项按钮给指引。「一键修复」承诺的是「把能自动修的修掉」，不是「什么都能修」。
 
 执行顺序
 --------
-1. FFmpeg（导入/导出的前提）→ 2. 转写引擎（faster-whisper 依赖）→ 3. 转写模型
-（whisper-*）→ 4. 语义模型（llm:*）。报告本身按此顺序产出，这里再显式排一次序，
-防止调用方乱序注入。
+1. FFmpeg（导入/导出的前提）→ 2. 转写引擎（faster-whisper 依赖）→ 3. 可选依赖组
+（镜头检测 / 本地推理栈）→ 4. 转写模型（whisper-*）→ 5. 语义模型（llm:*）。
+报告本身按此顺序产出，这里再显式排一次序，防止调用方乱序注入。
 
 失败与取消
 ----------
@@ -28,13 +29,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from .env_check import (
     FIX_DOWNLOAD,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_EXTRA,
     FIX_INSTALL_FFMPEG,
     EnvReport,
 )
@@ -52,13 +54,15 @@ __all__ = [
 class RepairStep:
     """计划里的一步：做什么 + 为什么（给用户看的文案）。"""
 
-    kind: str        # FIX_INSTALL_ENGINE / FIX_DOWNLOAD
-    payload: str     # install_engine：空；download：模型 key（spec_by_key 可解析）
+    kind: str        # FIX_INSTALL_FFMPEG / FIX_INSTALL_ENGINE / FIX_INSTALL_EXTRA / FIX_DOWNLOAD
+    payload: str     # install_extra：依赖组；download：模型 key（spec_by_key 可解析）
     label: str       # 动作名，如「下载 whisper-small」
-    item_key: str    # 来源自检项 key（asr_engine / whisper_model / llm_model）
+    item_key: str    # 来源自检项 key（asr_engine / whisper_model / llm_model / …）
     requires_engine: bool = False
     #: 本步依赖转写引擎装好。引擎缺失时计划会预排转写模型下载（执行时先装引擎）；
     #: 引擎失败 / 没修好则本步跳过——不白下几个 GB。
+    requires_extra: str = ""
+    #: 本步依赖某个可选依赖组（如 llm:* 模型依赖 llama 推理栈）。组没装好则跳过。
 
 
 @dataclass(frozen=True)
@@ -121,21 +125,23 @@ class RepairSummary:
 
 
 def _order(step: RepairStep) -> tuple[int, str]:
-    """步骤排序键：FFmpeg 最前，引擎其次，转写模型再次，其余模型最后。"""
+    """步骤排序键：FFmpeg → 引擎 → 可选依赖组 → 转写模型 → 其余模型。"""
     if step.kind == FIX_INSTALL_FFMPEG:
         return (0, step.payload)
     if step.kind == FIX_INSTALL_ENGINE:
         return (1, step.payload)
-    if step.payload.startswith("whisper:"):
+    if step.kind == FIX_INSTALL_EXTRA:
         return (2, step.payload)
-    return (3, step.payload)
+    if step.payload.startswith("whisper:"):
+        return (3, step.payload)
+    return (4, step.payload)
 
 
 def repair_steps(report: EnvReport) -> tuple[RepairStep, ...]:
     """从自检报告提取「能自动修」的项，按执行顺序排好。
 
-    只收 ``item.auto_fixable`` 的项（配置 FFmpeg / 装引擎 / 下模型）；打开网页、
-    跳转、纯告知这些都不在计划里——它们由界面逐项给指引。
+    只收 ``item.auto_fixable`` 的项（配置 FFmpeg / 装引擎 / 装可选依赖组 /
+    下模型）；打开网页、跳转、纯告知这些都不在计划里——它们由界面逐项给指引。
     """
     plan: list[RepairStep] = []
     for item in report.items:
@@ -170,6 +176,20 @@ def repair_steps(report: EnvReport) -> tuple[RepairStep, ...]:
                     requires_engine=True,
                 )
             )
+
+    # 本地语义模型只有 llama.cpp 装好后才有意义：把计划里的 llm:* 模型下载
+    # 标成依赖 llama 组，组装失败时跳过，免得白下几个 GB。
+    has_llama = any(
+        step.kind == FIX_INSTALL_EXTRA and step.payload == "llama"
+        for step in plan
+    )
+    if has_llama:
+        plan = [
+            replace(step, requires_extra="llama")
+            if step.payload.startswith("llm:")
+            else step
+            for step in plan
+        ]
 
     return tuple(sorted(plan, key=_order))
 
@@ -226,6 +246,7 @@ def execute_repair(
     results: list[RepairStepResult] = []
     cancelled = False
     engine_ok: bool | None = None    # 引擎步骤没跑过 = None
+    extra_ok: dict[str, bool] = {}   # 依赖组装没装好（如 llama）
     for index, step in enumerate(step_list, start=1):
         if stopping():
             cancelled = True
@@ -234,6 +255,15 @@ def execute_repair(
             on_step(index, total, step.label)
         if step.requires_engine and engine_ok is not True:
             message = "已跳过：转写引擎未装好，先修好引擎再下模型。"
+            results.append(
+                RepairStepResult(
+                    label=step.label, ok=False, skipped=True, message=message
+                )
+            )
+            log(f"（{index}/{total}）{step.label}——{message}")
+            continue
+        if step.requires_extra and extra_ok.get(step.requires_extra) is not True:
+            message = "已跳过：本地语义推理栈未装好，先修好它再下模型。"
             results.append(
                 RepairStepResult(
                     label=step.label, ok=False, skipped=True, message=message
@@ -263,6 +293,13 @@ def execute_repair(
                     on_progress=relay_progress if on_progress is not None else None,
                     cancel_check=stopping,
                 )
+            elif step.kind == FIX_INSTALL_EXTRA:
+                result = install_deps(
+                    deps_root=deps_root,
+                    group=step.payload,
+                    on_progress=relay_progress if on_progress is not None else None,
+                    cancel_check=stopping,
+                )
             else:
                 spec = spec_by_key(step.payload)
                 if spec is None:
@@ -283,6 +320,8 @@ def execute_repair(
             ok, was_cancelled, message = False, False, f"修复过程异常：{exc}"
         if step.kind == FIX_INSTALL_ENGINE:
             engine_ok = ok
+        elif step.kind == FIX_INSTALL_EXTRA:
+            extra_ok[step.payload] = ok
         results.append(
             RepairStepResult(label=step.label, ok=ok, cancelled=was_cancelled, message=message)
         )

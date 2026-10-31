@@ -14,6 +14,7 @@ from app.core.ffmpeg_setup import FfmpegInstallResult
 from app.core.env_check import (
     FIX_DOWNLOAD,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_EXTRA,
     FIX_INSTALL_FFMPEG,
     FIX_NAVIGATE,
     FIX_OPEN_URL,
@@ -133,6 +134,49 @@ class TestRepairPlan:
         ]
         assert [s.item_key for s in plan] == ["ffmpeg", "asr_engine", "llm_model"]
 
+    def test_extras_come_between_engine_and_models(self):
+        report = _report(
+            _item(
+                "llm_model",
+                LEVEL_WARN,
+                EnvFix(FIX_DOWNLOAD, "下载语义模型", "llm:2B:Q4_K_M"),
+                required=False,
+            ),
+            _item(
+                "whisper_model",
+                LEVEL_BLOCK,
+                EnvFix(FIX_DOWNLOAD, "下载 whisper-small", "whisper:small"),
+            ),
+            _item(
+                "scenedetect",
+                LEVEL_WARN,
+                EnvFix(FIX_INSTALL_EXTRA, "安装镜头检测", "scene"),
+                required=False,
+            ),
+            _item(
+                "llm_stack",
+                LEVEL_WARN,
+                EnvFix(FIX_INSTALL_EXTRA, "安装本地推理栈", "llama"),
+                required=False,
+            ),
+            _item(
+                "asr_engine",
+                LEVEL_BLOCK,
+                EnvFix(FIX_INSTALL_ENGINE, "安装转写引擎", ""),
+            ),
+        )
+        plan = repair_steps(report)
+        assert [s.kind for s in plan] == [
+            FIX_INSTALL_ENGINE,
+            FIX_INSTALL_EXTRA,
+            FIX_INSTALL_EXTRA,
+            FIX_DOWNLOAD,
+            FIX_DOWNLOAD,
+        ]
+        assert [s.payload for s in plan[:3]] == ["", "llama", "scene"]
+        llm_step = next(s for s in plan if s.payload.startswith("llm:"))
+        assert llm_step.requires_extra == "llama", "语义模型应等待推理栈装好"
+
     def test_healthy_report_has_empty_plan(self):
         assert repair_steps(_report(_item("ffmpeg", LEVEL_OK))) == ()
 
@@ -160,6 +204,30 @@ def _fake_install(*, ok=True, cancelled=False, message="引擎安装完成", cal
             installed=1,
             total=1,
             deps_root=deps_root,
+        )
+
+    return fake
+
+
+def _fake_extra_install(*, ok=True, cancelled=False, message="安装完成", calls=None):
+    def fake(
+        deps_root=None,
+        *,
+        group="asr",
+        endpoint=None,
+        on_progress=None,
+        cancel_check=None,
+    ):
+        if calls is not None:
+            calls.append(group)
+        if on_progress is not None:
+            on_progress(10, 100, group, 1, 1)
+        return DepsInstallResult(
+            ok=ok,
+            cancelled=cancelled,
+            message=message,
+            group=group,
+            label=group,
         )
 
     return fake
@@ -220,6 +288,55 @@ class TestExecuteRepair:
         assert calls == ["ffmpeg"]
         assert summary.results[0].ok
         assert "FFmpeg 已配置" in summary.results[0].message
+
+    def test_extra_group_runs_with_its_group_key(self, monkeypatch, tmp_path):
+        calls = []
+        monkeypatch.setattr(
+            "app.core.deps_manager.install_deps",
+            _fake_extra_install(calls=calls),
+        )
+        plan = (
+            RepairStep(
+                kind=FIX_INSTALL_EXTRA,
+                payload="scene",
+                label="安装镜头检测",
+                item_key="scenedetect",
+            ),
+        )
+        summary = execute_repair(plan, models_root=tmp_path)
+        assert calls == ["scene"]
+        assert summary.results[0].ok
+
+    def test_failed_llama_install_skips_model_download(self, monkeypatch, tmp_path):
+        report = _report(
+            _item(
+                "llm_stack",
+                LEVEL_WARN,
+                EnvFix(FIX_INSTALL_EXTRA, "安装本地推理栈", "llama"),
+                required=False,
+            ),
+            _item(
+                "llm_model",
+                LEVEL_WARN,
+                EnvFix(FIX_DOWNLOAD, "下载语义模型", "llm:2B:Q4_K_M"),
+                required=False,
+            ),
+        )
+        plan = repair_steps(report)
+        install_calls, download_calls = [], []
+        monkeypatch.setattr(
+            "app.core.deps_manager.install_deps",
+            _fake_extra_install(ok=False, message="网络不可达", calls=install_calls),
+        )
+        monkeypatch.setattr(
+            "app.core.model_manager.download_model",
+            _fake_download(calls=download_calls),
+        )
+        summary = execute_repair(plan, models_root=tmp_path)
+        assert install_calls == ["llama"]
+        assert download_calls == [], "推理栈没装好时不应下载语义模型"
+        assert summary.results[-1].skipped
+        assert "跳过" in summary.describe()
 
     def test_all_steps_succeed(self, monkeypatch, tmp_path):
         monkeypatch.setattr("app.core.deps_manager.install_deps", _fake_install())
