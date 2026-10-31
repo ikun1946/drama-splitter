@@ -320,6 +320,28 @@ class TestListModels:
         assert gateway.requests[0].path.endswith("/models")
         assert gateway.requests[0].authorization == f"Bearer {API_KEY}"
 
+    def test_catalog_keeps_returned_context_and_modalities(self, gateway):
+        """清单接口返回了元数据就保留下来，供厂商页自动填参数。"""
+        from app.core.cloud_openai import list_model_catalog
+
+        gateway.models_body = {
+            "data": [
+                {
+                    "id": "vendor-chat",
+                    "context_length": 262144,
+                    "input_modalities": ["text", "image"],
+                },
+                {"id": "name-only"},
+            ]
+        }
+        catalog = list_model_catalog(gateway.base_url, API_KEY)
+        by_name = {item.name: item for item in catalog}
+        assert by_name["vendor-chat"].context_window == 262_144
+        assert by_name["vendor-chat"].modalities == ("text", "image")
+        assert by_name["name-only"].context_window == 0
+        assert by_name["name-only"].modalities == ()
+        assert len(gateway.requests) == 1, "名称与元数据必须共用一次 /models 请求"
+
     def test_tolerates_other_shapes_and_dedupes(self, gateway):
         from app.core.cloud_openai import list_models
 

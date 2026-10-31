@@ -74,7 +74,7 @@ from ...core.providers import (
     merge_model_choices,
 )
 from ..state import ProjectState
-from ..widgets import Card, NoWheelComboBox, SectionHeaderDelegate, scrollable
+from ..widgets import Card, NoWheelComboBox, SectionHeaderDelegate
 from ..workers import ModelListWorker
 from ._common import register_worker
 
@@ -432,10 +432,13 @@ class ModelSetupForm(QWidget):
         layout.addWidget(self.judge)
         layout.addLayout(footer)
 
+        # 两个下拉 + 行页脚，整页也就三行高：再套一层滚动容器只会让内容被
+        # 压在视口上沿、多出一条没用到的滚动条。直接铺开，交给对话框自身高度
+        # 决定；真到内容超过可用高度时（小屏）由外壳统一滚动。
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(scrollable(inner))
+        outer.addWidget(inner)
 
         self.refresh()
 

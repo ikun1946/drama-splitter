@@ -91,16 +91,16 @@ class TestStagePresentation:
     def test_caption_analyzing(self):
         assert stage_caption(Stage.ANALYZING, _state(plan=True)) == "分析进行中"
 
-    def test_caption_review_carries_episode_and_version(self):
+    def test_caption_review_carries_episode_and_total(self):
         caption = stage_caption(Stage.REVIEW, _state(plan=True))
-        assert "第01集" in caption
-        assert "方案 v1" in caption
-        assert "4 集" in caption
+        assert caption == "第 01/4 集"
+        assert "方案 v" not in caption          # 版本号在左栏「当前集」卡里
+        assert "—" not in caption               # 时长同样不再抄进底栏
 
     def test_caption_review_follows_selected_episode(self):
         caption = stage_caption(Stage.REVIEW, _state(plan=True), selected_episode=3)
-        assert "第03集" in caption
+        assert "第 03/4 集" in caption
 
     def test_caption_review_clamps_out_of_range_selection(self):
         caption = stage_caption(Stage.REVIEW, _state(plan=True), selected_episode=99)
-        assert "第04集" in caption
+        assert "第 04/4 集" in caption

@@ -271,6 +271,57 @@ class TestInteraction:
         _paint(ruler)          # 不应抛异常
 
 
+class TestEpisodeNumbers:
+    """集分段里的集号：用户不该为了知道色块是哪一集而回左栏对数。
+
+    阈值按实际字形宽度算：宽度够就居中画数字，不够就省略（否则数字会挤在
+    2px 的缝里、与切点标记糊成一团）。
+    """
+
+    def test_wide_segments_get_a_number_each(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)     # 4 集等分，每段约 195px
+        _paint(ruler)
+        assert ruler._episode_labels_drawn == 4, (
+            "宽分段必须每段一个集号；一个都没画说明标签逻辑被绕过了"
+        )
+
+    def test_numbers_are_inked_into_the_static_layer(self, ruler):
+        """不只看计数器：分段中线上要真有笔墨（防止"算了但没画"）。"""
+        from PySide6.QtGui import QColor
+
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        image = _paint(ruler).toImage()
+        y = ruler.TRACK_TOP + ruler.TRACK_HEIGHT // 2
+        # 第 1 集中心：0–30s → 约 97px；取一小块统计与底色不同的像素
+        cx = int(ruler._x_from_seconds(Fraction(15)))
+        fill = QColor(image.pixel(cx - 30, y)).rgb()
+        ink = 0
+        for x in range(cx - 14, cx + 14):
+            for dy in range(-6, 7):
+                pixel = QColor(image.pixel(x, y + dy)).rgb()
+                if abs((pixel >> 16 & 0xFF) - (fill >> 16 & 0xFF)) > 24:
+                    ink += 1
+        assert ink > 0, "分段中央没有集号的字迹"
+
+    def test_narrow_segments_skip_the_number(self, ruler):
+        ruler.resize(WIDTH, 62)
+        ruler.set_project(_Media(), BoundaryPlan.uniform(40, TB, TOTAL_TICKS), {}, 1)
+        _paint(ruler)
+        assert ruler._episode_labels_drawn == 0, (
+            "每段不到 20px 还画数字，只会和切点标记糊成一团"
+        )
+
+    def test_numbers_do_not_rebuild_every_frame(self, ruler):
+        """集号属于静态层：播放时每帧 set_playhead 不得因此重建。"""
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        _paint(ruler)
+        before = ruler._static_rebuild_count
+        for i in range(50):
+            ruler.set_playhead(Fraction(i))
+            _paint(ruler)
+        assert ruler._static_rebuild_count == before
+
+
 class TestStylesheetGuard:
     """凡设置 font-size 的规则必须同时写 font-family。
 

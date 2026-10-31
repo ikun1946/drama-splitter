@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from ..core.timebase import format_seconds_brief, format_timecode
+from ..core.timebase import format_seconds_brief
 from .state import ProjectState
 
 __all__ = [
@@ -79,8 +79,9 @@ def stage_caption(
 ) -> str:
     """底栏左侧的一行阶段文案。
 
-    REVIEW 阶段带上当前集与方案版本——底栏是用户不移动视线就能读到"我在哪"
-    的地方，因此这里重复一点左栏信息是刻意的，不算冗余展示。
+    REVIEW 只报"第几集 / 共几集"：底栏的价值是让人不移动视线就知道"我在哪"，
+    但时长、版本号左栏「当前集」卡里已经有了，同一个数字抄两遍只会让底栏变成
+    第三块信息板。
     """
     if stage is Stage.EMPTY:
         return "未导入源视频"
@@ -101,8 +102,4 @@ def stage_caption(
     episodes = plan.episodes()
     index = max(1, min(selected_episode or 1, len(episodes)))
     episode = episodes[index - 1]
-    return (
-        f"第{episode.index:02d}集 · {format_timecode(episode.start_seconds)}—"
-        f"{format_timecode(episode.end_seconds)} · 方案 v{plan.version} · "
-        f"{len(episodes)} 集"
-    )
+    return f"第 {episode.index:02d}/{len(episodes)} 集"

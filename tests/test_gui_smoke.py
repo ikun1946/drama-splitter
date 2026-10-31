@@ -116,12 +116,16 @@ class TestWindowConstruction:
         window.show()          # 布局只在 show 之后才真正分配尺寸
         qapp.processEvents()
         try:
-            wb.left_stack.setVisible(True)   # 空态会隐藏左栏；测分割器时显式显示
+            # 左栏不再隐藏（空态也有素材占位卡），无需显式 setVisible
             qapp.processEvents()
             total = sum(wb.splitter.sizes())
             assert total > 0, "分割器未获得可用宽度"
 
-            left = max(1, int(total * 0.2))
+            # 请求一个**高于左栏下限**但明显窄于默认比例的宽度：低于下限时 Qt 会
+            # 正常地夹回下限，那种情况测不出"setSizes 是否被忽略"。
+            from app.gui.workbench import LEFT_IMPORT_MIN_WIDTH
+
+            left = max(LEFT_IMPORT_MIN_WIDTH, int(total * 0.2))
             center = int(total * 0.6)
             wb.splitter.setSizes([left, center, total - left - center])
             qapp.processEvents()
@@ -1042,18 +1046,26 @@ class TestAllowedCountInterval:
         window.state.media = probe_media(binaries, assets["cfr"])
         return window.build_settings_dialog().form
 
-    def test_hidden_unless_flexible_count_mode(self, window, binaries, assets):
+    def test_allowed_interval_is_always_visible_but_gated(
+        self, window, binaries, assets
+    ):
+        """允许集数区间不再靠"藏起来"表达不适用：始终可见，不适用时置灰并说明。
+
+        原先那一行默认隐藏，用户只有切到弹性集数才发现有这项设置。
+        """
         form = self._form(window, binaries, assets)
-        assert form._flexible_row.isHidden(), "按目标时长模式下不该出现"
+        assert not form._flexible_row.isHidden(), "区间行始终可见"
+        assert not form.allowed_min.isEnabled(), "按目标时长模式下不适用 → 置灰"
+        assert form._allowed_hint.text(), "置灰时要说明为什么不能改"
 
         form.radio_by_count.setChecked(True)
-        assert form._flexible_row.isHidden(), "严格集数下也不该出现"
+        assert not form.allowed_min.isEnabled(), "严格集数下仍不适用"
 
         form.policy_flexible.setChecked(True)
-        assert not form._flexible_row.isHidden(), "弹性集数下应出现"
+        assert form.allowed_min.isEnabled(), "弹性集数下才能编辑"
 
         form.radio_by_duration.setChecked(True)
-        assert form._flexible_row.isHidden(), "切回按目标时长应再隐藏"
+        assert not form.allowed_min.isEnabled(), "切回目标时长应再置灰"
 
     def test_seeded_around_nominal_count(self, window, binaries, assets):
         form = self._form(window, binaries, assets)
@@ -2098,20 +2110,32 @@ class TestExportCodecOptions:
             dialog.close()
 
     def test_advanced_encoding_is_collapsed_by_default(self, window, qapp):
-        """首屏不摊编码器参数：用户先看到集数 / 集长 / 输出位置 / 队列。"""
+        """首屏不摊编码器参数；展开时队列只让出空间，绝不跌破硬性下限。
+
+        展开参数必然要从别处拿高度——队列是唯一可伸缩的块，实测收起 285 → 展开
+        200（正好等于 QUEUE_MIN_HEIGHT）。这里不要求"一像素不变"（那会逼着布局
+        为了不跳而裁掉参数），只钉住两条：两种状态下队列都不低于硬性下限，
+        且勾选参数不会让队列塌成一条。
+        """
         dialog, form = self._form(window, qapp)
         try:
             assert form.advanced_toggle.isChecked() is False
             assert form.advanced_host.isHidden()
+            from app.gui.panes.export_form import QUEUE_MIN_HEIGHT
+
+            assert form.queue.minimumHeight() >= QUEUE_MIN_HEIGHT, (
+                "队列必须有硬性最小高度"
+            )
+            qapp.processEvents()
+            assert form.queue.height() >= QUEUE_MIN_HEIGHT, "收起时队列要够高"
+
             form.advanced_toggle.setChecked(True)
+            qapp.processEvents()
             assert not form.advanced_host.isHidden()
             assert form.codec_combo.isVisible()
-            assert form._side_by_side is True, "展开编码时切两栏，队列不被挤走"
-            form.advanced_toggle.setChecked(False)
-            assert form._side_by_side is False
-            # 小屏上表格可用高度约 100px（表头 + 2~3 行）；关键是它拿满
-            # 队列卡给的空间，而不是被整页滚动或底栏压住。
-            assert form.queue.height() >= 100, "收起后队列应保留足够高度"
+            assert form.queue.height() >= QUEUE_MIN_HEIGHT, (
+                "展开参数把队列挤到下限以下，等于逼用户先取消勾选才能看队列"
+            )
         finally:
             dialog.close()
 
@@ -2122,9 +2146,11 @@ class TestExportCodecOptions:
             form.refresh()
             assert "第01集" in form.queue.item(0, 0).text()
             assert form.queue.rowCount() == window.state.current_plan.episode_count
-            assert form.metric_episodes.text().endswith("集")
-            assert form.metric_duration.text()
-            assert form.queue_count.text().endswith("集")
+            # 集数与总时长只在顶部这一行说一次（原先摘要、3 个 metric、队列徽章、
+            # 表头各写一遍）
+            stats = form.summary_stats.text()
+            assert stats.startswith("约 "), stats
+            assert "集" in stats and "总时长" in stats, stats
         finally:
             dialog.close()
 
@@ -2302,7 +2328,7 @@ class TestExportRecapUi:
         try:
             plan = window.state.current_plan
             original = format_seconds_brief(plan.episodes()[1].duration_seconds)
-            original_total = form.metric_duration.text()
+            original_total = form.summary_stats.text()
             form.recap_toggle.setChecked(True)
             form.recap_seconds.setValue(4)
             qapp.processEvents()
@@ -2313,13 +2339,13 @@ class TestExportRecapUi:
             assert form.queue.item(0, 4).text() == "", "第 1 集不带回顾"
             assert "4 秒" in form.queue.item(1, 4).text()
             assert form.queue.item(1, 3).text() != original
-            assert form.metric_duration.text() != original_total
+            assert form.summary_stats.text() != original_total, "总时长要跟着回顾变"
 
             form.recap_toggle.setChecked(False)
             qapp.processEvents()
             assert form.queue.item(1, 3).text() == original
             assert form.queue.item(1, 4).text() == ""
-            assert form.metric_duration.text() == original_total
+            assert form.summary_stats.text() == original_total
         finally:
             dialog.close()
 
@@ -2672,7 +2698,6 @@ class TestStep5Refinement:
         for btn in (
             page.btn_set_boundary,
             page.btn_lock,
-            page.btn_unlock,
             page.btn_confirm,
             page.btn_snap,
         ):
@@ -2971,15 +2996,15 @@ class TestProviderDialog:
         assert form.edit_base_url.text().startswith("https://ark."), "字段要回填出内置默认"
 
     def test_advanced_fields_are_collapsed_by_default(self, provider_form):
-        """常用字段足够开箱即用：高级区（id / 火山专用 / 代理）默认收起。
+        """高级参数默认收起，但连接必需项（地址 / 协议 / id）首屏就看得见。
 
-        openai 系厂商（如 DeepSeek）最典型——它连转写都没有，字段越少越好。
+        原先 id 也收在高级区里，用户点「保存」才知道还要填它。
         """
         form, _ = provider_form
         self._pick(form, "deepseek")
         assert form.advanced_toggle.isChecked() is False
-        assert form.advanced_host.isHidden(), "高级区默认应收起"
-        assert form.edit_id.isVisible() is False, "id 属于高级字段"
+        assert form.advanced_host.isHidden(), "高级参数（代理 / 模型清单）默认应收起"
+        assert not form.edit_id.isHidden(), "id 属于连接必需项，不该再藏"
         assert not form.base_field.isHidden(), "常用字段必须首屏可见"
 
     def test_volcano_fields_live_in_common_area(self, provider_form):
@@ -3000,14 +3025,17 @@ class TestProviderDialog:
         assert not form.volcano_host.isHidden(), "选了火山转写就要能填 endpoint/资源 ID"
         assert form.advanced_toggle.isChecked() is False, "不需要为必填项展开高级区"
 
-    def test_new_profile_expands_advanced_for_id(self, provider_form):
-        """新增必须先填 id（在高级区里），所以点「新增」就摊开。"""
+    def test_new_profile_keeps_id_visible_without_expanding(self, provider_form):
+        """新增要先填 id；id 现在就在首屏，不需要再借「展开高级区」把它露出来。"""
         form, _ = provider_form
         self._pick(form, "deepseek")
         form.advanced_toggle.setChecked(False)
         form._on_new()
-        assert form.advanced_toggle.isChecked() is True
-        assert not form.advanced_host.isHidden()
+        assert form.edit_id.isEnabled(), "新增档案时 id 必须可编辑"
+        assert not form.edit_id.isHidden(), "id 在首屏，不能藏在折叠区里"
+        assert form.advanced_toggle.isChecked() is False, (
+            "必填项已在首屏，不该为了它去展开高级参数"
+        )
 
     def test_custom_entry_exposes_address_key_and_protocol(self, provider_form):
         """自定义接入要把用户真正需要填的东西直接摆出来，不让先理解内部 id。"""
@@ -3082,15 +3110,18 @@ class TestProviderDialog:
         assert not form.advanced_host.isHidden()
         assert form.custom_host.isAncestorOf(form.base_field), "地址仍在首屏容器里"
 
-    def test_validation_error_expands_the_advanced_section(self, provider_form):
-        """缺必填项时自动摊开高级区：不会"看不到却必须填"。"""
+    def test_validation_error_points_at_a_visible_field(self, provider_form):
+        """缺必填项时，要填的那个字段必须已经看得见。
+
+        原先靠"报错自动展开高级区"来兜底——那是隐藏必填的补丁。现在必填项常驻
+        首屏，报错只需指出问题，不需要替用户把字段翻出来。
+        """
         form, _ = provider_form
         self._pick(form, "deepseek")
         form.edit_base_url.setText("")
-        form.advanced_toggle.setChecked(False)
         form._on_save()
         assert "保存失败" in form.hint_label.text()
-        assert form.advanced_toggle.isChecked(), "报错时要顺手展开高级区"
+        assert not form.edit_base_url.isHidden(), "报错的字段必须首屏可见"
 
 
     def test_egress_preview_follows_protocol(self, provider_form):
@@ -4540,6 +4571,59 @@ class TestModelInfoPanel:
         assert not any(box.isChecked() for box in form.info_modalities.values())
         assert "不截断" in form.info_note.text()
 
+    def test_catalog_metadata_is_filled_automatically(self, provider_form):
+        """自定义厂商的 /models 带回规格时，刷新后应直接填进对应模型。"""
+        from app.core.model_info import ModelInfo
+
+        form, _ = provider_form
+        form._on_custom()
+        form.model_table.edit_add.setText("vendor-chat")
+        form.model_table.btn_add.click()
+        form._on_catalog_listed([
+            ModelInfo(
+                name="vendor-chat",
+                context_window=262_144,
+                modalities=("text", "image"),
+                source="catalog",
+                note="厂商 /models 返回：context_length、input_modalities",
+            )
+        ])
+        info = form._info_of("vendor-chat")
+        assert info.context_window == 262_144
+        assert info.modalities == ("text", "image")
+        assert info.source == "catalog"
+        assert "厂商接口" in form.info_note.text() or "厂商" in form.hint_label.text()
+
+    def test_catalog_does_not_overwrite_manual_values(self, provider_form):
+        """刷新清单不能冲掉用户手填的参数。"""
+        from app.core.model_info import ModelInfo
+
+        form, _ = provider_form
+        form._on_custom()
+        form.model_table.edit_add.setText("vendor-chat")
+        form.model_table.btn_add.click()
+        form._model_info = [
+            ModelInfo(
+                name="vendor-chat",
+                context_window=32_000,
+                modalities=("text",),
+                source="manual",
+                note="用户手填",
+            )
+        ]
+        form._on_catalog_listed([
+            ModelInfo(
+                name="vendor-chat",
+                context_window=1_000_000,
+                modalities=("text", "image"),
+                source="catalog",
+            )
+        ])
+        info = form._info_of("vendor-chat")
+        assert info.context_window == 32_000
+        assert info.modalities == ("text",)
+        assert info.source == "manual"
+
     def test_autofill_fills_what_it_is_sure_about(self, provider_form):
         form, _ = provider_form
         self._setup(form, "deepseek", "gpt-4o")
@@ -4653,14 +4737,19 @@ class TestAnalysisProgressDisplay:
         assert rows[2].bar.maximum() == 0, "新阶段重新从流动动画开始"
         assert pane.total.value() == round(2 / 6 * 100)
 
-    def test_total_progress_mirrors_to_bottom_bar(self, window):
+    def test_progress_lives_only_in_the_analysis_page(self, window):
+        """进度只在中栏说一次：底栏那条 180px 小进度条不再镜像总进度。
+
+        原先同一件事在中栏胶囊、中栏总进度、底栏小条三处同时动，用户不知道看哪个。
+        """
         pane = window.workbench.analysis_pane
         pane._reset_progress()
+        before = window.bottom.progress.value()
 
         pane._on_stage("候选点")            # 第 4/6 个阶段，前面 3 个已完成
-        assert window.bottom.progress.value() == round(3 / 6 * 100), (
-            "底栏小进度条镜像的是总进度"
-        )
+        assert pane.total.value() == round(3 / 6 * 100)
+        assert window.bottom.progress.isHidden(), "底栏不该再显示第二份进度"
+        assert window.bottom.progress.value() == before
 
 
 class TestCapsuleProgressBar:
@@ -5334,25 +5423,38 @@ class TestReadyPageLayout:
         _import_and_wait(window, qapp, assets["cfr"])
         return window
 
-    def test_left_column_is_a_label_value_grid(self, ready):
+    def test_left_column_is_a_label_value_grid(self, ready, assets):
         pane = ready.workbench.import_pane
-        assert pane.file_card.title() == "素材", "三张卡合并成一张「素材」"
+        # 卡片标题按 250px 预算省略：文件名长于预算就会被截成 "cfr_120….mp4"
+        title = pane.file_card.title()
+        assert title.startswith("cfr_120") and title.endswith(".mp4"), title
+        assert "…" not in title or len(title) < len("cfr_120s_25fps.mp4")
+        assert pane.file_card.toolTip() == str(assets["cfr"]), "完整路径进 tooltip"
         assert pane._audio_card.title() == "主对白音轨"
         assert pane._steps_card.title() == "接下来"
+        from app.gui.panes import import_pane as ip
+
+        assert [key for _, key in ip.INFO_ROWS] == [
+            "resolution",
+            "fps",
+            "duration",
+            "size",
+            "audio",
+        ], "信息网格只留 5 行；文件名与路径不再各占一行"
         assert pane._fields["resolution"].text() == "320 × 180"
         assert pane._fields["fps"].text() == "25.000 fps"
         assert pane._fields["duration"].text() == "00:02:00.000"
-        assert pane._fields["audio"].text() == "1 条"
-        assert pane._fields["file"].text() == "cfr_120s_25fps.mp4"
+        assert pane._fields["size"].text() not in ("", "—")
+        assert "AAC" in pane._fields["audio"].text()
 
-    def test_long_path_wraps_instead_of_being_cut(self, ready, assets):
-        """路径要能折行显示全部内容——以前是中间省略，用户看不到完整路径。"""
+    def test_full_path_is_reachable_without_widening_the_card(self, ready, assets):
+        """路径收进 tooltip：长路径不再撑宽卡片，信息也没丢。"""
         pane = ready.workbench.import_pane
-        shown = pane.path_label.text().replace("\u200b", "")
-        assert shown == str(assets["cfr"]), "路径应当完整显示（零宽断点不计）"
-        assert "\u200b" in pane.path_label.text(), "长路径要插零宽断点才能折行"
-        assert pane.path_label.wordWrap()
-        assert pane.path_label.toolTip() == str(assets["cfr"])
+        assert pane.full_path() == str(assets["cfr"])
+        assert pane.file_card.toolTip() == str(assets["cfr"])
+        assert pane.file_card.minimumSizeHint().width() <= pane.width(), (
+            "标题是截断后的文件名，不该再把卡片顶过栏宽"
+        )
 
     def test_format_hint_hides_after_import(self, ready):
         """导入后不再提示支持哪些格式——那时它只是一句废话。"""
@@ -5370,20 +5472,26 @@ class TestReadyPageLayout:
             "切点前后是检视动作，不该和播放抢主色"
         )
 
-    def test_advice_tab_shows_its_count(self, window):
-        """页签带计数：建议里几条、一眼看得见。"""
+    def test_problem_tab_counts_advice_too(self, window):
+        """建议并入「问题」页：页签数字把两者一起数，不会"有条目却没提示"。"""
         from app.gui.widgets.inspector import InspectorIssue
 
         insp = window.workbench.inspector
+        insp.set_issues([])
         insp.set_advice([])
-        assert insp._tabs[1].text() == "建议", "没有建议时不加数字"
+        assert [tab.text() for tab in insp._tabs] == ["问题", "日志"], (
+            "建议已并入问题，不该再有第三个页签"
+        )
 
         insp.set_advice([InspectorIssue(title="整集复核建议", target_ms=1000)])
-        assert insp._tabs[1].text() == "建议 1", insp._tabs[1].text()
+        assert insp._tabs[0].text() == "问题 1", insp._tabs[0].text()
+        assert len(insp._rows) == 1, "建议要和问题同列，而不是藏进另一个页"
 
     def test_inspector_empty_state_is_compact_with_next_step(self, window):
         insp = window.workbench.inspector
+        # 建议也在同一列：只清问题不清建议，空态就不该被断言为"空"
         insp.set_issues([])
+        insp.set_advice([])
         assert not insp._next_step.isHidden(), "空态要给出「下一步」"
         assert insp._problem_scroll.isHidden(), "空列表不该占着整列（那是空白感的来源）"
 

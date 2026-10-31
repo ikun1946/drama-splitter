@@ -5,9 +5,10 @@
 
 进度分两层（取代原先"只有一条进度条"的画法）：
 
-- 每个阶段一条自己的胶囊进度条。阶段没有上报细粒度数据时显示**流动高光**
-  （见 ``CapsuleProgressBar``），而不是停在 0%——"正在做、剩余时间未知"是
-  诚实的表达；
+- 每个阶段一条自己的胶囊进度条，百分比小字贴在胶囊右端（状态文字不再单独
+  占一列，"已完成"只是把状态点又说一遍）。阶段没有上报细粒度数据时显示
+  **流动高光**（见 ``CapsuleProgressBar``），而不是停在 0%——"正在做、剩余
+  时间未知"是诚实的表达；
 - 下方一条总进度，等于 (已完成阶段数 + 当前阶段比例) / 阶段总数，底栏那条
   小进度条镜像的就是它。
 
@@ -83,6 +84,9 @@ _DOT_KEY = {
 
 _DOT_D = 8
 
+#: 百分比小字的固定宽（"100%" 定宽，胶囊条左右两端才不会随阶段跳动）
+_PERCENT_WIDTH = 36
+
 
 class _StageDot(QWidget):
     """阶段清单最左侧的状态圆点——一眼看出哪几步过了、哪步在跑。
@@ -156,24 +160,50 @@ def _centered_rect(w: float, h: float, d: float) -> QRectF:
 
 
 class _StageRow:
-    """阶段清单里的一行：状态点 / 名称 / 本阶段胶囊进度条 / 状态文字。"""
+    """阶段清单里的一行：状态点 / 名称 / 胶囊进度条（百分比贴条右侧）。
+
+    状态文字不再单独占一列——"已完成 / 失败"只是把状态点的颜色又用文字说
+    一遍，重复且吃掉一列宽度（胶囊条当年还被固定成 200px 去迁就它）。
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
         self.state = StageState.PENDING
         self.dot = _StageDot()
         self.label = QLabel(name)
-        self.bar = CapsuleProgressBar(thickness=8)
-        self.bar.setFixedWidth(200)
-        self.status = QLabel("等待")
+        self.bar = CapsuleProgressBar(thickness=8)     # 宽度自适应，不再写死 200
+        self.percent = QLabel("")
+        self.percent.setProperty("role", "muted")
+        self.percent.setFixedWidth(_PERCENT_WIDTH)
+        self.percent.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        # 状态文字保留成不可见占位：外部脚本与冒烟测试按名字读它。可见的
+        # 只有右边的百分比，语义仍与状态机同源，不会各写一套。
+        self.status = QLabel(_STATUS_TEXT[StageState.PENDING])
         self.status.setProperty("role", "muted")
-        self.status.setMinimumWidth(52)
+        self.status.hide()
+
+        self.meter = QWidget()          # 胶囊 + 百分比：一格里的一个整体
+        meter_row = QHBoxLayout(self.meter)
+        meter_row.setContentsMargins(0, 0, 0, 0)
+        meter_row.setSpacing(8)
+        meter_row.addWidget(self.bar, 1)
+        meter_row.addWidget(self.percent)
+
+    def _refresh_percent(self) -> None:
+        """百分比贴着胶囊右端；流动模式（无上界）没有可报的数，就留空。"""
+        if self.bar.maximum() == 0:
+            self.percent.setText("")
+        else:
+            self.percent.setText(f"{self.bar.value()}%")
 
     def _apply(self, state: StageState) -> None:
         self.state = state
         self.dot.set_state(state)
         self.bar.set_tone(_TONE[state])
         self.status.setText(_STATUS_TEXT[state])
+        self._refresh_percent()
 
     def mark_pending(self) -> None:
         self.bar.setRange(0, 100)
@@ -194,6 +224,7 @@ class _StageRow:
         self.dot.set_state(StageState.RUNNING)
         self.bar.set_tone(_TONE[StageState.RUNNING])
         self.status.setText(f"{value}%")
+        self._refresh_percent()
 
     def mark_done(self) -> None:
         self.bar.setRange(0, 100)
@@ -248,15 +279,16 @@ class AnalysisPane(QWidget):
         table = QGridLayout()
         table.setHorizontalSpacing(10)
         table.setVerticalSpacing(8)
-        table.setColumnStretch(2, 1)     # 胶囊条独占可伸缩的一列
+        table.setColumnStretch(2, 1)     # 计量组（胶囊+百分比）独占可伸缩的一列
         for row, stage_row in enumerate(self.stage_rows):
             table.addWidget(stage_row.dot, row, 0, Qt.AlignmentFlag.AlignVCenter)
             table.addWidget(stage_row.label, row, 1)
-            table.addWidget(stage_row.bar, row, 2, Qt.AlignmentFlag.AlignVCenter)
-            table.addWidget(stage_row.status, row, 3)
+            table.addWidget(stage_row.meter, row, 2, Qt.AlignmentFlag.AlignVCenter)
         table_host = QWidget(self)
         table_host.setLayout(table)
-        table_host.setMinimumWidth(360)
+        # 胶囊条改成自适应后，这一块的最小宽度不再由它决定；360 是"名称 +
+        # 一截看得见长度的胶囊"的下限，再窄就只剩百分比了。
+        table_host.setMinimumWidth(300)
 
         table_line = QHBoxLayout()
         table_line.addStretch(1)

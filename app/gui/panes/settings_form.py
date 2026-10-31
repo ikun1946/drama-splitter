@@ -1,4 +1,4 @@
-"""设置：分集参数（模式 / 集数 / 时长 / 浮动 / 策略）与可行性实时反馈。
+"""设置：三个决策组（分集策略 / 范围与例外 / 校验结果），参数一次说完。
 
 两种模式下"用户输入哪个、哪个是算出来的"是相反的：
 
@@ -7,12 +7,20 @@
 
 派生值只作展示与确认，不反向影响内核：``SplitSettings.derive()`` 在该模式下
 本来就用另一个字段（模式B 用 ``Fraction(T, N)``，模式A 用用户输入的目标时长）。
+
+联动一律用「置灰」，不用「隐藏」
+--------------------------------
+原先「允许集数区间」在非弹性模式下整行 ``setVisible(False)``：用户切到「严格
+集数」后再切回来，会以为这个参数根本不存在（它确实有时不生效，但"不生效"
+和"不存在"是两回事，置灰 + 一句原因才说得清）。同一原则用于集长范围的
+浮动比例 / 上下限：不可用时置灰，值保留，切回即恢复。
 """
 
 from __future__ import annotations
 
 from fractions import Fraction
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -45,6 +53,44 @@ from ..widgets import (
 
 __all__ = ["SettingsForm"]
 
+#: 卡片内表单的行距；QFormLayout 的默认行距比卡片标题下的间距大，显式收小。
+_FORM_MARGINS = (12, 10, 12, 10)
+_FORM_SPACING = 8
+
+
+def _form_layout() -> QFormLayout:
+    """卡片正文用的两列表单。
+
+    ``Card`` 原生支持 ``body_layout`` 参数，直接传一个 QFormLayout 即可——
+    旧写法是先建 QVBoxLayout 再"把 body 的 layout 摘下来塞进 QFormLayout"，
+    摘下来的那个布局被放进临时 QWidget 再 ``deleteLater()``，纯属绕路。
+    """
+    form = QFormLayout()
+    form.setContentsMargins(*_FORM_MARGINS)
+    form.setSpacing(_FORM_SPACING)
+    form.setLabelAlignment(
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    )
+    form.setFieldGrowthPolicy(
+        QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+    )
+    # 窗口不够宽时把标签折到字段上方（而不是让整张卡横向撑开）：
+    # 三列并排时每列只有 400px 上下，单选的长标题（"严格集数：必须恰好 N 集…"）
+    # 就是最小宽度的大头。折行只在真放不下时发生，宽屏上仍是标准两列。
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    return form
+
+
+def _radio_box(*radios: QRadioButton, parent: QWidget) -> QWidget:
+    """把若干单选竖排成一组（表单里占"一行的值"那一格）。"""
+    box = QWidget(parent)
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    for radio in radios:
+        layout.addWidget(radio)
+    return box
+
 
 class SettingsForm(QWidget):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
@@ -52,177 +98,188 @@ class SettingsForm(QWidget):
         self.state = state
         # 反算写回派生控件时会再次触发 _refresh，用它挡住递归
         self._syncing = False
-        # 上一次刷新时「允许集数区间」是否可见：只在"刚切进弹性集数"那一次
+        # 上一次性刷新时「允许集数区间」是否生效：只在"刚切进弹性集数"那一次
         # 做自洽兜底，之后用户怎么改都不再插手
         self._was_flexible = False
         # 本表单由设置对话框承载（对话框正文套滚动容器）。显式给出能容纳双栏的
         # 最小宽度，窄窗口下横向滚动兜底，而不是把两栏压成"一列 90px"。
         self.setMinimumWidth(640)
 
-        # ---- 模式 ----
+        # ---- 决策①：分集方式 --------------------------------------------
         self.radio_by_duration = QRadioButton("按目标时长（系统求集数）")
         self.radio_by_count = QRadioButton("按目标集数")
-        self.radio_recommend = QRadioButton("推荐方案（自动比较剧情/悬念/时长三种策略）")
+        self.radio_recommend = QRadioButton("推荐方案（自动比较三种策略）")
+        self.radio_recommend.setToolTip(
+            "分析时把剧情 / 悬念 / 时长三种策略各解一遍，取总代价最低者；"
+            "此时「策略」由系统决定，手选无效"
+        )
         self.radio_by_duration.setChecked(True)
         for w in (self.radio_by_duration, self.radio_by_count, self.radio_recommend):
             w.toggled.connect(self._refresh)
-        mode_card = Card("分集模式", parent=self, accent="primary")
-        mode_card.body_layout.addWidget(self.radio_by_duration)
-        mode_card.body_layout.addWidget(self.radio_by_count)
-        mode_card.body_layout.addWidget(self.radio_recommend)
-        self._mode_card = mode_card
 
-        # ---- 目标数值 ----
-        self.duration_spin = NoWheelDoubleSpinBox()
+        # 目标数值：同一个框在两种模式下含义不同（手里的输入 vs 系统算出来的值）
+        self.duration_spin = NoWheelDoubleSpinBox(self)
         self.duration_spin.setRange(1.0, 3600.0)
         self.duration_spin.setDecimals(3)
         self.duration_spin.setValue(120.0)
         self.duration_spin.setSuffix(" 秒")
         self.duration_spin.valueChanged.connect(self._refresh)
 
-        self.count_spin = NoWheelSpinBox()
+        self.count_spin = NoWheelSpinBox(self)
         self.count_spin.setRange(1, 9999)
         self.count_spin.setValue(60)
+        self.count_spin.setSuffix(" 集")
         self.count_spin.valueChanged.connect(self._refresh)
 
+        self._duration_field = LabeledField("目标时长", parent=self)
+        self._duration_field.attach(self.duration_spin)
+        self._count_field = LabeledField("目标集数 N", parent=self)
+        self._count_field.attach(self.count_spin)
+
+        # 决策②：严格 / 弹性集数
         self.policy_exact = QRadioButton("严格集数：必须恰好 N 集，无解就明确报错")
         self.policy_flexible = QRadioButton("弹性集数：在允许区间内比较方案")
         self.policy_exact.setChecked(True)
-        self.allowed_min = NoWheelSpinBox()
-        self.allowed_min.setRange(1, 9999)
-        self.allowed_min.setValue(58)
-        self.allowed_max = NoWheelSpinBox()
-        self.allowed_max.setRange(1, 9999)
-        self.allowed_max.setValue(62)
         for w in (self.policy_exact, self.policy_flexible):
             w.toggled.connect(self._refresh)
-        for w in (self.allowed_min, self.allowed_max):
-            w.valueChanged.connect(self._refresh)
 
-        # 允许集数区间只在「按目标集数 + 弹性集数」下有意义，其余情况整行隐藏
-        # （原先是一直显示但灰掉，默认值 58–62 对多数素材都是无意义且自相矛盾的）
-        self._flexible_row = QWidget(self)
-        flexible_row = QHBoxLayout(self._flexible_row)
-        flexible_row.setContentsMargins(0, 0, 0, 0)
-        flexible_row.addWidget(QLabel("允许集数区间："))
-        flexible_row.addWidget(self.allowed_min)
-        flexible_row.addWidget(QLabel("–"))
-        flexible_row.addWidget(self.allowed_max)
-        flexible_row.addStretch(1)
-        # 默认隐藏：只有「按目标集数 + 弹性集数」下它才有定义（见 _refresh）
-        self._flexible_row.setVisible(False)
+        # 策略（剧情 / 悬念 / 时长优先）：推荐方案会自己跑三遍，那时置灰
+        self.strategy_combo = NoWheelComboBox(self)
+        self.strategy_combo.addItem("剧情优先", Strategy.STORY.value)
+        self.strategy_combo.addItem("悬念优先", Strategy.SUSPENSE.value)
+        self.strategy_combo.addItem("时长优先", Strategy.DURATION.value)
+        self.strategy_combo.currentIndexChanged.connect(self._refresh)
+        self._strategy_field = LabeledField("策略", parent=self)
+        self._strategy_field.attach(self.strategy_combo)
 
-        count_card = Card("目标集数 / 时长", parent=self, accent="primary")
-        # 同一个框在两种模式下含义不同：手里的输入 vs 系统算出来的值
-        dfield = LabeledField("目标时长", suffix="秒")
-        dfield.attach(self.duration_spin)
-        count_card.body_layout.addWidget(dfield)
-        nfield = LabeledField("预计集数（自动）")
-        nfield.attach(self.count_spin)
-        count_card.body_layout.addWidget(nfield)
-        self._duration_field = dfield
-        self._count_field = nfield
-        count_card.body_layout.addSpacing(4)
-        count_card.body_layout.addWidget(self.policy_exact)
-        count_card.body_layout.addWidget(self.policy_flexible)
-        count_card.body_layout.addWidget(self._flexible_row)
-        self._count_card = count_card
+        policy_card = Card(
+            "分集策略", parent=self, body_layout=_form_layout(), accent="primary"
+        )
+        form = policy_card.body_layout
+        form.addRow(
+            "分集方式",
+            _radio_box(
+                self.radio_by_duration,
+                self.radio_by_count,
+                self.radio_recommend,
+                parent=policy_card,
+            ),
+        )
+        # 两个目标值各占一行：竖排才不会把 "严格/弹性" 那一行的宽度撑爆，
+        # 也让"填哪个、另一个由系统算"在置灰状态下一眼可辨。
+        form.addRow(self._duration_field)
+        form.addRow(self._count_field)
+        form.addRow(
+            "集数策略",
+            _radio_box(self.policy_exact, self.policy_flexible, parent=policy_card),
+        )
+        form.addRow(self._strategy_field)
+        self._policy_card = policy_card
 
-        # ---- 范围来源 ----
+        # ---- 决策③：集长范围来源 ----------------------------------------
         self.range_manual = QRadioButton("手动上下限")
         self.range_percent = QRadioButton("按目标时长百分比浮动")
+        self.range_percent.setToolTip(
+            "集长上下限 = 目标时长 × (1 ± 浮动比例)，随目标时长一起走"
+        )
         self.range_percent.setChecked(True)
-        self.min_spin = NoWheelDoubleSpinBox()
-        self.min_spin.setRange(0.1, 3600.0)
-        self.min_spin.setDecimals(3)
-        self.min_spin.setValue(96.0)
-        self.max_spin = NoWheelDoubleSpinBox()
-        self.max_spin.setRange(0.1, 3600.0)
-        self.max_spin.setDecimals(3)
-        self.max_spin.setValue(144.0)
-        self.tolerance_spin = NoWheelDoubleSpinBox()
+
+        self.tolerance_spin = NoWheelDoubleSpinBox(self)
         self.tolerance_spin.setRange(0.0, 99.0)
         self.tolerance_spin.setDecimals(2)
         self.tolerance_spin.setValue(20.0)
         self.tolerance_spin.setSuffix(" %")
+
+        self.min_spin = NoWheelDoubleSpinBox(self)
+        self.min_spin.setRange(0.1, 3600.0)
+        self.min_spin.setDecimals(3)
+        self.min_spin.setValue(96.0)
+        self.min_spin.setSuffix(" 秒")
+
+        self.max_spin = NoWheelDoubleSpinBox(self)
+        self.max_spin.setRange(0.1, 3600.0)
+        self.max_spin.setDecimals(3)
+        self.max_spin.setValue(144.0)
+        self.max_spin.setSuffix(" 秒")
+
         for w in (self.range_manual, self.range_percent):
             w.toggled.connect(self._refresh)
         for w in (self.min_spin, self.max_spin, self.tolerance_spin):
             w.valueChanged.connect(self._refresh)
 
-        range_card = Card("集长范围（两种来源互斥）", parent=self, accent="primary")
-        range_form = QFormLayout()
-        range_form.addRow(self.range_percent)
-        pfield = LabeledField("浮动比例 p", suffix="%")
-        pfield.attach(self.tolerance_spin)
-        range_form.addRow(pfield)
-        range_form.addRow(self.range_manual)
-        lfield = LabeledField("最短集长 L", suffix="秒")
-        lfield.attach(self.min_spin)
-        range_form.addRow(lfield)
-        ufield = LabeledField("最长集长 U", suffix="秒")
-        ufield.attach(self.max_spin)
-        range_form.addRow(ufield)
-        # 把 QFormLayout 嫁接到 range_card.body
-        old_layout = range_card.body.layout()
-        if old_layout is not None:
-            placeholder = QWidget()
-            placeholder.setLayout(old_layout)
-            placeholder.deleteLater()
-        range_card.body.setLayout(range_form)
-        range_card.body_layout = range_form
-        range_form.setContentsMargins(12, 10, 12, 10)
-        range_form.setSpacing(8)
+        # 决策④：允许集数区间（始终可见，不可用时置灰 + 一句原因）
+        self.allowed_min = NoWheelSpinBox(self)
+        self.allowed_min.setRange(1, 9999)
+        self.allowed_min.setValue(58)
+        self.allowed_max = NoWheelSpinBox(self)
+        self.allowed_max.setRange(1, 9999)
+        self.allowed_max.setValue(62)
+        for w in (self.allowed_min, self.allowed_max):
+            w.valueChanged.connect(self._refresh)
+
+        allowed_row = QWidget(self)
+        allowed_layout = QHBoxLayout(allowed_row)
+        allowed_layout.setContentsMargins(0, 0, 0, 0)
+        allowed_layout.setSpacing(6)
+        allowed_layout.addWidget(self.allowed_min)
+        dash = QLabel("–", allowed_row)
+        allowed_layout.addWidget(dash)
+        allowed_layout.addWidget(self.allowed_max)
+        allowed_layout.addWidget(QLabel("集", allowed_row))
+        allowed_layout.addStretch(1)
+        self._allowed_row = allowed_row
+        # 旧名保留：外部按这名字找"允许集数区间那一行"
+        self._flexible_row = allowed_row
+
+        self._allowed_hint = QLabel("", self)
+        self._allowed_hint.setProperty("role", "muted")
+        self._allowed_hint.setWordWrap(True)
+
+        self.allow_exception = QCheckBox("允许单集例外（启用后须逐集记录原因）", self)
+
+        range_card = Card("范围与例外", parent=self, body_layout=_form_layout())
+        range_form = range_card.body_layout
+        range_form.addRow(
+            "集长范围",
+            _radio_box(self.range_percent, self.range_manual, parent=range_card),
+        )
+        range_form.addRow("浮动比例 p", self.tolerance_spin)
+        range_form.addRow("最短集长 L", self.min_spin)
+        range_form.addRow("最长集长 U", self.max_spin)
+        range_form.addRow("允许集数区间", allowed_row)
+        range_form.addRow(self._allowed_hint)
+        range_form.addRow(self.allow_exception)
         self._range_card = range_card
 
-        # ---- 策略 ----
-        self.strategy_combo = NoWheelComboBox()
-        self.strategy_combo.addItem("剧情优先", Strategy.STORY.value)
-        self.strategy_combo.addItem("悬念优先", Strategy.SUSPENSE.value)
-        self.strategy_combo.addItem("时长优先", Strategy.DURATION.value)
-        self.allow_exception = QCheckBox("允许单集例外（默认关闭，启用后须逐集记录原因）")
-
-        strategy_card = Card("策略与例外", parent=self)
-        sfield = LabeledField("策略")
-        sfield.attach(self.strategy_combo)
-        strategy_card.body_layout.addWidget(sfield)
-        strategy_card.body_layout.addWidget(self.allow_exception)
-        self._strategy_card = strategy_card
-        self._strategy_field = sfield
-
-        # ---- 可行性 ----
+        # ---- 校验结果（原右栏可行性卡） ----------------------------------
         self._feas_pill = StatusPill("可行", tone="success")
-        feasibility_card = Card("即时可行性检查（调用 AI 之前就应给出结论）", parent=self)
+        feasibility_card = Card("校验结果", parent=self, accent="primary")
         pill_row = QHBoxLayout()
+        pill_row.setContentsMargins(0, 0, 0, 0)
+        pill_row.setSpacing(8)
         pill_row.addWidget(self._feas_pill)
         pill_row.addStretch(1)
         feasibility_card.body_layout.insertLayout(0, pill_row)
-        self.feasibility = QTextEdit()
+        self.feasibility = QTextEdit(feasibility_card)
         self.feasibility.setReadOnly(True)
+        # 结论正文自己滚动：卡片高度不能被它那串"可行集数范围 / 与用户区间取交集"
+        # 撑开——那是这一屏第三长的文本，而它上面已经有两张参数卡了。
+        self.feasibility.setMinimumHeight(150)
         feasibility_card.body_layout.addWidget(self.feasibility, 1)
-        self._feasibility_card = feasibility_card
-        # 结论卡的色条跟着判定结果走：这是这一屏最该被一眼看到的东西，
-        # 而原先只有一个文字状态块，无解与可设在视觉上没有区别。
+        # 结论卡的色条跟着判定结果走：这是这一屏最该被一眼看到的东西
         self._feas_card = feasibility_card
+        self._feasibility_card = feasibility_card
 
-        # ---- 装配 ----
-        left_col = QVBoxLayout()
-        left_col.setSpacing(12)
-        left_col.addWidget(mode_card)
-        left_col.addWidget(count_card)
-        left_col.addWidget(range_card)
-        left_col.addWidget(strategy_card)
-        left_col.addStretch(1)
-
-        right_col = QVBoxLayout()
-        right_col.setSpacing(12)
-        right_col.addWidget(feasibility_card, 1)
-
+        # ---- 装配 -------------------------------------------------------
+        # 三张卡横向并排：卡片高度 = 最高那张（约 400px），整屏一次看完。
+        # 竖排会到 850px、两列叠放也要 620px，720 屏上都得滚动才能看到结论。
+        # 宽屏对话框里三列更省纵向空间，也正对应"三个决策组"。
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
-        outer.addLayout(left_col, 1)
-        outer.addLayout(right_col, 1)
+        outer.addWidget(policy_card, 4)
+        outer.addWidget(range_card, 4)
+        outer.addWidget(feasibility_card, 3)
 
     def collect_settings(self):
         settings = self.state.settings
@@ -242,6 +299,7 @@ class SettingsForm(QWidget):
         settings.count_policy = (
             CountPolicy.EXACT if self.policy_exact.isChecked() else CountPolicy.FLEXIBLE
         )
+        # 区间值即使在不生效的模式下也照写：置灰不等于丢值，切回弹性即沿用
         settings.allowed_count_min = self.allowed_min.value()
         settings.allowed_count_max = self.allowed_max.value()
 
@@ -314,15 +372,20 @@ class SettingsForm(QWidget):
         self._sync_editable_fields(by_count)
         self.policy_exact.setEnabled(by_count)
         self.policy_flexible.setEnabled(by_count)
-        # 允许集数区间只在「按目标集数 + 弹性集数」下有定义，其余情况整行隐藏
+
+        # 允许集数区间只在「按目标集数 + 弹性集数」下参与计算：置灰 + 说明，
+        # 不隐藏。它一直有定义（值始终写回配置），只是此时不生效。
         flexible = by_count and settings.count_policy == CountPolicy.FLEXIBLE
-        self._flexible_row.setVisible(flexible)
+        for widget in (self.allowed_min, self.allowed_max):
+            widget.setEnabled(flexible)
+        self._sync_allowed_hint(settings, flexible)
         if flexible and not self._was_flexible:
             # 刚切进弹性集数：若区间与名义目标自相矛盾（如默认 58–62）先兜底一次，
             # 此后用户怎么改都不再插手
             self._seed_allowed_range(settings)
             settings = self.collect_settings()   # 把兜底后的区间纳入本次校验与判定
         self._was_flexible = flexible
+
         manual = self.range_manual.isChecked()
         self.min_spin.setEnabled(manual)
         self.max_spin.setEnabled(manual)
@@ -418,6 +481,22 @@ class SettingsForm(QWidget):
                 self._set_feas_accent("success")
 
         self.feasibility.setPlainText("\n".join(lines))
+
+    # ---- 联动（置灰 + 原因） --------------------------------------------
+
+    def _sync_allowed_hint(self, settings, flexible: bool) -> None:
+        """「允许集数区间」当前为什么不可用：一句话写在它下面，不留白。"""
+        if settings.split_mode == SplitMode.RECOMMEND:
+            text = "推荐方案由系统判定集数，此区间暂不参与计算（值会保留）。"
+        elif not flexible:
+            text = (
+                "当前为严格集数，此区间暂不参与计算；"
+                "切到「弹性集数」后生效（值会保留）。"
+            )
+        else:
+            text = "求解器只在这些集数里择优；切换模式时值不会被清掉。"
+        if self._allowed_hint.text() != text:
+            self._allowed_hint.setText(text)
 
     # ---- 自动反算（派生字段只读） --------------------------------------
 

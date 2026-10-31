@@ -15,7 +15,9 @@ from app.core.model_info import (
     ModelInfo,
     estimate_max_input_chars,
     format_context,
+    from_catalog_item,
     infer_model_info,
+    merge_catalog_info,
 )
 from app.core.providers import (
     CAP_ASR,
@@ -81,6 +83,80 @@ class TestInference:
 
     def test_blank_name(self):
         assert infer_model_info("").name == ""
+
+
+class TestCatalogMetadata:
+    """厂商 /models 返回元数据时，用接口事实而不是本地猜测填参数。"""
+
+    def test_reads_top_level_context_and_modalities(self):
+        info = from_catalog_item({
+            "id": "vendor-chat",
+            "context_length": 262144,
+            "input_modalities": ["text", "image"],
+        })
+        assert info is not None
+        assert info.name == "vendor-chat"
+        assert info.context_window == 262_144
+        assert info.modalities == ("text", "image")
+        assert info.source == "catalog"
+        assert "context_length" in info.note
+
+    def test_reads_nested_openrouter_shape(self):
+        info = from_catalog_item({
+            "id": "openrouter-model",
+            "top_provider": {"context_length": 1_048_576},
+            "architecture": {"input_modalities": ["text", "image", "file"]},
+        })
+        assert info is not None
+        assert info.context_window == 1_048_576
+        assert info.modalities == ("text", "image")
+        assert "top_provider.context_length" in info.note
+
+    def test_reads_limits_shape(self):
+        info = from_catalog_item({
+            "id": "limits-model",
+            "limits": {"max_input_tokens": 128000},
+            "modality": "text",
+        })
+        assert info is not None
+        assert info.context_window == 128_000
+        assert info.modalities == ("text",)
+
+    def test_missing_metadata_stays_unknown(self):
+        assert from_catalog_item({"id": "unknown-model"}) is None
+        assert from_catalog_item("unknown-model") is None
+
+    def test_invalid_metadata_is_ignored(self):
+        info = from_catalog_item({
+            "id": "bad-data",
+            "context_window": -1,
+            "input_modalities": ["smell", 42],
+        })
+        assert info is None
+
+    def test_manual_values_are_never_overwritten(self):
+        current = ModelInfo(
+            name="m", context_window=64_000, modalities=("text",),
+            source="manual", note="手填",
+        )
+        incoming = ModelInfo(
+            name="m", context_window=1_000_000, modalities=("text", "image"),
+            source="catalog", note="厂商接口",
+        )
+        assert merge_catalog_info(current, incoming) == current
+
+    def test_catalog_fills_only_empty_fields(self):
+        current = ModelInfo(
+            name="m", context_window=64_000, source="catalog", note="旧事实",
+        )
+        incoming = ModelInfo(
+            name="m", context_window=128_000, modalities=("text", "image"),
+            source="catalog", note="厂商接口",
+        )
+        merged = merge_catalog_info(current, incoming)
+        assert merged.context_window == 64_000, "已有上下文不被覆盖"
+        assert merged.modalities == ("text", "image"), "模态空位被补齐"
+        assert merged.source == "catalog"
 
 
 # ---------------------------------------------------------------------------

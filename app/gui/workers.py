@@ -1072,7 +1072,7 @@ class JudgeProbeWorker(BaseWorker):
 
 
 class ModelListWorker(BaseWorker):
-    """后台拉取某厂商的模型清单（供「厂商管理」自动填充模型名）。
+    """后台拉取某厂商的模型清单与元数据。
 
     必须后台：`GET /models` 是网络请求，超时 10 秒——放主线程会把对话框卡住。
     失败**不算异常**：不少厂商（火山方舟只认推理接入点 ID、部分自建网关）根本没有
@@ -1080,23 +1080,26 @@ class ModelListWorker(BaseWorker):
     """
 
     listed = Signal(object)  # list[str]
+    catalog_listed = Signal(object)  # list[ModelInfo]
 
     def __init__(self, profile, parent=None) -> None:
         super().__init__(parent)
         self._profile = profile
 
     def work(self) -> None:  # noqa: D102
-        from app.core.cloud import list_models
+        from app.core.cloud import list_model_catalog
 
         try:
-            models = list_models(self._profile)
+            catalog = list_model_catalog(self._profile)
         except ProviderError as exc:
             self.fail(exc.describe())
             return
         except Exception as exc:  # noqa: BLE001 - 任何异常都变成可读原因
             self.fail(str(exc))
             return
+        models = [item.name for item in catalog]
         self.listed.emit(models)
+        self.catalog_listed.emit(catalog)
 
 
 class EnvCheckWorker(BaseWorker):

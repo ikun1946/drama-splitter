@@ -333,7 +333,11 @@ class TestLeftColumnFitsItsWidth:
         pane.resize(self.COLUMN, 700)
         qapp_process(pane)
         budget = self.COLUMN - 32 - 8     # 32 = 卡片内边距，8 = 网格水平间距
-        for left, right in (("btn_lock", "btn_unlock"), ("btn_confirm", "btn_snap")):
+        # 锁定 / 解除已合成一个开关（``btn_lock`` 文案随状态切换），四个按钮排 2×2。
+        for left, right in (
+            ("btn_set_boundary", "btn_lock"),
+            ("btn_snap", "btn_confirm"),
+        ):
             need = (
                 getattr(pane, left).minimumSizeHint().width()
                 + getattr(pane, right).minimumSizeHint().width()
@@ -410,10 +414,30 @@ class TestProviderDialogFits:
             dialog.close()
 
     def test_dialog_cannot_be_shrunk_below_its_content(self, qapp):
-        """最小宽度必须跟住初始宽度：QDialog 默认能缩到外壳的 720px。"""
+        """最小宽度必须跟住内容：内容放得下时，拖到最小也不许裁。
+
+        原先这条断言是 ``minimumWidth() >= width() - 1``——只有当最小宽度被写死
+        成初始宽度时才成立。现在最小尺寸按内容算，并且**夹在屏幕可用区内**：小屏
+        （离屏 800px、或 1024 宽的老机器）上内容本来就比屏幕宽，此时只能保证
+        "不超出屏幕"，由纵向滚动承载，因此断言取 ``min(内容, 屏幕)``。
+        """
+        from app.gui.dialogs.base import DialogShell
+
         dialog = self._dialog(qapp)
         try:
-            assert dialog.minimumWidth() >= dialog.width() - 1
+            need = dialog.minimumSizeHint().width()
+            limit_w, _ = DialogShell._screen_limits()
+            expected = min(need, limit_w)
+            assert dialog.minimumWidth() >= expected - 1, (
+                f"最小宽 {dialog.minimumWidth()} 小于 min(内容 {need}, 屏幕 {limit_w})"
+            )
+            if dialog.minimumWidth() >= need:
+                area = self._widest_area(dialog)
+                dialog.resize(dialog.minimumWidth(), dialog.height())
+                qapp.processEvents()
+                assert area.horizontalScrollBar().maximum() == 0, (
+                    "缩到最小宽度后内容被横向裁切"
+                )
         finally:
             dialog.close()
 

@@ -20,7 +20,7 @@ __all__ = ["SettingsDialog"]
 
 class SettingsDialog(DialogShell):
     def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
-        super().__init__("分集设置", parent, width=980, height=720)
+        super().__init__("分集设置", parent, width=1120, height=720)
         self.state = state
 
         self.form = SettingsForm(state, self)

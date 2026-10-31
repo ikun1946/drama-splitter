@@ -27,8 +27,9 @@ class ModelSetupDialog(DialogShell):
         *,
         config_path: Path | None = None,
     ) -> None:
-        # 改版后每张卡只剩一个下拉 + 一句状态，720 高会空掉大半屏
-        super().__init__("模型设置", parent, width=880, height=460)
+        # 每张卡只剩一个下拉 + 一句状态；去掉外层滚动容器后正文最小高约 564，
+        # 所以请求 600 而不是原来的 460——460 会把页脚提示压到可视区外。
+        super().__init__("模型设置", parent, width=880, height=600)
         self.form = ModelSetupForm(state, self, config_path=config_path)
         self.add_body(self.form)
         self.footer_hint.setText(

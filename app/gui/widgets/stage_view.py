@@ -237,9 +237,7 @@ class StageView(QWidget):
             return
         self.preview.set_frame_info(frame_index=media.frame_index_at(Fraction(seconds)))
         self.preview.set_image(image)
-        self.preview.timecode.setText(
-            f"{format_timecode(Fraction(seconds))}　（{seconds:.3f}s）"
-        )
+        self._show_timecode(Fraction(seconds))
 
     def step_frames(self, delta: int) -> None:
         media = self.state.media
@@ -253,11 +251,20 @@ class StageView(QWidget):
 
     def _set_position(self, position: Fraction) -> None:
         self.position = position
-        self.preview.timecode.setText(
-            f"{format_timecode(position)}　（{float(position):.3f}s）"
-        )
+        self._show_timecode(position)
         self.timeline.set_playhead(position)
         self.position_changed.emit(position)
+
+    def _show_timecode(self, position: Fraction) -> None:
+        """时间码只显示一次，秒数进 tooltip。
+
+        原先这里写 ``00:00:00.000　（12.345s）``——同一时刻说两遍，全角空格又宽，
+        与「总时长 · 帧号」并排时两个标签都会被压窄、末尾被裁（实测需要 420/435px，
+        一行只给 389px）。秒数对精确定位仍有意义，因此留在 tooltip 里。
+        """
+        text = format_timecode(position)
+        self.preview.timecode.setText(text)
+        self.preview.timecode.setToolTip(f"{text}　（{float(position):.3f}s）")
 
     def _on_position(self, seconds: float) -> None:
         # 播放中每帧都来，只更新轻量显示（timeline.set_playhead 有缓存，不重建静态层）

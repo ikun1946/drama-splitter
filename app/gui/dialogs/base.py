@@ -106,6 +106,22 @@ class DialogShell(QDialog):
         holder.setLayout(self._footer)
         self._outer.addWidget(holder)
 
+    def fit_minimum_to_content(self) -> None:
+        """把最小尺寸抬到内容真正需要的程度，但绝不越过屏幕可用区。
+
+        ``MIN_WIDTH`` 只是外壳的下限；内容比它宽时，用户仍能把窗口拖到内容被裁
+        （「保存并测试连接」被切一半就是这一类）。取三者的较大者：
+        外壳下限、**初始设计宽度**、内容所需。带上初始宽度是因为
+        ``minimumSizeHint()`` 在构造期还没量准（样式与布局要 show 之后才定型），
+        宁可先按设计宽度锁住，也不能让最小值暂时偏小、露出可裁的窗口。
+        """
+        max_w, max_h = self._screen_limits()
+        need = self.minimumSizeHint()
+        self.setMinimumSize(
+            min(max(self.MIN_WIDTH, self.width(), need.width()), max_w),
+            min(max(self.MIN_HEIGHT, self.height(), need.height()), max_h),
+        )
+
     def add_close_button(self, text: str = "关闭") -> QPushButton:
         button = QPushButton(text)
         # QSS 的 min-height 不进 minimumSizeHint：不显式给高度时按钮会被压扁

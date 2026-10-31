@@ -2,9 +2,9 @@
 
 为什么要单独一层
 ----------------
-厂商的 ``GET /models`` **只返回模型名**——上下文窗口、是否多模态、能不能思考，
-接口里一个字段都没有。想要这些参数只有两条路：内置知识库 + 名称模式推断，
-或者让用户手填。这个模块就是前者的落点，后者的数据结构。
+不少厂商的 ``GET /models`` 只返回模型名；也有一些网关会附上下文窗口、
+输入模态或能力字段。厂商真正返回了元数据时优先使用它；没返回时才用内置
+知识库 + 名称模式推断，再不行由用户手填。这个模块承载解析之后的统一结构。
 
 **未知就留空**
 --------------
@@ -31,7 +31,9 @@ from dataclasses import dataclass
 
 __all__ = [
     "ModelInfo",
+    "from_catalog_item",
     "infer_model_info",
+    "merge_catalog_info",
     "format_context",
     "estimate_max_input_chars",
     "REASONING_LEVELS",
@@ -52,6 +54,163 @@ MODALITY_LABELS: dict[str, str] = {
     "image": "图像",
     "audio": "音频",
 }
+
+#: 模型清单返回体里的上下文窗口字段（按可信度从高到低）。
+#: 覆盖 OpenAI 兼容网关常见写法、OpenRouter 的顶层字段与 Hugging Face 卡片字段。
+_CONTEXT_KEYS: tuple[str, ...] = (
+    "context_window",
+    "context_length",
+    "max_context_length",
+    "max_context_tokens",
+    "max_input_tokens",
+    "input_token_limit",
+)
+
+#: 上下文窗口可能藏在嵌套对象里；每个元组是一条由外到内的路径。
+_CONTEXT_PATHS: tuple[tuple[str, ...], ...] = (
+    ("limits", "context_window"),
+    ("limits", "context_length"),
+    ("limits", "max_input_tokens"),
+    ("top_provider", "context_length"),
+    ("architecture", "context_window"),
+)
+
+#: 输入模态字段：有的网关给 ``["text","image"]``，有的给 ``{input_modalities: …}``。
+_MODALITY_KEYS: tuple[str, ...] = (
+    "input_modalities",
+    "input_modality",
+    "supported_modalities",
+    "modalities",
+    "modality",
+)
+_MODALITY_PATHS: tuple[tuple[str, ...], ...] = (
+    ("architecture", "input_modalities"),
+    ("architecture", "input_modality"),
+    ("architecture", "modalities"),
+)
+
+#: 网关/模型卡里常见的模态别名 → 本程序的三个内部值。
+_MODALITY_ALIASES: dict[str, str] = {
+    "text": "text",
+    "language": "text",
+    "image": "image",
+    "vision": "image",
+    "audio": "audio",
+    "speech": "audio",
+}
+
+
+def _positive_int(value: object) -> int:
+    """把厂商返回的窗口字段转成正整数；读不出或非正数返回 0。"""
+    if isinstance(value, bool):
+        return 0
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return number if number > 0 else 0
+
+
+def _nested_value(item: dict, path: tuple[str, ...]) -> object:
+    value: object = item
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _catalog_context(item: dict) -> tuple[int, str]:
+    """从一条 /models 条目读上下文窗口，返回 ``(值, 来源字段)``。"""
+    for key in _CONTEXT_KEYS:
+        value = _positive_int(item.get(key))
+        if value:
+            return value, key
+    for path in _CONTEXT_PATHS:
+        value = _positive_int(_nested_value(item, path))
+        if value:
+            return value, ".".join(path)
+    return 0, ""
+
+
+def _catalog_modalities(item: dict) -> tuple[tuple[str, ...], str]:
+    """从一条 /models 条目读输入模态，返回 ``(内部模态, 来源字段)``。"""
+    raw: object = None
+    source = ""
+    for key in _MODALITY_KEYS:
+        candidate = item.get(key)
+        if candidate not in (None, "", [], {}):
+            raw, source = candidate, key
+            break
+    if raw is None:
+        for path in _MODALITY_PATHS:
+            candidate = _nested_value(item, path)
+            if candidate not in (None, "", [], {}):
+                raw, source = candidate, ".".join(path)
+                break
+    if raw is None:
+        return (), ""
+
+    values = raw if isinstance(raw, list) else [raw]
+    picked: list[str] = []
+    for value in values:
+        text = str(value or "").strip().lower()
+        alias = _MODALITY_ALIASES.get(text)
+        if alias and alias not in picked:
+            picked.append(alias)
+    return tuple(key for key in MODALITIES if key in picked), source
+
+
+def from_catalog_item(item: object) -> ModelInfo | None:
+    """把厂商 ``/models`` 的一条字典解析成 :class:`ModelInfo`。
+
+    只认能确定的事实：名称、上下文窗口、输入模态。厂商没有给的字段保持
+    空值（0 / 空元组）；**不用名称推断补这里的空**，让调用方能区分
+    “接口明确返回了”与“本地猜的”。不是字典或缺模型名时返回 None。
+
+    适配的常见形状包括：
+
+    - 顶层 ``context_length`` / ``context_window`` / ``max_input_tokens``；
+    - OpenRouter 风格 ``top_provider.context_length``、``architecture.input_modalities``；
+    - ``limits.context_window`` 这类嵌套对象；
+    - ``input_modalities`` / ``modalities`` 字符串或数组。
+    """
+    if not isinstance(item, dict):
+        return None
+    name = str(
+        item.get("id") or item.get("name") or item.get("model") or ""
+    ).strip()
+    if not name:
+        return None
+    context_window, context_source = _catalog_context(item)
+    modalities, modality_source = _catalog_modalities(item)
+    if not context_window and not modalities:
+        return None
+    sources = [source for source in (context_source, modality_source) if source]
+    return ModelInfo(
+        name=name,
+        context_window=context_window,
+        modalities=modalities,
+        source="catalog",
+        note="厂商 /models 返回：" + "、".join(sources),
+    )
+
+
+def merge_catalog_info(current: ModelInfo, incoming: ModelInfo) -> ModelInfo:
+    """把厂商返回的规格合并到现有档案；**手动值始终优先**。
+
+    - ``manual``：一个字段都不覆盖，避免刷新模型列表后冲掉用户手填；
+    - ``catalog`` / ``auto``：用接口给出的非空上下文和模态补齐空位；
+      接口没给某一项时保留原值（可能是名称推断值）。
+    """
+    if current.source == "manual":
+        return current
+    return current.with_updates(
+        context_window=current.context_window or incoming.context_window,
+        modalities=current.modalities or incoming.modalities,
+        source="catalog" if (incoming.context_window or incoming.modalities) else current.source,
+        note=incoming.note or current.note,
+    )
 
 #: 中英混排的经验值：中文约 1 字 1 token，英文约 4 字符 1 token，混排取中间值。
 #: 偏保守（宁可少截断），因为截多了会静默丢掉台词证据。
@@ -91,7 +250,7 @@ class ModelInfo:
     reasoning: str = ""
     #: 支持的模态；空元组 = 未知，不做能力过滤。
     modalities: tuple[str, ...] = ()
-    #: 这些值是怎么来的："auto" 自动推断 / "manual" 用户手填
+    #: 这些值是怎么来的："catalog" 厂商 /models / "auto" 名称推断 / "manual" 手填
     source: str = "auto"
     #: 自动推断的依据，展示在 tooltip 上，方便用户判断该不该信
     note: str = ""
@@ -161,7 +320,7 @@ class ModelInfo:
             context_window=positive_int("context_window"),
             reasoning=reasoning,
             modalities=modalities,
-            source=source if source in ("auto", "manual") else "auto",
+            source=source if source in ("catalog", "auto", "manual") else "auto",
             note=str(data.get("note") or "").strip(),
         )
 

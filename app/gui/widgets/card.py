@@ -20,6 +20,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from ..theme import ACCENT_BAR_H, ACCENT_BAR_W, SPACE_MD
+
 #: 可用的语义色条档位。None = 不显示色条（默认）。
 ACCENTS = ("primary", "success", "warn", "danger")
 
@@ -51,8 +53,8 @@ class Card(QFrame):
             header_layout.setSpacing(8)
             self._accent_bar = QFrame(header)
             self._accent_bar.setProperty("role", "accent-bar")
-            self._accent_bar.setFixedWidth(3)
-            self._accent_bar.setFixedHeight(15)
+            self._accent_bar.setFixedWidth(ACCENT_BAR_W)
+            self._accent_bar.setFixedHeight(ACCENT_BAR_H)
             header_layout.addWidget(
                 self._accent_bar, 0, Qt.AlignmentFlag.AlignVCenter
             )
@@ -78,8 +80,10 @@ class Card(QFrame):
                 old_widget.deleteLater()
             self.body_layout = body_layout
             self.body.setLayout(self.body_layout)
-        self.body_layout.setContentsMargins(16, 16, 16, 16)
-        self.body_layout.setSpacing(12)
+        # 卡片正文的内边距由 QSS 的 QFrame[role="card-body"] 统一给 12px。
+        # 这里再写 16 会与 QSS 叠加成 28，卡片一边厚一边薄（实测 label.x=28）。
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(SPACE_MD)
         outer.addWidget(self.body, 1)
 
     def set_accent(self, accent: str | None) -> None:

@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from .cloud_anthropic import AnthropicChatTransport
 from .cloud_gemini import GeminiChatTransport
-from .cloud_openai import OpenAiAsrTransport, OpenAiChatTransport, list_models as _list_openai_models
+from .cloud_openai import (
+    OpenAiAsrTransport,
+    OpenAiChatTransport,
+    list_model_catalog as _list_openai_catalog,
+    list_models as _list_openai_models,
+)
+from .model_info import ModelInfo
 from .cloud_volc import VolcFlashAsrTransport
 from .providers import (
     PROTO_LABELS,
@@ -32,7 +38,12 @@ from .providers import (
     ProviderProfile,
 )
 
-__all__ = ["build_asr_transport", "build_judge_transport", "list_models"]
+__all__ = [
+    "build_asr_transport",
+    "build_judge_transport",
+    "list_model_catalog",
+    "list_models",
+]
 
 #: 语义判断协议 → 适配器工厂。方舟的 chat 也是 OpenAI 形态，所以没有"火山"这一项。
 JUDGE_BUILDERS = {
@@ -106,6 +117,30 @@ def list_models(profile: ProviderProfile) -> list[str]:
     """
     if profile.judge_protocol == PROTO_OPENAI or profile.asr_protocol == PROTO_OPENAI:
         return _list_openai_models(
+            profile.base_url,
+            profile.resolved_api_key(),
+            use_system_proxy=profile.use_system_proxy,
+        )
+    protocol = (
+        profile.judge_protocol
+        if profile.judge_protocol != "disabled"
+        else profile.asr_protocol
+    )
+    label = PROTO_LABELS.get(protocol, protocol)
+    raise ProviderError(
+        f"「{label}」协议没有通用的 /models 清单接口，请手动填写模型名"
+    )
+
+
+def list_model_catalog(profile: ProviderProfile) -> list[ModelInfo]:
+    """按协议拉取模型清单，保留厂商返回的上下文窗口与输入模态。
+
+    与 :func:`list_models` 同源：只有 OpenAI 兼容协议有可用的 ``/models``
+    元数据端点。返回顺序与名称列表一致（按名称排序），没有元数据的模型
+    仍以空档案出现，界面不会因此丢掉模型名。
+    """
+    if profile.judge_protocol == PROTO_OPENAI or profile.asr_protocol == PROTO_OPENAI:
+        return _list_openai_catalog(
             profile.base_url,
             profile.resolved_api_key(),
             use_system_proxy=profile.use_system_proxy,

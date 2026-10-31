@@ -38,7 +38,7 @@ from ..core.probe import check_compatibility
 from .panes import AnalysisPane, ImportPane, ReviewPane, scrollable
 from .stage import Stage, current_stage
 from .state import ProjectState
-from .widgets import DropZone, Inspector, InspectorIssue, StageView
+from .widgets import Card, DropZone, Inspector, InspectorIssue, StageView
 from .widgets import message
 
 __all__ = ["Workbench"]
@@ -50,7 +50,7 @@ class _EmptyView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.drop_zone = DropZone()
-        hint = QLabel("拖入视频文件，或点右下角「选择源视频…」")
+        hint = QLabel("把视频文件拖到这里，或点底栏的「选择源视频…」")
         hint.setProperty("role", "subtitle")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -63,11 +63,46 @@ class _EmptyView(QWidget):
         outer.addStretch(2)
 
 
-#: 左栏两屏各自的最小宽度。审核页那几张卡需要 ~330px；导入页改版后自身只要
-#: ~200px（按内容算，不给额外下限）。下限跟着**当前页**走：钉死整条左栏会让
-#: 用户在导入页拖不窄，QSplitter 也会静默忽略 setSizes。
+#: 左栏各屏的最小宽度。审核页那几张卡需要 ~340px；导入页与空态占位卡按内容算
+#: 就够（不给额外下限）。下限跟着**当前页**走：钉死整条左栏会让用户在导入页
+#: 拖不窄，QSplitter 也会静默忽略 setSizes。
 LEFT_REVIEW_MIN_WIDTH = 340
-LEFT_IMPORT_MIN_WIDTH = 0
+#: 导入页给 300 而不是 0：下限设 0 时，窄窗口里 QSplitter 会把左栏压到 180 上下，
+#: 「素材」卡的信息网格被折成两行、音轨下拉只剩几个字。少掉的宽度由中栏让（预览
+#: 画面本来就是可伸缩的）。
+LEFT_IMPORT_MIN_WIDTH = 300
+
+
+class _EmptyLeft(QWidget):
+    """空态的左栏：一张「素材」占位卡。
+
+    空态原先直接把左栏藏起来（``left_stack.setVisible(False)``）。代价是布局
+    在导入完成的一瞬间跳动一次，而且「素材」这个入口恰好在用户最需要它的
+    时刻消失——用户看到的只是一条突然变宽的舞台，不知道该把文件放哪儿。
+    留一张只读占位卡，三栏骨架从第一帧就是稳定的。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.title = QLabel("还没有导入源视频")
+        self.title.setWordWrap(True)
+        self.support = QLabel("支持 .mp4 / .mov / .mkv，拖入中栏或点底栏按钮")
+        self.support.setProperty("role", "muted")
+        self.support.setWordWrap(True)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(16, 12, 16, 16)
+        body.setSpacing(6)
+        body.addWidget(self.title)
+        body.addWidget(self.support)
+        body.addStretch(1)
+        card = Card("素材", self, body_layout=body)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(12)
+        outer.addWidget(card)
+        outer.addStretch(1)
 
 
 class Workbench(QWidget):
@@ -93,19 +128,28 @@ class Workbench(QWidget):
         self.stage_view = StageView(state, self)
         self.inspector = Inspector(self)
         self.empty_view = _EmptyView(self)
+        self.empty_left = _EmptyLeft(self)
 
-        # 三栏各自一个 stack：换的是"屏"，不是"页"
+        # 三栏各自一个 stack：换的是"屏"，不是"页"。左栏三屏顺序与阶段一致：
+        # 空态占位 → 素材（导入）→ 集列表；空态也不再隐藏左栏（见 _EmptyLeft）。
         self._left_import = scrollable(self.import_pane)
         self._left_review = scrollable(self.review_pane)
         self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(self.empty_left)
         self.left_stack.addWidget(self._left_import)
         self.left_stack.addWidget(self._left_review)
-        # 下限只钉在**审核页**上：它那几张卡需要 ~330px；导入页改版后自身只要 ~200px，
-        # 所以不能钉在整条左栏上（那样用户就拖不窄了，分割器还会"设不动"）。
-        # QStackedWidget 取当前页的最小宽度，于是两种页面各按自己的需要占位。
+        # 下限只钉在**审核页**上：它那几张卡需要 ~340px；导入页与空态占位卡按内容
+        # 算就够，所以不能钉在整条左栏上（那样用户就拖不窄了，分割器还会"设不动"）。
+        # QStackedWidget 取当前页的最小宽度，于是各屏按自己的需要占位。
 
+        # 空态 hero 套一层纵向滚动容器：拖放区里不换行的「支持 .mp4 / …」那行
+        # 自带 ~645px 最小宽度，而 QStackedWidget 取**所有页**的最大最小宽度——
+        # 于是它即使在审核态也顶着中栏，1180 的窗口里左栏 340 + 中栏 645
+        # + 右栏 280 放不下。装进滚动容器后，中栏的最小宽度只由当前真正显示的
+        # 舞台（预览/时间轴/进度）决定。
+        self._center_empty = scrollable(self.empty_view)
         self.center_stack = QStackedWidget()
-        self.center_stack.addWidget(self.empty_view)
+        self.center_stack.addWidget(self._center_empty)
         self.center_stack.addWidget(self.stage_view)
         self.center_stack.addWidget(self.analysis_pane)
 
@@ -117,11 +161,12 @@ class Workbench(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        # 左栏 360 而不是原设计的 320：按钮内边距 14→16、卡片内边距 12→16 之后，
-        # 「切点操作」那三张卡的实际最小宽度到了 330px。栏宽不改的话，
+        # 左栏 340 而不是原设计的 320：按钮内边距 14→16、卡片内边距 12→16 之后，
+        # 「切点操作」那三张卡的实际最小宽度到了 ~330px。栏宽不改的话，
         # `scrollable()` 关掉的横滚动条会让内容**静默裁切**（用户看到的是按钮被切
-        # 掉半截、集列表少一列）。360 留出余量，让以后再加一两个字也不会立刻越界。
-        self.splitter.setSizes([360, 780, 300])
+        # 掉半截、集列表少一列）。340 与 LEFT_REVIEW_MIN_WIDTH 一致，只留最小余量
+        # ——1180 宽的窗口里，左栏多占一像素都得从中栏挪。
+        self.splitter.setSizes([340, 760, 300])
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -175,16 +220,18 @@ class Workbench(QWidget):
 
         if self.stage is Stage.REVIEW:
             self.left_stack.setCurrentWidget(self._left_review)
-            # 审核页的卡片需要 ~330px 才不被裁；导入页只要 ~200px
+            # 审核页的卡片需要 ~340px 才不被裁；其余两屏按内容算就够
             self.left_stack.setMinimumWidth(LEFT_REVIEW_MIN_WIDTH)
             self.review_pane.refresh()
+        elif self.stage is Stage.EMPTY:
+            self.left_stack.setCurrentWidget(self.empty_left)
+            self.left_stack.setMinimumWidth(LEFT_IMPORT_MIN_WIDTH)
         else:
             self.left_stack.setCurrentWidget(self._left_import)
             self.left_stack.setMinimumWidth(LEFT_IMPORT_MIN_WIDTH)
-        self.left_stack.setVisible(self.stage is not Stage.EMPTY)
 
         if self.stage is Stage.EMPTY:
-            self.center_stack.setCurrentWidget(self.empty_view)
+            self.center_stack.setCurrentWidget(self._center_empty)
         elif self.stage is Stage.ANALYZING:
             self.center_stack.setCurrentWidget(self.analysis_pane)
         else:
@@ -247,7 +294,7 @@ class Workbench(QWidget):
     def _on_analysis_started(self) -> None:
         """新一次分析开始：清掉上一轮的转写诊断问题，别让旧警告留在右栏。"""
         self._dialogue_issues = []
-        self.refresh(inspector_tab=2)
+        self.refresh(inspector_tab=1)
 
     def can_reparse(self) -> tuple[bool, str]:
         """能否「重新解析」：有源片、且当前没有分析在跑。"""

@@ -13,7 +13,7 @@
 - Inspector                            —— 右侧常驻检查器（问题 / 建议 / 日志）
 - NoWheel*                             —— 滚轮不改值的数值框 / 下拉框
 - SectionHeaderDelegate                —— 下拉里的分组标题（画成弱化、不可点的样子）
-- scrollable / h_scrollable            —— 滚动容器助手
+- scrollable                           —— 只纵向滚动的容器助手
 - message                              —— 统一弹窗出口（子模块，用 message.xxx 调用）
 """
 
@@ -31,7 +31,7 @@ from .model_list import ModelList
 from .model_table import ModelTable
 from .no_wheel import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
 from .progress_bar import CapsuleProgressBar
-from .scroll_area import h_scrollable, scrollable
+from .scroll_area import scrollable
 from .section_delegate import SectionHeaderDelegate
 from .stage_view import StageView
 from .status_pill import StatusPill
@@ -59,6 +59,5 @@ __all__ = [
     "StageView",
     "StatusPill",
     "TimelineRuler",
-    "h_scrollable",
     "scrollable",
 ]

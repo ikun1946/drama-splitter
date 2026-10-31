@@ -38,25 +38,25 @@ from PySide6.QtWidgets import QApplication
 
 # 与颜色无关的令牌：两套主题共用
 #
-# 圆角 6/10/16 配合间距 4/8/12/16/24 与字号 11/13/15/18，构成一套一致的尺度。
+# 圆角 4/6/10/16 配合间距 4/8/12/16/24 与字号 11/13/15/18/32，构成一套一致的尺度。
 # **输入框与按钮的圆角必须 ≤ 高度/2**，否则 Qt 在四个角上会露出底色。
-RADIUS_SM = 6        # 输入框、进度条
+RADIUS_XS = 4        # 细色条等"几乎只是切了个角"的小元素
+RADIUS_SM = 6        # 输入框、进度条、滚动条把手
 RADIUS_MD = 10       # 按钮、列表项、浮层
 RADIUS_LG = 16       # 卡片、分组块
 RADIUS_PILL = 999    # 胶囊标签（日志级别点、状态徽章）
 
-#: 8px 间距网格。原先各处随手写 10 / 14 / 18，模块间对不齐。
+#: 4px 间距网格（4/8/12/16/24）。
+#: 6/10/14/18 这类值不在网格上，模板里保持原值并就地注释，不硬凑。
 SPACE_XS = 4
 SPACE_SM = 8
 SPACE_MD = 12
 SPACE_LG = 16
 SPACE_XL = 24
 
-SPACE_XS = 4
-SPACE_SM = 8
-SPACE_MD = 12
-SPACE_LG = 16
-SPACE_XL = 24
+#: 卡片标题左侧语义色条的尺寸（原先 QSS 与 card.py 各写一遍字面量）。
+ACCENT_BAR_W = 3
+ACCENT_BAR_H = 15
 
 FONT_FAMILY = (
     "'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif"
@@ -64,8 +64,9 @@ FONT_FAMILY = (
 FONT_SYMBOL = "'Segoe UI Symbol', 'Segoe UI Emoji', 'Microsoft YaHei UI'"
 FONT_MONO = "Consolas, 'Cascadia Mono', 'Source Code Pro', monospace"
 
-# 字号阶：11 / 13 / 15 / 18。原先只有 11/12/14 三档，级差太小，
-# 除少数几处外整屏看不出层次。
+# 字号阶：11 / 13 / 15 / 18 / 32。原先只有 11/12/14 三档，级差太小，
+# 除少数几处外整屏看不出层次。HERO 只给空态大图标留位（原 48pt 越阶）。
+FONT_SIZE_HERO = 32
 FONT_SIZE_DISPLAY = 18
 FONT_SIZE_TITLE = 15
 FONT_SIZE_BODY = 13
@@ -89,6 +90,7 @@ TOKENS: dict[str, dict[str, str]] = {
         "WARN": "#9a6700",
         "WARN_SOFT": "#fbf2dd",
         "INFO": "#3d6b35",
+        "INFO_SOFT": "#e9f2e4",
         "SUCCESS": "#2e7d32",
         "SUCCESS_SOFT": "#e7f4ea",
         "NEUTRAL": "#5f6672",
@@ -130,6 +132,7 @@ TOKENS: dict[str, dict[str, str]] = {
         "WARN": "#e0b355",
         "WARN_SOFT": "#3a3320",
         "INFO": "#7fc47a",
+        "INFO_SOFT": "#24331f",
         "SUCCESS": "#6cc47a",
         "SUCCESS_SOFT": "#1f3325",
         "NEUTRAL": "#8a8f98",
@@ -185,20 +188,6 @@ def tokens(mode: str = DEFAULT_MODE) -> dict[str, str]:
     if mode not in TOKENS:
         mode = DEFAULT_MODE
     return TOKENS[mode]
-
-
-# 兼容旧引用：默认浅色的扁平常量。
-# 内部一律走 TOKENS，新代码请直接使用 tokens(mode)[...]。
-COLOR_PRIMARY = TOKENS[DEFAULT_MODE]["PRIMARY"]
-COLOR_DANGER = TOKENS[DEFAULT_MODE]["DANGER"]
-COLOR_WARN = TOKENS[DEFAULT_MODE]["WARN"]
-COLOR_INFO = TOKENS[DEFAULT_MODE]["INFO"]
-COLOR_SUCCESS = TOKENS[DEFAULT_MODE]["SUCCESS"]
-COLOR_BG = TOKENS[DEFAULT_MODE]["BG"]
-COLOR_BG_ALT = TOKENS[DEFAULT_MODE]["BG_ALT"]
-COLOR_BORDER = TOKENS[DEFAULT_MODE]["BORDER"]
-COLOR_TEXT = TOKENS[DEFAULT_MODE]["TEXT"]
-COLOR_TEXT_MUTED = TOKENS[DEFAULT_MODE]["TEXT_MUTED"]
 
 
 # ---------------------------------------------------------------------------
@@ -267,23 +256,15 @@ QLabel[role="muted"] {{
     font-size: {FONT_SIZE_CAPTION}pt;
 }}
 
-/* 卡片标题 */
-QLabel[role="card-title-text"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-}}
-
-/* 状态徽章 */
-QLabel[role="pill"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-}}
-
 /* 后端徽章（本地 / 云端）——只描述现状，不可点，所以没有 hover/pressed */
+/* 圆角原先写死 9px，实际含义是"高度的一半"。用胶囊令牌表达同一意图：
+   Qt 会把超过半高的半径夹到半高，既不露角，也不会随标签换行而失配。 */
 QLabel[role="badge"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: {FONT_SIZE_CAPTION}pt;
     color: {PRIMARY_PRESSED};
     background: {PRIMARY_SOFT};
-    border-radius: 9px;
+    border-radius: {RADIUS_PILL}px;
     padding: 1px 9px;
 }}
 QLabel[role="badge"][tone="warn"] {{
@@ -315,6 +296,7 @@ QTabBar::tab {{
     border-bottom: none;
     border-top-left-radius: {RADIUS_SM}px;
     border-top-right-radius: {RADIUS_SM}px;
+    /* 6 / 14 不在 4px 网格上：14 是"16 减掉 2px 边框"的结果，标签页要靠它压窄才排得下 */
     padding: 6px 14px;
     margin-right: 2px;
 }}
@@ -343,7 +325,7 @@ QPushButton {{
     color: {TEXT};
     border: 1px solid {BORDER_STRONG};
     border-radius: {RADIUS_MD}px;
-    padding: 8px 12px;
+    padding: {SPACE_SM}px {SPACE_MD}px;
     min-height: 20px;
 }}
 
@@ -410,6 +392,8 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
+    /* 6 / 10 不在 4px 网格上：输入框高度按 34 定（6×2 + 20 + 2），换成 8/12
+       会把整屏表单撑高 4px；聚焦态还要各减 1px（见下一条），网格值减 1 更偏离。 */
     padding: 6px 10px;
     min-height: 20px;
     selection-background-color: {BG_SELECTED};
@@ -470,7 +454,7 @@ QGroupBox {{
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
     margin-top: 14px;
-    padding: 12px 8px 8px 8px;
+    padding: {SPACE_MD}px {SPACE_SM}px {SPACE_SM}px {SPACE_SM}px;
     font-weight: 600;
 }}
 
@@ -478,6 +462,7 @@ QGroupBox::title {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     subcontrol-origin: margin;
     subcontrol-position: top left;
+    /* 0 贴边、6 压进边框：两者都不是 4px 网格上的值，保持原样 */
     padding: 0 6px;
     color: {TEXT_MUTED};
     font-weight: 600;
@@ -488,12 +473,12 @@ QListWidget {{
     background: {BG_ALT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;
-    padding: 4px;
+    padding: {SPACE_XS}px;
     outline: none;
 }}
 
 QListWidget::item {{
-    padding: 8px 12px;
+    padding: {SPACE_SM}px {SPACE_MD}px;
     border-radius: {RADIUS_SM}px;
     color: {TEXT};
 }}
@@ -592,29 +577,30 @@ QFrame[role="card-title"] {{
     border-bottom: 1px solid {BORDER};
     border-top-left-radius: {RADIUS_LG}px;
     border-top-right-radius: {RADIUS_LG}px;
-    padding: {SPACE_MD}px {SPACE_LG}px;
+    /* 卡片内边距统一 12：标题四边都走 SPACE_MD */
+    padding: {SPACE_MD}px;
 }}
 
+/* 顶部留 0：标题自己已有 12px 下边距，body 再加 12 会把"标题↔正文"撑成 24。
+   card.py 里 body 布局另设 16px 外边距，所以最终缩进是 12 + 16；
+   这里只保证 QSS 这一层的声明统一为 12。 */
 QFrame[role="card-body"] {{
     background: {BG_ALT};
     border: none;
-    padding: {SPACE_LG}px;
+    padding: 0 {SPACE_MD}px {SPACE_MD}px {SPACE_MD}px;
 }}
 
 /* 卡片标题左侧的语义色条：彩色点缀只出现在这种小面积元素上，
-   大面积色块在 QSS 里最容易失控（圆角处露底、深浅两套难同步）。 */
+   大面积色块在 QSS 里最容易失控（圆角处露底、深浅两套难同步）。
+   尺寸走 ACCENT_BAR_* 令牌；tone 配色由 _tone_rules() 统一生成，此处不再重写。 */
 QFrame[role="accent-bar"] {{
     border: none;
-    border-radius: 2px;
-    min-width: 3px;
-    max-width: 3px;
+    border-radius: {RADIUS_XS}px;
+    min-width: {ACCENT_BAR_W}px;
+    max-width: {ACCENT_BAR_W}px;
+    min-height: {ACCENT_BAR_H}px;
+    max-height: {ACCENT_BAR_H}px;
 }}
-
-QFrame[role="accent-bar"][tone="primary"] {{ background: {PRIMARY}; }}
-QFrame[role="accent-bar"][tone="success"] {{ background: {SUCCESS}; }}
-QFrame[role="accent-bar"][tone="warn"] {{ background: {WARN}; }}
-QFrame[role="accent-bar"][tone="danger"] {{ background: {DANGER}; }}
-QFrame[role="accent-bar"][tone="none"] {{ background: transparent; }}
 
 QLabel[role="card-title-text"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
@@ -633,30 +619,8 @@ QLabel[role="pill"] {{
     font-weight: 600;
 }}
 
-QLabel[role="pill"][tone="primary"] {{
-    background: {PRIMARY_SOFT};
-    color: {PRIMARY_PRESSED};
-}}
-
-QLabel[role="pill"][tone="success"] {{
-    background: {SUCCESS_SOFT};
-    color: {SUCCESS};
-}}
-
-QLabel[role="pill"][tone="warn"] {{
-    background: {WARN_SOFT};
-    color: {WARN};
-}}
-
-QLabel[role="pill"][tone="danger"] {{
-    background: {DANGER_SOFT};
-    color: {DANGER};
-}}
-
-QLabel[role="pill"][tone="muted"] {{
-    background: {NEUTRAL_SOFT};
-    color: {TEXT_MUTED};
-}}
+/* pill 的 tone 配色不在这里逐条写死：与 accent-bar 共用 _tone_rules()
+   里同一份 (tone → 令牌) 表，避免同一个语义色两处各写一遍、改一处漏一处。 */
 
 /* ===== 空态 ===== */
 /* 原先所有空态都是一行居中的小字（"暂无问题。"），右栏 95% 面积就那么一句话。 */
@@ -682,48 +646,6 @@ QLabel[role="empty-title"] {{
 QLabel[role="empty-detail"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-size: {FONT_SIZE_BODY}pt;
-    color: {TEXT_MUTED};
-    background: transparent;
-}}
-
-/* ===== 集列表行 ===== */
-/* 原先是 QTableWidget，四列被挤到出横向滚动条。改用行卡片后每行自成一格。 */
-QFrame[role="episode-row"] {{
-    background: {BG_ALT};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS_MD}px;
-}}
-
-QFrame[role="episode-row"][selected="true"] {{
-    border: 1px solid {PRIMARY};
-    background: {PRIMARY_SOFT};
-}}
-
-QLabel[role="episode-no"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: {FONT_SIZE_CAPTION}pt;
-    font-weight: 600;
-    color: {TEXT_MUTED};
-    background: {NEUTRAL_SOFT};
-    border-radius: {RADIUS_SM}px;
-}}
-
-QFrame[role="episode-row"][selected="true"] QLabel[role="episode-no"] {{
-    background: {PRIMARY};
-    color: {TEXT_INVERSE};
-}}
-
-QLabel[role="episode-title"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: {FONT_SIZE_BODY}pt;
-    font-weight: 500;
-    color: {TEXT};
-    background: transparent;
-}}
-
-QLabel[role="episode-meta"] {{
-    font-family: {FONT_MONO};
-    font-size: {FONT_SIZE_CAPTION}pt;
     color: {TEXT_MUTED};
     background: transparent;
 }}
@@ -775,16 +697,6 @@ QLabel[role="log-foldmark"] {{
     background: transparent;
     border-left: 2px solid {BORDER};
     padding-left: 10px;
-}}
-
-/* ===== 分区小标题（工作台三栏顶部） ===== */
-/* 不用 letter-spacing：Qt 的 QSS 不支持它，写了不会报错也不会生效。 */
-QLabel[role="section-label"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: {FONT_SIZE_CAPTION}pt;
-    font-weight: 600;
-    color: {TEXT_MUTED};
-    background: transparent;
 }}
 
 /* ===== 云端模型首屏 ===== */
@@ -843,7 +755,8 @@ QScrollBar:vertical {{
 
 QScrollBar::handle:vertical {{
     background: {BORDER_STRONG};
-    border-radius: 5px;
+    /* 5px 是"把手宽度 10 的一半"，改成 RADIUS_SM(6) 后 Qt 会夹到半宽，视觉完全一致 */
+    border-radius: {RADIUS_SM}px;
     min-height: 24px;
 }}
 
@@ -863,7 +776,8 @@ QScrollBar:horizontal {{
 
 QScrollBar::handle:horizontal {{
     background: {BORDER_STRONG};
-    border-radius: 5px;
+    /* 5px 是"把手宽度 10 的一半"，改成 RADIUS_SM(6) 后 Qt 会夹到半宽，视觉完全一致 */
+    border-radius: {RADIUS_SM}px;
     min-width: 24px;
 }}
 
@@ -941,6 +855,8 @@ QPushButton[role="inspector-tab"] {{
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
+    /* 0 是刻意的：选中态靠底部 2px 实线贴合分隔线，圆角会把那条线咬断。
+       6px 垂直内边距不在网格上，它和 2px 下边框一起凑出标签高度。 */
     border-radius: 0;
     padding: 6px 4px;
     color: {TEXT_MUTED};
@@ -968,7 +884,8 @@ QFrame[role="issue-row"] {{
 
 QFrame[role="issue-bar"] {{
     border: none;
-    border-radius: 2px;
+    /* 原 2px：色条只有几像素宽，RADIUS_XS 会被 Qt 夹到半宽，等于原来的圆头 */
+    border-radius: {RADIUS_XS}px;
 }}
 
 QFrame[role="issue-bar"][tone="danger"] {{
@@ -1022,19 +939,21 @@ QPushButton[role="ghost"]:hover {{
     border-radius: {RADIUS_SM}px;
 }}
 
-/* 预览控制条紧凑档：10 个按钮单行，默认 padding 6px 14px 时总宽
-   超过中栏可用宽度，控制条会横向滚动（见 MediaPreview 的 h_scrollable） */
-QPushButton[role="mini"] {{
+/* 紧凑档（第二档的窄版）：控制条收成 5 键 + 「步进」菜单后仍需紧凑档，
+   否则主栏会被按钮的最小宽度顶宽、把预览画面挤扁。
+   role="mini" 是历史别名，与 compact="true" 共用同一组声明——两档视觉必须
+   一致，否则同一屏里"紧凑按钮"会长出两种尺寸。 */
+QPushButton[compact="true"], QPushButton[role="mini"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    padding: 4px 8px;
+    padding: {SPACE_XS}px {SPACE_SM}px;
     font-size: {FONT_SIZE_CAPTION}pt;
 }}
 
 QPushButton[role="primary"][compact="true"] {{
-    padding: 4px 8px;
+    padding: {SPACE_XS}px {SPACE_SM}px;
 }}
 
-/* ===== 顶栏 / 状态条 / 底栏（原先散在各控件里的硬编码颜色收拢于此） ===== */
+/* ===== 顶栏 / 底栏（原先散在各控件里的硬编码颜色收拢于此） ===== */
 QFrame[role="app-bar"] {{
     background: {BG_ALT};
     border-bottom: 1px solid {BORDER};
@@ -1044,18 +963,13 @@ QLabel[role="app-bar-title"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     font-weight: 600;
     color: {TEXT};
-    padding: 0 16px;
-}}
-
-QFrame[role="status-strip"] {{
-    background: {BG};
-    border-bottom: 1px solid {BORDER};
+    padding: 0 {SPACE_LG}px;
 }}
 
 QLabel[role="status-text"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
     color: {TEXT_MUTED};
-    padding: 0 16px;
+    padding: 0 {SPACE_LG}px;
 }}
 
 QFrame[role="footer-bar"] {{
@@ -1063,13 +977,6 @@ QFrame[role="footer-bar"] {{
     border-top: 1px solid {BORDER};
 }}
 
-QLabel[role="hint"] {{
-    font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    color: {WARN};
-    padding: 0 16px;
-}}
-
-/* ===== 拖放导入区文字（inline 样式改角色，深浅主题各取令牌） ===== */
 /* ===== 拖放导入区 ===== */
 /* drop-zone 整个区域是自绘的（虚线框、悬停高亮都在 DropZone.paintEvent 里），
    这里只给它一个无边框的容器底色，免得默认 QFrame 的边框切进圆角里。 */
@@ -1079,20 +986,21 @@ QFrame[role="drop-zone"] {{
     border-radius: {RADIUS_LG}px;
 }}
 
+/* 空态大图标：原来 48pt 完全在字阶之外，收进 HERO（32pt）仍是最醒目的一档 */
 QLabel[role="drop-icon"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 48pt;
+    font-size: {FONT_SIZE_HERO}pt;
     background: transparent;
 }}
 
 QLabel[role="drop-icon"][compact="true"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 20pt;
+    font-size: {FONT_SIZE_DISPLAY}pt;
 }}
 
 QLabel[role="drop-title"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 14pt;
+    font-size: {FONT_SIZE_BODY}pt;
     font-weight: 600;
     color: {TEXT};
     background: transparent;
@@ -1100,14 +1008,14 @@ QLabel[role="drop-title"] {{
 
 QLabel[role="drop-title"][compact="true"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 10pt;
+    font-size: {FONT_SIZE_CAPTION}pt;
     font-weight: 400;
     color: {TEXT_MUTED};
 }}
 
 QLabel[role="drop-hint"] {{
     font-family: {FONT_SYMBOL}, {FONT_FAMILY};
-    font-size: 10pt;
+    font-size: {FONT_SIZE_CAPTION}pt;
     color: {TEXT_MUTED};
     background: transparent;
 }}
@@ -1194,14 +1102,6 @@ QLabel[role="video-canvas"] {{
     border: 1px solid {VIDEO_BORDER};
 }}
 
-QLabel[role="mono-hud"] {{
-    font-family: {FONT_MONO};
-    font-size: {FONT_SIZE_MONO}pt;
-    color: {HUD_TEXT};
-    background: {HUD_BG};
-    padding: 4px 10px;
-}}
-
 /* 预览下方的「当前时间」：这一行是"现在在哪"，比旁边的总时长/帧号更该被看见 */
 QLabel[role="timecode-now"] {{
     font-family: {FONT_MONO};
@@ -1212,10 +1112,52 @@ QLabel[role="timecode-now"] {{
 """
 
 
+# ---------------------------------------------------------------------------
+# tone 配色：pill 与 accent-bar 共用同一份数据
+# ---------------------------------------------------------------------------
+#: tone → (pill 底色, pill 文字色, 色条实心色)，都是令牌名。
+#: 两处共用这张表，改一处不会漏另一处；INFO_SOFT 也因此有了用处。
+_TONE_COLORS: dict[str, tuple[str, str, str]] = {
+    "primary": ("PRIMARY_SOFT", "PRIMARY_PRESSED", "PRIMARY"),
+    "success": ("SUCCESS_SOFT", "SUCCESS", "SUCCESS"),
+    "warn": ("WARN_SOFT", "WARN", "WARN"),
+    "danger": ("DANGER_SOFT", "DANGER", "DANGER"),
+    "info": ("INFO_SOFT", "INFO", "INFO"),
+    "muted": ("NEUTRAL_SOFT", "TEXT_MUTED", "NEUTRAL"),
+}
+
+#: pill 支持的 tone（muted 是"无可强调"档，色条上没有对应语义）
+_PILL_TONES = ("primary", "success", "warn", "danger", "info", "muted")
+#: accent-bar 支持的 tone（与 Card.ACCENTS 对齐，另加 info）
+_ACCENT_TONES = ("primary", "success", "warn", "danger", "info")
+
+
+def _tone_rules(palette: dict[str, str]) -> str:
+    """由同一张 tone 表生成 pill / accent-bar 的配色规则。"""
+    lines: list[str] = []
+    for tone in _PILL_TONES:
+        soft, text, _solid = _TONE_COLORS[tone]
+        lines.append(
+            f'QLabel[role="pill"][tone="{tone}"] '
+            f"{{ background: {palette[soft]}; color: {palette[text]}; }}"
+        )
+    for tone in _ACCENT_TONES:
+        _soft, _text, solid = _TONE_COLORS[tone]
+        lines.append(
+            f'QFrame[role="accent-bar"][tone="{tone}"] '
+            f"{{ background: {palette[solid]}; }}"
+        )
+    lines.append(
+        'QFrame[role="accent-bar"][tone="none"] { background: transparent; }'
+    )
+    return "\n".join(lines)
+
+
 def build_stylesheet(mode: str = DEFAULT_MODE) -> str:
     """按主题模式渲染全局样式表。"""
     palette = dict(tokens(mode))
     # 派生量：不在 TOKENS 里，避免两套字典要多写派生键
+    palette["RADIUS_XS"] = RADIUS_XS
     palette["RADIUS_SM"] = RADIUS_SM
     palette["RADIUS_MD"] = RADIUS_MD
     palette["RADIUS_LG"] = RADIUS_LG
@@ -1226,19 +1168,18 @@ def build_stylesheet(mode: str = DEFAULT_MODE) -> str:
     palette["SPACE_MD"] = SPACE_MD
     palette["SPACE_LG"] = SPACE_LG
     palette["SPACE_XL"] = SPACE_XL
+    palette["ACCENT_BAR_W"] = ACCENT_BAR_W
+    palette["ACCENT_BAR_H"] = ACCENT_BAR_H
     palette["FONT_FAMILY"] = FONT_FAMILY
     palette["FONT_SYMBOL"] = FONT_SYMBOL
     palette["FONT_MONO"] = FONT_MONO
+    palette["FONT_SIZE_HERO"] = FONT_SIZE_HERO
     palette["FONT_SIZE_DISPLAY"] = FONT_SIZE_DISPLAY
     palette["FONT_SIZE_TITLE"] = FONT_SIZE_TITLE
     palette["FONT_SIZE_BODY"] = FONT_SIZE_BODY
     palette["FONT_SIZE_CAPTION"] = FONT_SIZE_CAPTION
     palette["FONT_SIZE_MONO"] = FONT_SIZE_MONO
-    return _RAW_TEMPLATE.format(**palette)
-
-
-# 兼容旧引用：默认浅色样式表
-STYLESHEET = build_stylesheet(DEFAULT_MODE)
+    return _RAW_TEMPLATE.format(**palette) + "\n" + _tone_rules(palette)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,8 +1187,51 @@ STYLESHEET = build_stylesheet(DEFAULT_MODE)
 # ---------------------------------------------------------------------------
 
 
+def build_palette(mode: str = DEFAULT_MODE):
+    """按令牌生成 QPalette，与样式表一起切换。
+
+    为什么光有样式表不够
+    -------------------
+    QSS 只覆盖它显式写到的属性。没写 ``background`` 的容器——``QStackedWidget`` 的页、
+    ``QScrollArea`` 的视口、``QTabWidget`` 的 pane、不设 role 的自绘 ``QFrame``——
+    会退回**系统调色板**。系统是浅色时，深色主题下就冒出一块块白板（实测：日志面板
+    亮度 239、模型列表行 217、导出的统计条 239，满分 255）。因此两套主题必须连调色板
+    一起换，而不是只换字符串。
+    """
+    from PySide6.QtGui import QColor, QPalette
+
+    t = tokens(mode)
+    palette = QPalette()
+    for role, key in (
+        (QPalette.ColorRole.Window, "BG"),
+        (QPalette.ColorRole.WindowText, "TEXT"),
+        (QPalette.ColorRole.Base, "BG_ALT"),
+        (QPalette.ColorRole.AlternateBase, "BG_LOG"),
+        (QPalette.ColorRole.Text, "TEXT"),
+        (QPalette.ColorRole.Button, "BG_ALT"),
+        (QPalette.ColorRole.ButtonText, "TEXT"),
+        (QPalette.ColorRole.ToolTipBase, "BG_ALT"),
+        (QPalette.ColorRole.ToolTipText, "TEXT"),
+        (QPalette.ColorRole.PlaceholderText, "TEXT_MUTED"),
+        (QPalette.ColorRole.Highlight, "PRIMARY"),
+    ):
+        palette.setColor(role, QColor(t[key]))
+    # 选中项上的文字要能在强调色上读：浅色主色偏深 → 白字；深色主色偏亮 → 深字
+    palette.setColor(
+        QPalette.ColorRole.HighlightedText,
+        QColor("#ffffff" if mode != "dark" else t["BG"]),
+    )
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(t["TEXT_MUTED"]))
+    return palette
+
+
 def apply_theme(app: QApplication | None = None, mode: str = DEFAULT_MODE) -> None:
-    """把全局样式表注入到 QApplication。
+    """把全局样式表与调色板注入到 QApplication。
 
     mode 取 ``"light"`` / ``"dark"``；非法值退回默认浅色，不抛异常。
     同一 mode 下多次调用幂等（字符串相同，不做无谓的 setStyleSheet）。
@@ -1257,6 +1241,16 @@ def apply_theme(app: QApplication | None = None, mode: str = DEFAULT_MODE) -> No
     if app is None:
         return
     sheet = build_stylesheet(mode)
+    # 顺序要紧：样式表在 polish 时会把当时的调色板**快照**到每个控件上。先设调色板
+    # 再注入样式表，控件才拿到新主题的底色；反过来做，深色下会留下一批浅色快照
+    # （实测右栏 QStackedWidget 页仍是 #f4f5f9）。
+    #
+    # 只在下真变了的时候设：setPalette 会向每个控件发 PaletteChange 并触发样式重新
+    # 解析——真实窗口（233 个控件）约 0.08s 可接受，但同一个 QApplication 里累积
+    # 上千个控件时会被放大到几十秒（测试套件里实测过）。
+    palette = build_palette(mode)
+    if app.palette() != palette:
+        app.setPalette(palette)
     if app.styleSheet() != sheet:
         app.setStyleSheet(sheet)
     global _CURRENT_MODE

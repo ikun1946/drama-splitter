@@ -3,8 +3,15 @@
 由 ``app/gui/dialogs/export_dialog.py`` 的 ExportDialog 承载；对话框负责
 §37 前置检查的决策（可覆写 ``request_precheck``），本表单只负责执行。
 
-界面分两层：首屏只回答"导几集、放哪儿、有多大"，编码器参数收进
-「调整编码参数」；导出队列占主体高度，空方案时显示空态而不是空白表。
+界面分两层：首屏只回答"导几集、放哪儿"，编码器参数收进「调整编码参数」；
+导出队列占主体高度，空方案时显示空态而不是空白表。
+
+同一个数只说一遍：集数与总时长原先在概览标题、三块概览数字、队列徽章和表头
+各写一遍（同一句话四遍），现在只有顶部那一行（``summary_stats``）。
+
+布局不随「调整编码参数」重排：编码区折叠/展开时队列的最小高度是固定值
+（``QUEUE_MIN_HEIGHT``），面板位置四种状态一致，原有的"勾一下就从单列切成
+46/54 双栏、队列最小高在 0↔100 之间跳"整体移除。
 """
 
 from __future__ import annotations
@@ -70,6 +77,11 @@ __all__ = ["ExportForm", "export_precheck", "precheck_prompt", "review_target"]
 #: 同进程内不重复付这个成本。
 _NVENC_CACHE: dict[str, bool] = {}
 
+#: 队列表的最小高度（px）。固定值而不是随「调整编码参数」切换 0↔100：
+#: 队列是这一屏的主体，编码参数是不是展开，都不该让它的可视区域跳一次。
+#: 200 ≈ 表头 + 4 行；再高就会把 720 屏上"设置卡 + 队列"顶出可视区。
+QUEUE_MIN_HEIGHT = 200
+
 
 class _QueueCard(Card):
     """队列卡：参与滚动区尺寸计算时只报一个紧凑高度。
@@ -84,19 +96,17 @@ class _QueueCard(Card):
         hint = super().sizeHint()
         # 与表格的最小高度保持一致。过小会让 QScrollArea 按此提示把队列卡
         # 压到只露表头，再靠整页滚动补足；用户看到的就是最后一行被底栏盖住。
-        return QSize(hint.width(), 180)
+        return QSize(hint.width(), QUEUE_MIN_HEIGHT)
 
 
-def _format_duration(seconds) -> str:
-    """导出概览用的短时长：120 秒 → 2 分 00 秒；小时以上带小时。"""
-    total = int(round(float(seconds)))
+def _clock(seconds) -> str:
+    """概览那一行用的紧凑时长：120 秒 → ``2:00``，3661 秒 → ``1:01:01``。"""
+    total = max(0, int(round(float(seconds))))
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
     if hours:
-        return f"{hours} 时 {minutes:02d} 分"
-    if minutes:
-        return f"{minutes} 分 {secs:02d} 秒"
-    return f"{secs} 秒"
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 def nvenc_cached(binaries) -> bool:
@@ -202,7 +212,7 @@ class ExportForm(QWidget):
         #
         # 旧版第一张卡直接是 CRF / preset / 音频码率这些编码器词汇，用户打开
         # 导出页最想知道的是"会输出几集、放哪儿、能不能开始"。参数收进
-        # 「进阶编码设置」，首屏只保留结论与三个关键动作。
+        # 「进阶编码设置」，首屏只保留结论与一行统计。
         self.summary_title = QLabel("准备导出", self)
         self.summary_title.setProperty("role", "export-heading")
         self.summary_detail = QLabel("", self)
@@ -221,21 +231,18 @@ class ExportForm(QWidget):
         summary_head.addLayout(summary_text, 1)
         summary_head.addWidget(self.summary_state, 0, Qt.AlignmentFlag.AlignTop)
 
-        self.metric_episodes = QLabel("—", self)
-        self.metric_episodes.setProperty("role", "export-metric-value")
-        self.metric_duration = QLabel("—", self)
-        self.metric_duration.setProperty("role", "export-metric-value")
-        self.metric_size = QLabel("—", self)
-        self.metric_size.setProperty("role", "export-metric-value")
-        metrics = QHBoxLayout()
-        metrics.setContentsMargins(0, 0, 0, 0)
-        metrics.setSpacing(8)
-        for caption, value in (
-            ("集数", self.metric_episodes),
-            ("总时长", self.metric_duration),
-            ("预计占用（按码率）", self.metric_size),
-        ):
-            metrics.addWidget(self._metric(caption, value), 1)
+        # 集数与总时长只在这一行出现：``约 60 集 · 总时长 58:12``。
+        # 它原先还同时出现在标题、另外两块数字、队列徽章和表头说明里，
+        # 读的人要在四处核对同一个结论。编码方式、方案版本这些**不同的**信息
+        # 仍留在 ``summary_detail``，不与这一行重复。
+        self.summary_stats_caption = QLabel("本次导出", self)
+        self.summary_stats_caption.setProperty("role", "export-metric-caption")
+        self.summary_stats = QLabel("等待分集方案", self)
+        self.summary_stats.setProperty("role", "export-metric-value")
+        self.summary_stats.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        stats_strip = self._stat_line(self.summary_stats_caption, self.summary_stats)
 
         # ---- 输出位置 ---------------------------------------------------
         self.output_edit = QLineEdit(self)
@@ -243,9 +250,14 @@ class ExportForm(QWidget):
         self.output_edit.setPlaceholderText("还没有选择输出目录")
         self.btn_output = QPushButton("选择目录…", self)
         self.btn_output.clicked.connect(self._choose_output)
+        # 行内小标题：原先它是独占一行的小节标题，与下面这行的输入框在说同一件事，
+        # 白占 28px——720 屏上正好是队列被裁掉的那一行。
+        output_caption = QLabel("输出位置", self)
+        output_caption.setProperty("role", "provider-step")
         output_row = QHBoxLayout()
         output_row.setContentsMargins(0, 0, 0, 0)
         output_row.setSpacing(8)
+        output_row.addWidget(output_caption)
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.btn_output)
 
@@ -320,10 +332,7 @@ class ExportForm(QWidget):
         setup_card = self.setup_card
         setup_card.body_layout.setSpacing(8)
         setup_card.body_layout.addLayout(summary_head)
-        setup_card.body_layout.addLayout(metrics)
-        section = QLabel("输出位置", setup_card)
-        section.setProperty("role", "provider-step")
-        setup_card.body_layout.addWidget(section)
+        setup_card.body_layout.addWidget(stats_strip)
         setup_card.body_layout.addLayout(output_row)
         setup_card.body_layout.addLayout(recap_row)
         setup_card.body_layout.addWidget(self.recap_hint)
@@ -339,8 +348,10 @@ class ExportForm(QWidget):
         self._sync_codec_fields()
 
         self.queue = QTableWidget(0, 5)
+        # 表头只留列名。原先第 5 列写作「说明（含前情回顾）」——那半句是把
+        # 前情回顾的规则又讲了一遍，而它已经写在概览那一行里了。
         self.queue.setHorizontalHeaderLabels(
-            ["集号", "状态", "帧数 / 校验", "时长", "说明（含前情回顾）"]
+            ["集号", "状态", "帧数 / 校验", "时长", "说明"]
         )
         header = self.queue.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -352,25 +363,16 @@ class ExportForm(QWidget):
         self.queue.setAlternatingRowColors(True)
         self.queue.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.queue.verticalHeader().setVisible(False)
-        self.queue.setMinimumHeight(0)
 
         queue_card = _QueueCard("导出队列", parent=self)
-        # 卡片按自然高度参与布局时，会只给队列表 192px；队列卡占用剩余空间，
-        # 表格才能把 6 集都显示出来。
-        queue_card.setMinimumHeight(0)
         # QScrollArea 会按内容最小高度撑开：队列卡必须允许被压缩，否则
         # 正文高度永远等于“设置卡 + 队列表自然高度”，不是可视高度。
         queue_card.setMinimumHeight(0)
-        self.queue.setMinimumHeight(0)
         queue_card.body.setMinimumHeight(0)
         queue_card.body_layout.setStretch(0, 1)
-        # 表格只保留表头高度；正文会占用剩余空间，队列卡按视口长高。
-        # 若给表格固定 4 行下限，QScrollArea 会保留正文自然高度，最后一行
-        # 正好落到折叠线以下，看起来像被底栏盖住。
-        self._base_queue_min_height = 100
-        self.queue.setMinimumHeight(self._base_queue_min_height)
-        self.queue_count = StatusPill("0 集", "muted", self)
-        queue_card.add_header_widget(self.queue_count)
+        # 队列高度是**固定下限**：勾不勾「调整编码参数」这一屏都不重排，
+        # 队列也不会在 0↔100 之间跳。编码参数只是原地折叠/展开。
+        self.queue.setMinimumHeight(QUEUE_MIN_HEIGHT)
         queue_card.body_layout.addWidget(self.queue, 1)
         # 队列必须能被压缩（内部滚动），否则小屏上它的最小高度会把底部
         # 进度和按钮顶出视口——截图里表现为“队列只剩表头”。
@@ -434,8 +436,10 @@ class ExportForm(QWidget):
         # 不足时由外层滚动区兜底，而不是把队列表压成两行。
         self.setMinimumHeight(0)
         body.setMinimumHeight(0)
-        # 编码参数展开后设置卡自然高度约 600px，单列会把队列挤出首屏。
-        # 展开时改为左右两栏：左 46% 放设置，右 54% 始终放队列。
+        # 布局只有这一种：设置卡在上（编码参数原地折叠），队列卡占满剩余高度。
+        # 不再有"展开了就切成 46/54 双栏"的第二套排布——两套排布意味着勾一次
+        # 复选框整屏重排，而用户只是想看看 CRF。队列高度由 QUEUE_MIN_HEIGHT
+        # 固定，展开时多出来的高度由外层滚动区吸收。
         self.body_layout = body_layout
         self.setup_card = setup_card
         self.queue_card = queue_card
@@ -443,7 +447,6 @@ class ExportForm(QWidget):
         # 自行决定正文高度，表格拿到的空间会大于可视区，截图里表现为
         # 队列表的最后几行被底部进度条盖住。这里把正文 layout 绑定到视口。
         body_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
-        self.setup_card_size_hint = setup_card.sizeHint().height()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
@@ -472,26 +475,33 @@ class ExportForm(QWidget):
         self.progress.setMaximumHeight(24)
         self._refresh_recap()
 
-    def _metric(self, caption: str, value: QLabel) -> QWidget:
-        """一个概览数字：小标题在上、数值在下。"""
+    def _stat_line(self, caption: QLabel, value: QLabel) -> QWidget:
+        """概览里唯一的统计行：一个框，一句结论。
+
+        角色 ``export-metric`` / ``-caption`` / ``-value`` 仍各用一次（主题侧
+        的反向闭包测试要求 QSS 里定义的 role 都在代码里出现过），但**只有一个
+        实例**——不再是并排三块、每块重复一遍别的块已经写过的数。
+        """
         holder = QWidget(self)
         holder.setProperty("role", "export-metric")
-        layout = QVBoxLayout(holder)
+        layout = QHBoxLayout(holder)
         layout.setContentsMargins(12, 7, 12, 7)
-        layout.setSpacing(1)
-        label = QLabel(caption, holder)
-        label.setProperty("role", "export-metric-caption")
+        layout.setSpacing(10)
+        caption.setParent(holder)
         value.setParent(holder)
-        layout.addWidget(label)
+        layout.addWidget(caption)
         layout.addWidget(value)
+        layout.addStretch(1)
         return holder
 
     def _toggle_advanced(self, checked: bool) -> None:
+        """编码参数原地展开／收起。
+
+        不做整体重排：原先这里把设置卡与队列卡从纵向布局搬进 46/54 的横向
+        布局，同时把队列最小高度从 100 改成 0——勾一下复选框，整屏跳一次位，
+        队列表还会先塌成一条。现在只折叠这一段，队列高度不变。
+        """
         self.advanced_host.setVisible(bool(checked))
-        # 展开时两栏排布，收起时恢复单列；两种状态都保持设置卡完整高度。
-        # 展开时用两栏排布：把设置卡与队列卡从纵向布局移到横向布局；
-        # 收起时移回纵向，首屏仍保持“概览 + 队列”的单列结构。
-        self._rebuild_body_layout(side_by_side=checked)
 
     def _recap_value(self) -> int:
         """当前要带上的前情时长（秒）；未开启返回 0。"""
@@ -523,15 +533,25 @@ class ExportForm(QWidget):
         if enabled:
             self.recap_hint.setVisible(True)
         self._refresh_queue_recap(seconds)
+        plan = self.state.current_plan
         if plan is not None:
-            episodes = plan.episodes()
-            total = sum(
-                (ep.duration_seconds for ep in episodes),
-                episodes[0].duration_seconds * 0,
-            ) + seconds * max(0, len(episodes) - 1)
-            self.metric_duration.setText(_format_duration(total))
-            self._refresh_estimate()
+            self._refresh_stats(plan, recap_seconds=seconds)
         self._refresh_summary()
+
+    def _refresh_stats(self, plan, *, recap_seconds: int | None = None) -> None:
+        """把「集数 + 总时长」写进顶部那一行（唯一出处）。
+
+        ``recap_seconds`` 为 None 时按当前前情开关取值；调用方显式传入是为了
+        在开关刚变化、队列还没刷新的那一次也用新值算总数。
+        """
+        episodes = plan.episodes()
+        if recap_seconds is None:
+            recap_seconds = self._recap_value()
+        total = sum(
+            (ep.duration_seconds for ep in episodes),
+            episodes[0].duration_seconds * 0,
+        ) + recap_seconds * max(0, len(episodes) - 1)
+        self.summary_stats.setText(f"约 {len(episodes)} 集 · 总时长 {_clock(total)}")
 
     def _refresh_queue_recap(self, seconds: int) -> None:
         """队列仍处于「待导出」时，同步显示含前情回顾的预计时长。"""
@@ -555,35 +575,11 @@ class ExportForm(QWidget):
                 note = f"片头含前情回顾 {recap} 秒" if recap else ""
                 self.queue.setItem(row, 4, QTableWidgetItem(note))
 
-    def _rebuild_body_layout(self, *, side_by_side: bool) -> None:
-        layout = self.body_layout
-        if side_by_side == getattr(self, "_side_by_side", False):
-            return
-        self._side_by_side = side_by_side
-        for widget in (self.setup_card, self.queue_card):
-            layout.removeWidget(widget)
-        if side_by_side:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(12)
-            row.addWidget(self.setup_card, 46)
-            row.addWidget(self.queue_card, 54)
-            layout.addLayout(row)
-        else:
-            layout.addWidget(self.setup_card)
-            layout.addWidget(self.queue_card, 1)
-            layout.setStretch(0, 0)
-            layout.setStretch(1, 1)
-        # 收起：表格跟随视口长高，正文超高时整页滚动；展开：两栏并排，
-        # 左栏参数完整可见，右栏队列仍占满可用高度。
-        self.queue.setMinimumHeight(0 if side_by_side else self._base_queue_min_height)
-
     def _choose_output(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if directory:
             self.state.output_root = Path(directory)
             self.output_edit.setText(directory)
-            self._refresh_estimate()
 
     def refresh(self) -> None:
         if self.state.output_root is not None:
@@ -593,14 +589,11 @@ class ExportForm(QWidget):
             self.queue.setRowCount(0)
             self.queue.setVisible(False)
             self.queue_empty.setVisible(True)
-            self.queue_count.set_text("0 集")
             self.summary_title.setText("准备导出")
             self.summary_detail.setText("完成导入、分析与审核后，即可导出分集成片。")
+            self.summary_stats.setText("等待分集方案")
             self.summary_state.set_text("待开始")
             self.summary_state.set_tone("muted")
-            self.metric_episodes.setText("—")
-            self.metric_duration.setText("—")
-            self.metric_size.setText("—")
             self.btn_start.setEnabled(False)
             self._refresh_recap()
             return
@@ -608,7 +601,6 @@ class ExportForm(QWidget):
         self.queue.setVisible(True)
         self.queue_empty.setVisible(False)
         self.queue.setRowCount(len(episodes))
-        self.queue_count.set_text(f"{len(episodes)} 集")
         for row, episode in enumerate(episodes):
             recap = self._recap_value() if episode.index > 1 else 0
             cells = [
@@ -632,27 +624,8 @@ class ExportForm(QWidget):
         self._refresh_summary(plan)
         self.summary_state.set_text("待开始")
         self.summary_state.set_tone("muted")
-        self.metric_episodes.setText(f"{len(episodes)} 集")
-        recap_total = self._recap_value() * max(0, len(episodes) - 1)
-        total = sum((ep.duration_seconds for ep in episodes), episodes[0].duration_seconds * 0)
-        total += recap_total
-        self.metric_duration.setText(_format_duration(total))
-        self._refresh_estimate()
+        self._refresh_stats(plan)
         self._refresh_recap()
-
-    def _refresh_estimate(self) -> None:
-        media = self.state.media
-        if media is None:
-            self.metric_size.setText("未知")
-            return
-        plan = self.state.current_plan
-        recap_total = self._recap_value() * max(0, (plan.episode_count - 1) if plan else 0)
-        if not media.bit_rate:
-            self.metric_size.setText("未知")
-            return
-        seconds = float(media.timeline_duration) + recap_total
-        estimated = media.bit_rate * seconds / 8 * 1.1
-        self.metric_size.setText(f"约 {estimated / 1024 / 1024:.0f} MB")
 
     def _sync_codec_fields(self) -> None:
         """编码方式联动：原生复制 / GPU / CPU 下哪些参数还有意义。"""
@@ -684,15 +657,18 @@ class ExportForm(QWidget):
         self._refresh_summary()
 
     def _refresh_summary(self, plan=None) -> None:
-        """概览文案跟着编码方式走；默认必须是“不改变画质 / 音质 / 码率”。"""
+        """概览文案跟着编码方式走；默认必须是“不改变画质 / 音质 / 码率”。
+
+        集数**不写在这里**：它只出现在顶部那一行（``summary_stats``）。
+        这一段只说这一行没说过的事——方案版本与编码方式。
+        """
         plan = plan or self.state.current_plan
         if plan is None:
             return
-        self.summary_title.setText(f"准备导出 {plan.episode_count} 集成片")
-        self.summary_detail.setText(
-            f"方案 v{plan.version} · {self._codec_summary()}；"
-            "导出时逐集校验帧数。"
-        )
+        self.summary_title.setText("准备导出")
+        # 只留版本与编码方式。「导出时逐集校验帧数」是队列第 3 列表头
+        # （"帧数 / 校验"）已经说过的话，不必再占一行。
+        self.summary_detail.setText(f"方案 v{plan.version} · {self._codec_summary()}")
 
     def _codec_summary(self) -> str:
         """概览里的一句话编码说明；默认必须是原生、不改变音画。"""

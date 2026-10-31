@@ -53,13 +53,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AI 短剧智能分集器")
         self.resize(1440, 900)
-        # 三栏最小宽度预算：左 360 + 中 645（视频预览与控制条的最小宽度）
-        # + 右 280（检查器 MIN_WIDTH）≈ 1285，取 1320 留余量。
+        # 三栏最小宽度预算（1180）：左栏审核态 340 + 中栏 408（实测：
+        # 舞台 392 / 进度 408，取大者）+ 右 280（检查器 MIN_WIDTH）= 1028，
+        # 余 150 给分割器把手与滚动条边框。空态/就绪态左栏下限是 0，只会更宽裕。
         #
         # 这个数字不是随手写的：低于它，``QSplitter.setSizes`` 会被**静默忽略**，
         # 左栏被压到 170px 上下，而 ``scrollable()`` 已经关掉了横向滚动条 ——
         # 结果是内容被裁掉且没有任何报错，表现为"左侧总是看不全"。
-        self.setMinimumSize(1320, 700)
+        # 高度 720：顶栏 44 + 底栏 48 + 舞台最小高 450 = 542，还要放菜单栏与窗口边框。
+        self.setMinimumSize(1180, 720)
 
         # 主题取自应用配置（记住上次选择）；非法值在 AppConfig.load 已兜底
         self.config = AppConfig.load()
@@ -119,9 +121,8 @@ class MainWindow(QMainWindow):
         self.workbench.stage_changed.connect(lambda _stage: self._sync_chrome())
         self.workbench.state_changed.connect(self._sync_chrome)
         self.workbench.hint_changed.connect(self.bottom.set_hint)
-        self.workbench.analysis_pane.progress_changed.connect(
-            lambda _text, ratio: self.bottom.set_progress(int(ratio * 100))
-        )
+        # 分析进度只在分析页显示一处（阶段胶囊 + 总进度）。原先还镜像到这条
+        # 180px 小进度条上，同一件事在两处同时动，反而看不出该看哪个。
 
     def _sync_chrome(self) -> None:
         """把当前阶段翻译成底栏与顶栏（唯一一处读 stage 的地方）。"""
@@ -139,14 +140,13 @@ class MainWindow(QMainWindow):
             self.app_bar.set_source(Path(media.path).name, str(media.path))
         else:
             self.app_bar.set_source(None)
-        # 「重新解析」只在有源片、且当前没在分析时出现（分析中该动作无意义）
-        self.app_bar.set_reparse_enabled(
-            media is not None and stage is not Stage.ANALYZING
-        )
+        # 「重新解析」只在有源片、且当前没在分析时可用（分析中该动作无意义）。
+        # 顶栏按钮与 F5 是同一个动作的两个入口，可用性算一次、两处一起写，
+        # 免得两个入口各判一遍条件而出现「按钮灰着但 F5 能按」。
+        reparse_ok = media is not None and stage is not Stage.ANALYZING
+        self.app_bar.set_reparse_enabled(reparse_ok)
         if hasattr(self, "action_reparse"):
-            self.action_reparse.setEnabled(
-                media is not None and stage is not Stage.ANALYZING
-            )
+            self.action_reparse.setEnabled(reparse_ok)
 
         if hasattr(self, "action_dark"):
             self.action_dark.setChecked(current_mode() == "dark")

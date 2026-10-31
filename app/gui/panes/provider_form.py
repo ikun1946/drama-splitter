@@ -2,7 +2,7 @@
 
 一个界面管一家厂商的全部
 ------------------------
-左列表选厂商，右侧填写连接信息、外发许可与进阶参数，并用「保存并测试连接」
+左列表选厂商，右侧填写连接信息、外发许可与高级参数，并用「保存并测试连接」
 验证这份档案是否可用。
 
 **具体用途用哪个模型不在这里选。** 语义判断和语音转写各用什么模型，统一由
@@ -23,14 +23,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -45,6 +46,7 @@ from ...core.model_info import (
     ModelInfo,
     format_context,
     infer_model_info,
+    merge_catalog_info,
 )
 from ...core.providers import (
     CAP_ASR,
@@ -85,6 +87,19 @@ from ._common import register_worker
 __all__ = ["ProviderForm"]
 
 
+class MenuAction(QAction):
+    """「更多」菜单里的动作。
+
+    这些动作原来是左栏 / 参数区的 ``QPushButton``。收进菜单后只剩动作本身，
+    但外部脚本（``tools/gui_smoke.py``）与单测按 ``btn_xxx`` 的名字直接
+    ``click()``，所以保留同名属性并给 ``click()`` 一个别名；触发语义与
+    ``trigger()`` 完全相同，``setEnabled`` / ``isEnabled`` 是 QAction 自带的。
+    """
+
+    def click(self) -> None:
+        self.trigger()
+
+
 class ProviderForm(QWidget):
     """左栏列表 + 右栏编辑器；纯逻辑可脱离对话框单测。"""
 
@@ -98,7 +113,10 @@ class ProviderForm(QWidget):
         super().__init__(parent)
         self.state = state
         self.setMinimumWidth(820)
-        self.setMinimumHeight(620)
+        # 右栏编辑器自带滚动区，所以这里只钉一个能让左栏列表仍有几行的下限。
+        # 之前写 620 会把整个对话框的最小高度顶到屏幕可用区之外（1180×720 上
+        # 窗口高度 640 却要求 715，底栏与动作行被压出可视区）。
+        self.setMinimumHeight(420)
         self._config = AppConfig.load(config_path)
         #: 测试注入点：默认写真实 config.json，测试指到临时文件
         self._config_path = config_path
@@ -109,6 +127,9 @@ class ProviderForm(QWidget):
         self._models_worker = None
         #: (base_url, key) → 模型清单。同一家不重复拉：切换厂商来回点时不该反复打网络
         self._model_cache: dict[tuple[str, str], list[str]] = {}
+        #: (base_url, key) → 厂商 /models 返回的元数据（上下文窗口 / 输入模态）。
+        #: 与名称缓存同源；用于“刷新后自动填好对应字段”，不参与手动值的覆盖。
+        self._catalog_cache: dict[tuple[str, str], list[ModelInfo]] = {}
         #: 两条能力当前指派的模型名 + 用户手填的模型清单。模型表格只发信号，
         #: 真值存在这里；与其它字段一样，等「保存」才写进配置。
         self._judge_model = ""
@@ -138,34 +159,23 @@ class ProviderForm(QWidget):
         self.search.setPlaceholderText("搜索厂商")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_profile_filter)
-        self.btn_new = QPushButton("自定义接入")
-        self.btn_duplicate = QPushButton("复制为自定义")
-        self.btn_delete = QPushButton("删除")
-        self.btn_delete.setProperty("role", "danger")
-        self.btn_restore = QPushButton("恢复默认")
-        self.btn_new.clicked.connect(self._on_custom)
-        self.btn_duplicate.clicked.connect(self._on_duplicate)
-        self.btn_delete.clicked.connect(self._on_delete)
-        self.btn_restore.clicked.connect(self._on_restore)
-        for button in (self.btn_delete, self.btn_restore):
-            button.style().unpolish(button)
-            button.style().polish(button)
+        # 厂商的新增 / 复制 / 删除 / 恢复不再铺在左栏：左栏只负责"选哪一家"，
+        # 动作集中在右栏标题栏的「更多」菜单里，列表因此多出两行按钮的高度。
+        # 属性名仍是 btn_*（MenuAction），信号仍接原来的槽。
+        self.btn_new = MenuAction("自定义接入…", self)
+        self.btn_duplicate = MenuAction("复制为自定义…", self)
+        self.btn_delete = MenuAction("删除厂商", self)
+        self.btn_restore = MenuAction("恢复默认", self)
+        self.btn_new.triggered.connect(self._on_custom)
+        self.btn_duplicate.triggered.connect(self._on_duplicate)
+        self.btn_delete.triggered.connect(self._on_delete)
+        self.btn_restore.triggered.connect(self._on_restore)
 
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
         left.addWidget(self.search)
         left.addWidget(self.profile_list, 1)
-        # 四个动作排成 2×2：占的宽度与列表一致，比一列四行更紧凑
-        pairs = QGridLayout()
-        pairs.setContentsMargins(0, 0, 0, 0)
-        pairs.setHorizontalSpacing(8)
-        pairs.setVerticalSpacing(6)
-        for index, button in enumerate(
-            (self.btn_new, self.btn_duplicate, self.btn_delete, self.btn_restore)
-        ):
-            pairs.addWidget(button, index // 2, index % 2)
-        left.addLayout(pairs)
         left_host = QWidget(self)
         left_host.setLayout(left)
         left_host.setFixedWidth(240)
@@ -284,15 +294,15 @@ class ProviderForm(QWidget):
         modality_field = LabeledField("模态")
         modality_field.attach(modality_row)
 
-        self.btn_autofill = QPushButton("自动填充", self)
+        self.btn_autofill = MenuAction("自动填充当前模型参数", self)
         self.btn_autofill.setToolTip(
             "按模型名推断上下文窗口与模态（内置常见模型知识库 + 名称模式）。"
             "推断值是估计值，确认无误再保存。"
         )
-        self.btn_autofill.clicked.connect(self._on_autofill_info)
-        self.btn_clear_info = QPushButton("清除参数", self)
+        self.btn_autofill.triggered.connect(self._on_autofill_info)
+        self.btn_clear_info = MenuAction("清除当前模型参数", self)
         self.btn_clear_info.setToolTip("把这个模型的参数恢复成「未设置」，不影响其余模型")
-        self.btn_clear_info.clicked.connect(self._on_clear_info)
+        self.btn_clear_info.triggered.connect(self._on_clear_info)
         self.info_note = QLabel("", self)
         self.info_note.setProperty("role", "muted")
         self.info_note.setWordWrap(True)
@@ -303,13 +313,6 @@ class ProviderForm(QWidget):
         info_row.addWidget(context_field)
         info_row.addWidget(reasoning_field)
         info_row.addWidget(modality_field, 1)
-        info_actions = QHBoxLayout()
-        info_actions.setContentsMargins(0, 0, 0, 0)
-        info_actions.setSpacing(8)
-        info_actions.addWidget(self.btn_autofill)
-        info_actions.addWidget(self.btn_clear_info)
-        info_actions.addStretch(1)
-        info_row.addLayout(info_actions)
 
         # 改任何一项都立刻写回内存（表格里的标记同步刷新），但**不落盘**——
         # 与其它字段一致，等「保存」才进 config.json
@@ -335,10 +338,10 @@ class ProviderForm(QWidget):
         self.model_note = QLabel("", self)
         self.model_note.setWordWrap(True)
         self.model_note.setProperty("role", "muted")
+        # 「刷新」已移到标题栏动作行：它作用于整页（整份厂商清单），不属于某个模型。
         models_row = QHBoxLayout()
         models_row.setContentsMargins(0, 0, 0, 0)
         models_row.setSpacing(8)
-        models_row.addWidget(self.btn_refresh_models)
         models_row.addWidget(self.model_note, 1)
 
         def pair(left, right) -> QHBoxLayout:
@@ -350,7 +353,7 @@ class ProviderForm(QWidget):
             row.addWidget(right, 1)
             return row
 
-        # 火山转写的两个字段：只在火山协议下出现（与接口地址一起收进高级区）
+        # 火山转写的两个字段：只在火山协议下出现；它们是连接必需项，与接口地址同区
         self.volcano_host = QWidget(self)
         volcano = QVBoxLayout(self.volcano_host)
         volcano.setContentsMargins(0, 0, 0, 0)
@@ -358,34 +361,39 @@ class ProviderForm(QWidget):
         volcano.addLayout(pair(self.asr_endpoint_field, self.asr_resource_field))
         self.volcano_host.setVisible(False)
 
-        # ---- 高级字段：默认收起 ------------------------------------------
+        # ---- 连接必需项：默认展开 ------------------------------------------
         #
-        # 常用区只留「填 Key + 加模型」：接口地址、协议、火山专用字段、id、代理
-        # 绝大多数人一辈子不动，逐项摊在首屏反而让人以为每个都得填。收进这里，
-        # 需要时勾一下展开。
-        #
-        # 有意**不设例外**：早期版本把"必填项不许折叠"当规矩，于是接口地址与
-        # 火山 endpoint 一直占着首屏。真正会卡住保存的情况由校验给出明确报错，
-        # 且 `_validated_draft()` 会自动把本区展开——用户不会"看不到却必须填"。
-        # 文案必须短：QCheckBox 的文字是**单行不换行**的，它的 minimumSizeHint 就是
-        # 整行文字宽度。原来那句「显示高级字段（接口地址 / 协议 / 火山专用 / id / 代理）」
-        # 要 598px，把整个表单的最小宽度顶到 768px > 视口 698px，于是保存按钮那一
-        # 栏被切掉。枚举内容移到 tooltip。
-        self.advanced_toggle = QCheckBox("进阶设置（接口地址、协议、模型参数）", self)
-        self.advanced_toggle.setToolTip(
-            "接口地址 / 协议 / 火山专用字段 / 厂商 id / 代理 / 模型清单与参数"
-        )
-        self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
+        # 接口地址 / 协议 / 火山专用字段 / 厂商 id 决定"这份连接能不能用"。早先
+        # 它们和代理、模型清单一起收在折叠区里，只有保存校验失败才会被摊开——
+        # 用户于是先撞报错、再回头找字段（"为什么说缺 base_url，界面上没有"）。
+        # 现在必需项常驻，折叠区只剩「不改也能用」的高级参数。
         self.id_field = LabeledField("id（小写字母/数字/-/_，保存后不可改内置）")
         self.id_field.attach(self.edit_id)
+        self.connection_host = QWidget(self)
+        connection = QVBoxLayout(self.connection_host)
+        connection.setContentsMargins(0, 0, 0, 0)
+        connection.setSpacing(6)
+        connection.addWidget(self.base_field)
+        connection.addLayout(pair(self.judge_protocol_field, self.asr_protocol_field))
+        connection.addWidget(self.volcano_host)
+        connection.addWidget(self.id_field)
+
+        # ---- 高级参数：默认收起 --------------------------------------------
+        #
+        # 剩下的是代理与「模型清单 + 每个模型的参数」：不填也能保存，改动时要
+        # 主动看一眼。文案必须短——QCheckBox 的文字**单行不换行**，它的
+        # minimumSizeHint 就是整行文字宽度；那句把所有字段枚举一遍的旧文案要
+        # 598px，把表单最小宽度顶到 768px，保存按钮那一栏因此被切掉。枚举留在
+        # tooltip 里。
+        self.advanced_toggle = QCheckBox("高级参数（代理、模型清单）", self)
+        self.advanced_toggle.setToolTip(
+            "走系统代理；模型清单与每个模型的上下文窗口 / 思考等级 / 模态"
+        )
+        self.advanced_toggle.toggled.connect(self._refresh_field_visibility)
         self.advanced_host = QWidget(self)
         advanced = QVBoxLayout(self.advanced_host)
         advanced.setContentsMargins(0, 0, 0, 0)
         advanced.setSpacing(6)
-        advanced.addWidget(self.base_field)
-        advanced.addLayout(pair(self.judge_protocol_field, self.asr_protocol_field))
-        advanced.addWidget(self.volcano_host)
-        advanced.addWidget(self.id_field)
         advanced.addWidget(self.use_system_proxy)
         self.advanced_host.setVisible(False)
 
@@ -396,18 +404,36 @@ class ProviderForm(QWidget):
         self.hint_label.setWordWrap(True)
         self.hint_label.setProperty("role", "muted")
 
-        self.btn_save = QPushButton("仅保存", self)
+        self.btn_save = QPushButton("保存", self)
         self.btn_save.clicked.connect(self._on_save)
-        self.btn_revert = QPushButton("撤销", self)
-        self.btn_revert.clicked.connect(lambda: self._load_profile(self._profile_id))
+        self.btn_revert = MenuAction("撤销未保存的修改", self)
+        self.btn_revert.triggered.connect(lambda: self._load_profile(self._profile_id))
         self.btn_probe.setProperty("role", "primary")
+
+        # 可见动作只留四个：保存 / 保存并测试连接 / 刷新模型列表 / 更多 ▾。
+        # 「更多」用 QPushButton.setMenu：点一下直接弹菜单，样式走主题里已有的
+        # QPushButton 与 QMenu 规则，不必新增 QSS role。
+        self.btn_more = QPushButton("更多 ▾", self)
+        self.more_menu = QMenu(self.btn_more)
+        self.more_menu.addAction(self.btn_new)
+        self.more_menu.addAction(self.btn_duplicate)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction(self.btn_autofill)
+        self.more_menu.addAction(self.btn_clear_info)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction(self.btn_revert)
+        self.more_menu.addAction(self.btn_restore)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction(self.btn_delete)
+        self.btn_more.setMenu(self.more_menu)
 
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
         actions.addWidget(self.btn_probe)
         actions.addWidget(self.btn_save)
-        actions.addWidget(self.btn_revert)
+        actions.addWidget(self.btn_refresh_models)
+        actions.addWidget(self.btn_more)
         # 动作排在卡片标题栏（右上角）而不是表单末尾：正文比一屏长时需要滚动，
         # 把「保存」放在文末等于每次改完都要先滚到底
         self.actions_host = QWidget(self)
@@ -416,8 +442,8 @@ class ProviderForm(QWidget):
         # ---- 首屏：只回答"这是哪家厂商、凭据是否就绪" ----------------
         #
         # 旧版首屏同时出现 名称 / Key / 外发 / 两条能力 / 模型表 / 参数 / 保存，
-        # 用户不知道该先做什么。新版把选厂商、填 Key、确认外发许可放在首屏，
-        # 服务地址/协议/id/代理、模型清单和参数都收进进阶设置。
+        # 用户不知道该先做什么。现在首屏是「选厂商 → 填 Key → 确认外发许可 →
+        # 接口地址 / 协议」，代理与模型清单留在可折叠的高级参数里。
         self.provider_title = QLabel("", self)
         self.provider_title.setProperty("role", "provider-heading")
         self.provider_subtitle = QLabel("", self)
@@ -491,6 +517,8 @@ class ProviderForm(QWidget):
         custom_intro_layout.addWidget(self.custom_note)
         custom.addWidget(self.custom_intro)
         custom.addWidget(self.label_field)
+        # 必需项常驻；高级参数（代理）仍在这张卡片里，只是默认折叠
+        custom.addWidget(self.connection_host)
         custom.addWidget(self.advanced_host)
         self.custom_intro.setVisible(False)
         self.label_field.setVisible(False)
@@ -714,7 +742,7 @@ class ProviderForm(QWidget):
         self.profile_list.setCurrentItem(None)
         self.btn_delete.setEnabled(False)      # 还没保存的新档案无可删
         self.btn_restore.setEnabled(False)
-        self.advanced_toggle.setChecked(True)  # 新增必须先填 id / 地址 / 协议
+        # 接口地址 / 协议 / id 现在是常驻必需项，不必再为它们展开折叠区
         self._refresh_field_visibility()
         self._set_hint(
             "填好名称、接口地址与协议后，点「保存并测试连接」。"
@@ -738,7 +766,6 @@ class ProviderForm(QWidget):
         self.edit_judge_protocol.setCurrentIndex(
             self.edit_judge_protocol.findData(PROTO_OPENAI)
         )
-        self.advanced_toggle.setChecked(True)
         self._refresh_field_visibility()
         self.edit_label.setFocus()
         self._set_hint(
@@ -873,6 +900,7 @@ class ProviderForm(QWidget):
         cached = self._model_cache.get((base_url, api_key))
         if cached is not None and not force:
             self._show_models(cached, cached=True)
+            self._merge_catalog_info(self._catalog_cache.get((base_url, api_key), []))
             return
 
         self._show_models([])          # 先把已手填的显示出来，别让表格空着
@@ -880,6 +908,11 @@ class ProviderForm(QWidget):
         self.btn_refresh_models.setEnabled(False)
         worker = ModelListWorker(draft, parent=self)
         worker.listed.connect(self._on_models_listed)
+        # 信号是新增能力：兼容旧 worker / 测试替身，不让“元数据增强”
+        # 反过来把模型清单这条主链路拖死。
+        catalog_signal = getattr(worker, "catalog_listed", None)
+        if catalog_signal is not None:
+            catalog_signal.connect(self._on_catalog_listed)
         worker.failed.connect(self._on_models_failed)
         worker.finished_ok.connect(lambda: self.btn_refresh_models.setEnabled(True))
         register_worker(self, "model_list", worker)
@@ -891,6 +924,41 @@ class ProviderForm(QWidget):
         draft = self.current_draft()
         self._model_cache[(draft.base_url.strip(), draft.resolved_api_key())] = listed
         self._show_models(listed)
+
+    def _on_catalog_listed(self, catalog) -> None:
+        """接口带回元数据时，把它合并进模型参数（不覆盖用户手填的值）。"""
+        items = [
+            item for item in (catalog or []) if isinstance(item, ModelInfo)
+        ]
+        if not items:
+            return
+        draft = self.current_draft()
+        self._catalog_cache[
+            (draft.base_url.strip(), draft.resolved_api_key())
+        ] = items
+        self._merge_catalog_info(items)
+
+    def _merge_catalog_info(self, catalog) -> None:
+        """把厂商返回的规格填进对应模型；手动值与名称推断值优先。"""
+        changed = False
+        for incoming in catalog:
+            current = self._info_of(incoming.name)
+            merged = merge_catalog_info(current, incoming)
+            if merged != current:
+                self._model_info = [
+                    item for item in self._model_info if item.name != merged.name
+                ]
+                if not merged.is_empty():
+                    self._model_info.append(merged)
+                changed = True
+        if not changed:
+            return
+        self._show_models(self._fetched_models)
+        self._refresh_info_panel()
+        self._set_hint(
+            "已根据厂商 /models 返回的字段填好模型的上下文窗口与模态；"
+            "确认后点「保存」写入配置。"
+        )
 
     def _on_models_failed(self, message: str) -> None:
         """拉不到不是错误：不少厂商没有 /models（方舟只认推理接入点 ID）。"""
@@ -985,12 +1053,12 @@ class ProviderForm(QWidget):
             if needed == "文本" and not info.can_judge():
                 self._set_hint(
                     f"「{name}」的模态里没有文本，不能做{CAP_LABELS[capability]}——"
-                    "在「进阶设置 → 模型参数」里改，或换一个模型。"
+                    "在「高级参数 → 模型清单」里改，或换一个模型。"
                 )
             elif needed == "音频" and not info.can_transcribe():
                 self._set_hint(
                     f"「{name}」的模态里没有音频，不能做{CAP_LABELS[capability]}——"
-                    "在「进阶设置 → 模型参数」里改，或换一个模型。"
+                    "在「高级参数 → 模型清单」里改，或换一个模型。"
                 )
 
     # ---- 模型参数 -------------------------------------------------------
@@ -1158,7 +1226,11 @@ class ProviderForm(QWidget):
             bits.append("模态 " + "+".join(
                 MODALITY_LABELS[key] for key in MODALITIES if key in info.modalities
             ))
-        origin = "自动推断（估计值）" if info.source == "auto" else "手填"
+        origin = {
+            "catalog": "厂商接口",
+            "auto": "自动推断（估计值）",
+            "manual": "手填",
+        }.get(info.source, "自动推断（估计值）")
         if info.is_empty():
             self.info_note.setText(
                 "未设置——不截断、不发送思考等级、不做模态过滤（保持原样）。"
@@ -1227,13 +1299,8 @@ class ProviderForm(QWidget):
         problems = validate_profile(draft, existing_ids=taken)
         if problems:
             joined = "；".join(problems)
-            # 缺项（id / 接口地址 / 火山字段）都在折叠起来的高级区里：先摊开再报错，
-            # 否则用户看到"缺 base_url"却在界面上找不到这个字段。
-            if any(
-                token in joined
-                for token in ("id", "base_url", "接口地址", "asr_endpoint", "asr_resource_id")
-            ):
-                self.advanced_toggle.setChecked(True)
+            # 缺项（id / 接口地址 / 火山字段）都是常驻必需项，字段本身已经摆在
+            # 界面上，这里只需要把原因说清——不必再替用户展开任何折叠区。
             self._set_hint("保存失败：" + joined)
             return None
         return draft
@@ -1292,7 +1359,7 @@ class ProviderForm(QWidget):
             self.reload(select=draft.id)
             self._set_hint(
                 "已保存；这份档案还没有配置完整的云端能力。"
-                "展开「进阶设置」补齐接口、协议与候选模型后再测试。"
+                "补齐接口地址与协议，或在「高级参数」里选好候选模型后再测试。"
             )
             return
 
@@ -1388,10 +1455,12 @@ class ProviderForm(QWidget):
     # ---- 字段显隐与预览 -------------------------------------------------
 
     def _refresh_field_visibility(self) -> None:
-        """按协议决定哪些字段有意义，并维护"高级字段"的折叠。
+        """按协议决定哪些字段有意义，并维护"高级参数"的折叠。
 
         规则：
-        - 高级区（接口地址 / 协议 / 火山专用 / id / 代理）默认收起，需要时勾一下；
+        - 连接必需项（接口地址 / 协议 / 火山专用 / id）默认**展开**：它们是
+          "这份连接能不能用"的前提，藏起来只会让用户先撞校验报错；
+        - 高级参数（代理）与模型清单默认收起，需要时勾一下；
         - 两条能力都停用时，接口地址没有意义，连它带标题一起藏；
         - 火山转写的 asr_endpoint / asr_resource_id 按协议显隐。
 
@@ -1402,17 +1471,18 @@ class ProviderForm(QWidget):
         asr_protocol = self.edit_asr_protocol.currentData() or PROTO_DISABLED
         volcano = asr_protocol == PROTO_VOLC_ARK
 
-        # 自定义接入是例外：地址/协议就是用户来这里的全部目的，放进折叠区
-        # 等于把表单藏起来。字段容器始终存在，只切换内部字段，避免控件在
-        # 两套布局之间被 Qt 重父化。
+        # 字段容器始终存在，只切换内部字段：控件在两套布局之间搬来搬去会被 Qt
+        # 重父化，表现为内置 / 自定义模式互相串字段。
+        #
+        # 必需项（接口地址 / 协议 / 火山专用 / id）不再受折叠开关支配——见
+        # `connection_host`。折叠开关只管高级参数与模型清单。
         expanded = self.advanced_toggle.isChecked()
-        self.custom_host.setVisible(self.custom_mode or expanded)
+        self.custom_host.setVisible(True)
         self.custom_intro.setVisible(self.custom_mode)
         self.label_field.setVisible(self.custom_mode)
-        self.advanced_host.setVisible(self.custom_mode or expanded)
-        self.models_host.setVisible(
-            self.custom_mode or expanded
-        )
+        self.connection_host.setVisible(True)
+        self.advanced_host.setVisible(expanded)
+        self.models_host.setVisible(self.custom_mode or expanded)
         self.advanced_toggle.setVisible(not self.custom_mode)
         self.id_field.setVisible(not self.custom_mode)
         self.models_title.setText(

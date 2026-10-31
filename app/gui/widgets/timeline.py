@@ -64,6 +64,8 @@ class TimelineRuler(QWidget):
     MARKER_OVERHANG = 7                          # 切点竖线超出轨道的高度
     HIT_RADIUS = 6                               # 命中半径（像素）
     DRAG_THROTTLE = 1 / 30                       # 拖动播放头的发信号节流
+    # 集号两侧留白：分段宽度至少要有「字形宽 + 这么多」才画（否则贴边看不清）
+    EPISODE_LABEL_PAD = 14
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -88,6 +90,8 @@ class TimelineRuler(QWidget):
         self._static: QPixmap | None = None
         self._static_key: tuple | None = None
         self._static_rebuild_count = 0
+        #: 本次静态层里真正画出来的集号个数（测试用：见 test_episode_numbers）
+        self._episode_labels_drawn = 0
 
         # 拖拽状态
         self._drag: str | None = None                # "playhead" / "boundary"
@@ -229,6 +233,7 @@ class TimelineRuler(QWidget):
 
     def _rebuild_static(self) -> QPixmap:
         mode = current_mode()
+        self._episode_labels_drawn = 0
         # 位图必须按屏幕缩放比建：不设 devicePixelRatio 的话，在 125% / 150%
         # 缩放的屏幕上这张图会被**插值放大**——里面的时间码与刻度线全部发虚
         # （用户报「这几个数字看着很模糊」）。analysis_pane 的缩略图一直是对的，
@@ -279,12 +284,20 @@ class TimelineRuler(QWidget):
                     painter.drawEllipse(
                         rect.right() - 9, rect.top() + 5, 5, 5
                     )
-                if rect.width() >= 22:
-                    painter.setPen(QColor(qcolor(mode, "TEXT_MUTED")))
-                    font = QFont(FONT_MONO.split(",")[0].strip("'"))
-                    font.setPointSize(FONT_SIZE_CAPTION)
-                    painter.setFont(font)
-                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(index))
+                # 集号：没有它，用户得回左栏按时间对数才知道色块是哪一集。
+                # 只在分段宽度容得下整个数字时画（阈值按实际字形宽度算，不写
+                # 魔法数），窄分段让位给切点标记与导出圆点。
+                label = str(index)
+                font = QFont(FONT_MONO.split(",")[0].strip("'"))
+                font.setPointSize(FONT_SIZE_CAPTION)
+                painter.setFont(font)
+                label_w = painter.fontMetrics().horizontalAdvance(label)
+                if rect.width() >= label_w + self.EPISODE_LABEL_PAD:
+                    # 用正常文字色：11pt 的 TEXT_MUTED 压在浅底上发虚（两端时长
+                    # 标注踩过同一个坑），而集号是要被"读"的导航信息。
+                    painter.setPen(QColor(qcolor(mode, "TEXT")))
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+                    self._episode_labels_drawn += 1
 
         # 选中集顶线
         if self._selected is not None:

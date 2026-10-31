@@ -212,6 +212,25 @@ class TestModelListDispatch:
         assert seen["base_url"] == "https://api.example.com/v1"
         assert seen["api_key"] == "sk-x"
 
+    def test_openai_protocol_dispatches_catalog_with_metadata(self, monkeypatch):
+        """目录版分派也必须走同一个 /models，并带回元数据。"""
+        from app.core.model_info import ModelInfo
+
+        monkeypatch.setattr(
+            cloud,
+            "_list_openai_catalog",
+            lambda *args, **kwargs: [
+                ModelInfo(
+                    name="m1", context_window=128_000, modalities=("text",),
+                    source="catalog",
+                )
+            ],
+        )
+        profile = _profile(judge_protocol=PROTO_OPENAI, asr_protocol=PROTO_DISABLED)
+        catalog = cloud.list_model_catalog(profile)
+        assert catalog[0].context_window == 128_000
+        assert catalog[0].modalities == ("text",)
+
 
 class TestDispatchKnowsNoVendor:
     def test_cloud_module_has_no_vendor_id_literals(self):

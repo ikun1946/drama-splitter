@@ -38,7 +38,7 @@ from .cloud_http import (
     send_multipart,
     silent_wav_bytes,
 )
-from .model_info import ModelInfo, estimate_max_input_chars
+from .model_info import ModelInfo, estimate_max_input_chars, from_catalog_item
 from .providers import (
     DEFAULT_TIMEOUT,
     ProviderError,
@@ -50,7 +50,12 @@ from .providers import (
     egress_host,
 )
 
-__all__ = ["OpenAiAsrTransport", "OpenAiChatTransport", "list_models"]
+__all__ = [
+    "OpenAiAsrTransport",
+    "OpenAiChatTransport",
+    "list_model_catalog",
+    "list_models",
+]
 
 #: 音频后缀 → content-type（只收这些；`CloudAsrEngine` 实际只会给 wav / mp3）
 _ASR_FORMATS = {
@@ -95,6 +100,27 @@ def list_models(
     没有该端点），失败时抛 :class:`ProviderError`：调用方据此提示"手动填写"，
     而不是假装这家厂商没有模型。
     """
+    return [item.name for item in list_model_catalog(
+        base_url,
+        api_key,
+        use_system_proxy=use_system_proxy,
+        timeout=timeout,
+    )]
+
+
+def list_model_catalog(
+    base_url: str,
+    api_key: str,
+    *,
+    use_system_proxy: bool = False,
+    timeout: float = 10.0,
+) -> list[ModelInfo]:
+    """GET ``{base_url}/models`` → 模型名 + **接口返回的**参数档案。
+
+    与 :func:`list_models` 共用同一个请求与形状容错，区别只在返回：
+    调用方拿到的是完整元数据，可以在模型表里自动填上下文窗口与模态。
+    厂商没给上下文/模态的条目仍然保留名称，但对应字段留空——未知不猜。
+    """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         raise ProviderError("未配置接口地址（base_url），无法获取模型清单")
@@ -113,7 +139,7 @@ def list_models(
         raise ProviderError(
             "该接口没有返回模型清单（/models 可能不被支持）", status=None
         )
-    ids: list[str] = []
+    catalog: dict[str, ModelInfo] = {}
     for item in items:
         if isinstance(item, str):
             value: object = item
@@ -122,9 +148,10 @@ def list_models(
         else:
             value = None
         text = str(value or "").strip()
-        if text and text not in ids:
-            ids.append(text)
-    return sorted(ids, key=str.lower)
+        if not text or text in catalog:
+            continue
+        catalog[text] = from_catalog_item(item) or ModelInfo(name=text)
+    return sorted(catalog.values(), key=lambda info: info.name.lower())
 
 
 class OpenAiChatTransport:

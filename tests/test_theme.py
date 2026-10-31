@@ -21,10 +21,12 @@ from app.gui.theme import (
     FONT_SIZE_BODY,
     FONT_SIZE_CAPTION,
     FONT_SIZE_DISPLAY,
+    FONT_SIZE_HERO,
     FONT_SIZE_TITLE,
     RADIUS_LG,
     RADIUS_MD,
     RADIUS_SM,
+    RADIUS_XS,
     TOKENS,
     build_stylesheet,
 )
@@ -90,14 +92,20 @@ def _luminance(hex_color: str) -> float:
 
 class TestTypeAndRadiusScale:
     def test_font_sizes_are_strictly_increasing(self):
-        sizes = [FONT_SIZE_CAPTION, FONT_SIZE_BODY, FONT_SIZE_TITLE, FONT_SIZE_DISPLAY]
+        sizes = [
+            FONT_SIZE_CAPTION,
+            FONT_SIZE_BODY,
+            FONT_SIZE_TITLE,
+            FONT_SIZE_DISPLAY,
+            FONT_SIZE_HERO,
+        ]
         assert sizes == sorted(sizes)
-        assert len(set(sizes)) == 4, "字号阶必须真的分出层次，不能两档同值"
+        assert len(set(sizes)) == 5, "字号阶必须真的分出层次，不能两档同值"
         # 级差要够大，1pt 的差距在界面里看不出来
         assert min(b - a for a, b in zip(sizes, sizes[1:])) >= 2
 
     def test_radius_order(self):
-        assert RADIUS_SM < RADIUS_MD < RADIUS_LG
+        assert RADIUS_XS < RADIUS_SM < RADIUS_MD < RADIUS_LG
 
     def test_both_modes_render(self):
         for mode in ("light", "dark"):
@@ -143,19 +151,61 @@ class TestStylesheetHygiene:
         assert not leftovers, f"有占位符没被替换：{sorted(set(leftovers))}"
 
 
+_ROLE_SET_PATTERN = re.compile(
+    r'setProperty\(\s*["\']role["\']\s*,\s*["\']([a-z0-9\-]+)["\']'
+)
+
+
+def _roles_used_in_code() -> set[str]:
+    """扫 ``app/gui`` 里代码真正设置过的 role。theme.py 是定义方，本身要跳过。"""
+    used: set[str] = set()
+    for path in GUI_ROOT.rglob("*.py"):
+        if path.name == "theme.py":
+            continue
+        used.update(_ROLE_SET_PATTERN.findall(path.read_text(encoding="utf-8")))
+    return used
+
+
 class TestRoleClosure:
     def test_every_role_used_in_code_is_defined_in_qss(self):
-        used: set[str] = set()
-        pattern = re.compile(r'setProperty\(\s*["\']role["\']\s*,\s*["\']([a-z0-9\-]+)["\']')
-        for path in GUI_ROOT.rglob("*.py"):
-            if path.name == "theme.py":
-                continue
-            used.update(pattern.findall(path.read_text(encoding="utf-8")))
-
+        used = _roles_used_in_code()
         defined = set(re.findall(r'\[role="([a-z0-9\-]+)"\]', build_stylesheet("light")))
         missing = sorted(used - defined)
         assert not missing, f"代码里用了但 QSS 没定义：{missing}"
         assert used, "守卫本身失效：一条 role 都没扫到"
+
+    def test_every_defined_role_is_actually_used(self):
+        """反向闭包：QSS 里有、代码里从不设置的 role 是纯死代码。
+
+        它们不会报错，只会让模板越来越厚，还让后来人以为"这里还有组件在用"。
+        """
+        defined = set(re.findall(r'\[role="([a-z0-9\-]+)"\]', build_stylesheet("light")))
+        stale = sorted(defined - _roles_used_in_code())
+        assert not stale, f"QSS 里还有代码从不设置的 role（死样式）：{stale}"
+
+
+class TestSelectorHygiene:
+    def test_no_selector_is_defined_twice(self):
+        """同一个选择器写两遍时，后一条会静默覆盖前一条。
+
+        两处都"配过"的样子最有欺骗性：改前面那条不会有任何效果。
+        """
+        for mode in ("light", "dark"):
+            selectors = [
+                selector
+                for selector, _body in _rules(_strip_comments(build_stylesheet(mode)))
+            ]
+            duplicates = sorted({s for s in selectors if selectors.count(s) > 1})
+            assert not duplicates, f"{mode} 主题下重复定义的选择器：{duplicates}"
+
+
+class TestSpacingTokensAreUsed:
+    def test_space_tokens_referenced_at_least_eight_times(self):
+        """令牌定义了却没人引用，模板迟早退回"到处手写 6/10/14"的老路。"""
+        from app.gui import theme as theme_module
+
+        count = len(re.findall(r"\{SPACE_[A-Z]+\}", theme_module._RAW_TEMPLATE))
+        assert count >= 8, f"模板里只引用了 {count} 处 SPACE_*，间距令牌形同虚设"
 
 
 class TestProviderControlSizing:
@@ -232,11 +282,19 @@ class TestDropdownCaret:
 
     @staticmethod
     def _darkest_in_dropdown(combo, x_from: int, x_to: int) -> int:
-        """下拉区里的最深像素亮度。纯白 = 没画任何东西。"""
+        """下拉区里的最深像素亮度。纯白 = 没画任何东西。
+
+        入参是**逻辑像素**（和 QSS 里的 18px 宽度同一套坐标），采样前乘上
+        设备像素比：125% 缩放下 ``grab()`` 得到的是 375px 宽的图，直接拿逻辑
+        坐标去数会数在输入框中间，报出"箭头没画"的假警报。
+        """
         image = combo.grab().toImage()
+        scale = image.devicePixelRatio() or 1.0
         darkest = 255
-        for y in range(8, 26):
-            for x in range(x_from, x_to):
+        for y in range(int(8 * scale), int(26 * scale)):
+            for x in range(int(x_from * scale), int(x_to * scale)):
+                if not (0 <= x < image.width() and 0 <= y < image.height()):
+                    continue
                 pixel = image.pixelColor(x, y)
                 darkest = min(darkest, pixel.red(), pixel.green(), pixel.blue())
         return darkest
@@ -298,11 +356,52 @@ class TestScrollAreaPolicy:
         assert (
             area.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        # h_scrollable（预览控制条）必须重新打开，否则那排按钮会被裁掉
-        from app.gui.widgets.scroll_area import h_scrollable
-
-        row = h_scrollable(QLabel("x" * 400))
+        # 唯一允许滚动的方向是纵向；横向一旦出现就把文字藏起来，本项目不再有
+        # 任何需要横向滚动的界面（预览控制条已收成 5 键 + 步进菜单）。
         assert (
-            row.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            area.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-        assert row.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+class TestPaletteFollowsTheme:
+    """调色板必须跟着主题一起换。
+
+    只换样式表是不够的：没写 ``background`` 的容器（``QStackedWidget`` 的页、滚动
+    视口、``QTabWidget`` 的 pane）会退回**系统调色板**，深色主题下就冒出白块——实测
+    右栏页仍是 #f4f5f9、日志面板亮度 239/255。这组用例守住三件事：两套调色板的明暗、
+    ``apply_theme`` 真的换了调色板、以及**先调色板后样式表**的顺序（顺序反了，控件会
+    留下浅色快照）。
+    """
+
+    def test_dark_palette_is_dark(self):
+        from PySide6.QtGui import QPalette
+
+        from app.gui.theme import build_palette
+
+        p = build_palette("dark")
+        assert p.color(QPalette.ColorRole.Window).lightness() < 80
+        assert p.color(QPalette.ColorRole.Base).lightness() < 80
+        assert p.color(QPalette.ColorRole.Text).lightness() > 120
+
+    def test_light_palette_is_light(self):
+        from PySide6.QtGui import QPalette
+
+        from app.gui.theme import build_palette
+
+        p = build_palette("light")
+        assert p.color(QPalette.ColorRole.Window).lightness() > 200
+        assert p.color(QPalette.ColorRole.Base).lightness() > 200
+        assert p.color(QPalette.ColorRole.Text).lightness() < 120
+
+    def test_apply_theme_switches_the_palette(self, qapp):
+        from PySide6.QtGui import QPalette
+
+        from app.gui.theme import apply_theme
+
+        apply_theme(qapp, "light")
+        light = qapp.palette().color(QPalette.ColorRole.Window).lightness()
+        apply_theme(qapp, "dark")
+        dark = qapp.palette().color(QPalette.ColorRole.Window).lightness()
+        assert dark < light - 60, f"切换主题后调色板没变：{light} → {dark}"
+        assert qapp.palette().color(QPalette.ColorRole.Base).lightness() < 80
+        apply_theme(qapp, "light")   # 还原，免得影响同进程后面的用例

@@ -1,15 +1,16 @@
-"""左栏「素材」pane：素材信息网格、主对白音轨、接下来三步。
+"""左栏「素材」pane：素材信息、主对白音轨、接下来。
 
 只放"看一眼就知道素材是什么"的信息。兼容性问题不在这里重复列一遍——它们
 统一进右栏检查器的「问题」页签（同一份 ``check_compatibility`` 结果原先在
 导入区与检查器各显示一次，是明显的冗余）。
 
-版式（v2）：
-- 信息按「标签 / 值」两列排（原来三张卡片各留一大片空白，内容还被裁）；
-- 长路径折行显示，完整路径进 tooltip——QLabel 的 wordWrap 只在空格处断，
-  而路径没有空格，所以在分隔符后插零宽空格造断点（实测最小宽 252px → 84px）；
+版式（v3）：
+- 文件名升为卡片标题：长名按显示宽度截断（标题 QLabel 不换行，不截断就会把
+  卡片最小宽度顶过栏宽、被 ``scrollable()`` 静默裁切），完整路径进 tooltip；
+- 信息网格 5 行：画面 / 帧率 / 时长 / 大小 / 音轨——文件名与路径不再各占一行，
+  编码并入音轨摘要，避免"8 行里三行说的是同一个文件"；
 - 格式提示只在**未导入**时出现，导入后不再占位置；
-- 末尾补一张「接下来」三步卡，把第一次使用的人该点哪里写清楚。
+- 「接下来」压成一行进度提示（三步用 → 连起来），详细说明进 tooltip。
 
 拖放导入的 hero 区也不在这里：它在"未导入"阶段占据中栏，属于工作台的版式，
 不属左栏（见 ``app/gui/workbench.py`` 的空态视图）。
@@ -24,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
@@ -38,32 +40,37 @@ from ...core.ffmpeg import check_encoders, locate_ffmpeg
 from ...core.probe import check_compatibility
 from ...core.timebase import format_timecode
 from ..state import ProjectState
+from ..theme import FONT_SIZE_TITLE, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS
 from ..widgets import Card
 from ..widgets import NoWheelComboBox
 from ..widgets import message
 from ..workers import ProbeWorker
 from ._common import register_worker
 
-__all__ = ["ImportPane", "human_size"]
+__all__ = ["ImportPane", "elide_name", "human_size"]
 
 #: 信息网格的行（标签, 内部键）——顺序就是核对素材时的顺序
 INFO_ROWS: tuple[tuple[str, str], ...] = (
-    ("文件", "file"),
-    ("路径", "path"),
     ("画面", "resolution"),
     ("帧率", "fps"),
-    ("编码", "codec"),
     ("时长", "duration"),
     ("大小", "size"),
     ("音轨", "audio"),
 )
 
-#: 「接下来」三步——第一次用的人照着点就行
+#: 「接下来」三步——第一次用的人照着点就行（卡片里连成一行，详见 tooltip）
+#: 每步只留两个字的动词：三步连成一行要放进 ~240px 的卡片正文宽度，
+#: "开始分析 / 核对切点" 这类全称会把这一行挤成两行（完整说法在 tooltip 里）。
 STEP_TEXTS: tuple[str, ...] = (
     "选定源片",
-    "点右下角「开始分析」，AI 给出切点候选",
-    "在预览里逐条核对、锁定切点",
+    "分析",
+    "核对",
 )
+
+#: 卡片标题里文件名的像素预算。标题 QLabel 不换行，超出就会把整张卡的最小
+#: 宽度顶过栏宽（``scrollable()`` 关掉横条后就静默裁切）。
+#: 340 栏里标题可用宽度约 280px，留出余量给更窄的拖动位置。
+TITLE_BUDGET_PX = 250
 
 
 def human_size(num_bytes: int) -> str:
@@ -78,15 +85,35 @@ def human_size(num_bytes: int) -> str:
     return f"{size:.1f} GB"
 
 
-def breakable_path(path: str) -> str:
-    """在分隔符后插零宽空格，让长路径能在 QLabel 里折行。
+def elide_name(name: str, max_px: int, metrics: QFontMetrics) -> str:
+    """把长文件名截成 "头部…扩展名"，按**实际字体度量**算宽度。
 
-    QLabel 的 wordWrap 只在空格/连字符处断行，而 Windows 路径里没有空格：
-    实测不插的话最小宽度 252px（栏宽只有 360，减掉内边距就装不下），插了之后
-    最小宽度降到 84px、按栏宽自然折成 2–3 行。零宽字符不影响视觉，也只在
-    展示用文本里出现（tooltip 仍是原样的路径）。
+    字符数估算不可靠：标题是 15pt，一个西文字符就要 ~19px，按"22 个字符预算"
+    截出来的名字仍有 360px，照样把卡片顶宽。
     """
-    return path.replace("\\", "\\\u200b").replace("/", "/\u200b")
+    if metrics.horizontalAdvance(name) <= max_px:
+        return name
+    stem, dot, suffix = name.rpartition(".")
+    tail = f"{dot}{suffix}" if dot and suffix else ""
+    if metrics.horizontalAdvance("…" + tail) > max_px // 2:
+        tail = ""
+    head = name[: len(name) - len(tail)]
+    while head and metrics.horizontalAdvance(head + "…" + tail) > max_px:
+        head = head[:-1]
+    return f"{head.rstrip()}…{tail}" if head else f"…{tail}"
+
+
+def audio_summary(track) -> str:
+    """单条音轨的一行摘要（编码 · 采样率 · 声道）。"""
+    layout = track.channel_layout or (
+        f"{track.channels} 声道" if track.channels else ""
+    )
+    parts = [
+        track.codec_name.upper() if track.codec_name else "",
+        f"{track.sample_rate} Hz" if track.sample_rate else "",
+        layout,
+    ]
+    return " · ".join(part for part in parts if part) or "—"
 
 
 class ImportPane(QWidget):
@@ -101,23 +128,23 @@ class ImportPane(QWidget):
         self.worker: ProbeWorker | None = None
         self._full_path = ""
 
-        # ---- 素材：信息网格 -------------------------------------------
-        self.file_card = Card("素材", parent=self, accent="primary")
-
-        self.path_label = QLabel("尚未选择源视频", self.file_card)
-        self.path_label.setProperty("role", "mono")
-        self.path_label.setWordWrap(True)
-        self.path_label.setToolTip("尚未选择源视频")
+        # ---- 素材：标题 = 文件名，正文 5 行 ----------------------------
+        self.file_card = Card("素材", parent=self)
+        self.file_card.setToolTip("尚未选择源视频")
 
         self._fields: dict[str, QLabel] = {}
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(5)
+        grid.setHorizontalSpacing(SPACE_SM)
+        grid.setVerticalSpacing(SPACE_XS)
         for row, (label, key) in enumerate(INFO_ROWS):
             tag = QLabel(label, self.file_card)
             tag.setProperty("role", "muted")
-            value = self.path_label if key == "path" else QLabel("—", self.file_card)
+            value = QLabel("—", self.file_card)
+            if key == "duration":
+                # 时间码用等宽（11pt）：13pt 正文里 "00:02:00.000" 要 204px，
+                # 加标签列与两层内边距会把卡片顶到 310px（栏 340 的视口只有 330）。
+                value.setProperty("role", "mono")
             value.setWordWrap(True)
             grid.addWidget(tag, row, 0, Qt.AlignmentFlag.AlignTop)
             grid.addWidget(value, row, 1)
@@ -149,7 +176,17 @@ class ImportPane(QWidget):
         self.file_card.body_layout.addWidget(self.status)
 
         # ---- 主对白音轨 ------------------------------------------------
+        # 只留选择器 + 一句说明：编码 / 采样率等统计已经在素材卡的「音轨」行，
+        # 这里再列一遍是把同一份信息说两次。
         self.audio_combo = NoWheelComboBox()
+        # QComboBox 默认按**最长条目**决定最小宽度：音轨描述
+        # 「音轨1 aac 48000Hz mono [und]」实测 484px，会把整张卡顶出 340 栏
+        # （横条已关 → 静默裁切）。按固定内容长度算尺寸，长条目在框内省略，
+        # 下拉列表里仍是全文。
+        self.audio_combo.setSizeAdjustPolicy(
+            NoWheelComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.audio_combo.setMinimumContentsLength(8)
         self.audio_combo.currentIndexChanged.connect(self._audio_changed)
         self.audio_hint = QLabel("导入后列出可选音轨。")
         self.audio_hint.setProperty("role", "muted")
@@ -158,20 +195,21 @@ class ImportPane(QWidget):
         self._audio_card.body_layout.addWidget(self.audio_combo)
         self._audio_card.body_layout.addWidget(self.audio_hint)
 
-        # ---- 接下来（三步）--------------------------------------------
+        # ---- 接下来（一行）--------------------------------------------
         self._steps_card = Card("接下来", parent=self)
-        self._step_labels: list[QLabel] = []
-        for number, text in enumerate(STEP_TEXTS, start=1):
-            label = QLabel(f"{number}  {text}", self._steps_card)
-            label.setWordWrap(True)
-            # 第 1 步做完只是加个后缀；第 2 步是"下一个动作"，用正常文字色抢一下注意力
-            label.setProperty("role", "muted" if number != 2 else "")
-            self._step_labels.append(label)
-            self._steps_card.body_layout.addWidget(label)
+        self._steps_label = QLabel(self._steps_text(), self._steps_card)
+        self._steps_label.setWordWrap(True)
+        self._steps_label.setProperty("role", "muted")
+        self._steps_label.setToolTip(
+            "选定源片 → 点右下角「开始分析」，AI 给出切点候选 → 在预览里逐条核对、锁定切点"
+        )
+        # 保留列表形态：外部按 ``_step_labels[0]`` 取第 1 步的状态
+        self._step_labels: list[QLabel] = [self._steps_label]
+        self._steps_card.body_layout.addWidget(self._steps_label)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_MD)
         outer.addWidget(self.file_card)
         outer.addWidget(self._audio_card)
         outer.addWidget(self._steps_card)
@@ -179,18 +217,28 @@ class ImportPane(QWidget):
 
     # ---- 行为 ----------------------------------------------------------
 
+    def _title_metrics(self) -> QFontMetrics:
+        """卡片标题用的字体度量（QSS 里 title 是 15pt 加粗，控件自身字体是 13pt）。"""
+        font = self.font()
+        font.setPointSizeF(FONT_SIZE_TITLE)
+        font.setBold(True)
+        return QFontMetrics(font)
+
     def _set_path(self, path: str) -> None:
-        """把完整路径折行铺在「路径」那一格；tooltip 里放原样路径。"""
+        """文件名进卡片标题（按像素截断），完整路径进 tooltip。"""
         self._full_path = str(path or "")
         if not self._full_path:
-            self.path_label.setText("尚未选择源视频")
-            self.path_label.setToolTip("尚未选择源视频")
+            self.file_card.set_title("素材")
+            self.file_card.setToolTip("尚未选择源视频")
             return
-        self.path_label.setText(breakable_path(self._full_path))
-        self.path_label.setToolTip(self._full_path)
+        name = Path(self._full_path).name
+        self.file_card.set_title(
+            elide_name(name, TITLE_BUDGET_PX, self._title_metrics())
+        )
+        self.file_card.setToolTip(self._full_path)
 
     def full_path(self) -> str:
-        """完整路径（界面里可能折行显示）。"""
+        """完整路径（标题里只显示截断后的文件名）。"""
         return self._full_path
 
     def _set_field(self, key: str, text: str) -> None:
@@ -199,28 +247,32 @@ class ImportPane(QWidget):
     def _fill_fields(self, info) -> None:
         """把探测结果填进信息网格。"""
         video = info.video
-        self._set_field("file", Path(info.path).name)
+        self._set_path(info.path)
         if video is not None:
             self._set_field("resolution", f"{video.width} × {video.height}")
             fps = video.nominal_fps
             self._set_field("fps", f"{float(fps):.3f} fps" if fps else "—")
-            codec = (video.codec_name or "").upper()
-            parts = [part for part in (codec, video.pix_fmt or "") if part]
-            self._set_field("codec", " · ".join(parts))
         else:
             self._set_field("resolution", "无视频轨")
             self._set_field("fps", "—")
-            self._set_field("codec", "—")
         self._set_field("duration", format_timecode(info.timeline_duration))
         self._set_field("size", human_size(info.size_bytes))
-        count = len(info.audio_tracks)
-        self._set_field("audio", f"{count} 条" if count else "无音轨")
+        tracks = info.audio_tracks
+        if not tracks:
+            self._set_field("audio", "无音轨")
+        elif len(tracks) == 1:
+            self._set_field("audio", audio_summary(tracks[0]))
+        else:
+            self._set_field("audio", f"{len(tracks)} 条 · 主轨见下")
+
+    def _steps_text(self, first_done: bool = False) -> str:
+        # 一行要放进卡片正文（340 栏里约 268px）。"选定源片（已完成）"这种写法
+        # 会折成两行，第一步用"已完成"前缀表达状态，字面仍含用例要的「已完成」。
+        first = "选片已完成" if first_done else STEP_TEXTS[0]
+        return " → ".join((first, STEP_TEXTS[1], STEP_TEXTS[2]))
 
     def _mark_first_step_done(self, done: bool) -> None:
-        label = self._step_labels[0]
-        label.setText(
-            f"1  {STEP_TEXTS[0]}（已完成）" if done else f"1  {STEP_TEXTS[0]}"
-        )
+        self._steps_label.setText(self._steps_text(done))
 
     def choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

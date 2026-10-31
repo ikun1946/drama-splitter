@@ -7,8 +7,8 @@
 里要填 Key，厂商管理那里不就重复了"）。合并之后：
 
 - **本地模型**页签：whisper 档位 / GGUF 的下载、删除、「使用中」（原样搬过来）；
-- **云端模型**页签：选厂商、填 Key、保存并测试连接。地址、协议、模型清单与
-  参数都在「进阶设置」里；**具体用途与模型不在这里选**，统一去「模型设置」。
+- **云端模型**页签：选厂商、填 Key、保存并测试连接。地址、协议与 id 常驻首屏，
+  代理与模型清单在「高级参数」里；**具体用途与模型不在这里选**，统一去「模型设置」。
 
 ``form`` 仍是本地模型表单（老代码与测试照旧），厂商表单在 ``providers``。
 """
@@ -35,10 +35,10 @@ class ModelDialog(DialogShell):
         config_path: Path | None = None,
         providers_tab: bool = False,
     ) -> None:
-        # 首屏只保留连接配置，不需要 1320 的双栏宽度；1120 在 1366×768
-        # 笔记本上也留得下标题栏与完整动作区。
-        super().__init__("模型管理", parent, width=1120, height=760)
-        self.setMinimumSize(1120, 640)
+        # 云端页是「左栏 240 + 右栏编辑器」，960 宽足够；请求尺寸与最小尺寸都交给
+        # `DialogShell`：它在基类里按屏幕可用区收缩，这里再写一次固定最小尺寸
+        # 会把那份自适应压掉（1180×720 的屏幕上窗口会顶出屏幕、底栏点不到）。
+        super().__init__("模型管理", parent, width=960, height=640)
         self.tabs = QTabWidget(self)
         self.form = ModelForm(state, self.tabs, config_path=config_path)
         self.tabs.addTab(scrollable(self.form), "本地模型")
@@ -54,3 +54,6 @@ class ModelDialog(DialogShell):
         )
         self.add_close_button()
         self.install_footer()
+        # 内容（左栏 240 + 编辑器）比外壳下限宽：把最小宽度抬到内容所需，
+        # 否则用户能把窗口拖到「保存并测试连接」被切一半。
+        self.fit_minimum_to_content()
