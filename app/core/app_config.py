@@ -75,6 +75,9 @@ class AppConfig:
     """可持久化的应用配置。"""
 
     models_dir: str | None = None       # 用户指定的模型根目录
+    # 用户手选的 FFmpeg bin 目录（首次运行向导「选择已有 FFmpeg…」）。
+    # 为空时按 ffmpeg.py 的默认顺序查找；自动下载的构建不写这里。
+    ffmpeg_dir: str | None = None
     endpoint: str = "https://hf-mirror.com"
     # 更新包下载镜像前缀（默认空 = 直连 GitHub）。国内直连实测只有几十
     # KB/s，填一个加速前缀能快很多；镜像只影响传输，下载完仍按发布页的
@@ -119,6 +122,7 @@ class AppConfig:
             key = None
         return cls(
             models_dir=data.get("models_dir"),
+            ffmpeg_dir=str(data.get("ffmpeg_dir") or "").strip() or None,
             endpoint=str(data.get("endpoint") or "https://hf-mirror.com"),
             update_mirror=str(data.get("update_mirror") or "").strip(),
             asr_model_tier=tier,

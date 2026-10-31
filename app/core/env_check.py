@@ -8,15 +8,15 @@
 
 诚实边界（重要，别让界面撒谎）
 ------------------------------
-自检能查出问题，可修的动作分两类，**kind 必须如实标注**：
+自检能查出问题，可修的动作分三类，**kind 必须如实标注**：
 
+- ``install_ffmpeg``：应用内下载完整 FFmpeg 构建（走 ``ffmpeg_setup``）；
 - ``download_model``：应用内下载**模型文件**（走 ``model_manager``，用 curl）；
 - ``install_engine``：应用内安装**运行期依赖**（走 ``deps_manager``，下载
   wheel 解压到 exe 同级的 ``deps/``）——语音转写引擎走这条，不需要 pip。
 
 其余一律只能"检测 + 给指引"：
 
-- **FFmpeg**：没有任何下载逻辑，只能让用户去装、或设 DRAMA_FFMPEG_DIR；
 - **可选 Python 包**（scenedetect / zhconv / pysubs2）：缺失只降级，给说明
   （scenedetect 还会给 ``open_url`` 指到发布页）；
 - **llama-cpp-python**：给 ``open_url`` 指到官方发布页（有 prebuilt 轮子），
@@ -47,6 +47,7 @@ __all__ = [
     "LEVEL_BLOCK",
     "FIX_DOWNLOAD",
     "FIX_INSTALL_ENGINE",
+    "FIX_INSTALL_FFMPEG",
     "FIX_OPEN_URL",
     "FIX_NAVIGATE",
     "FIX_NONE",
@@ -67,22 +68,30 @@ _ORDER = {LEVEL_OK: 0, LEVEL_WARN: 1, LEVEL_BLOCK: 2}
 
 #: 修复动作的种类。
 #:
+#: - ``install_ffmpeg``：应用内下载 FFmpeg 到 ``<app_dir>/ffmpeg/bin``（走
+#:   ffmpeg_setup，curl + zipfile）——首次运行向导与环境自检共用；
 #: - ``download_model``：应用内下载**模型文件**（走 model_manager，curl）；
 #: - ``install_engine``：应用内安装**运行期依赖**（走 deps_manager，下载 wheel
 #:   并解压到 exe 同级的 ``deps/``）——这是给"转写引擎"用的，与下模型是两回事；
 #: - ``open_url`` / ``navigate``：只能引导，应用内做不了；
 #: - ``none``：纯告知，连按钮都不画。
+FIX_INSTALL_FFMPEG = "install_ffmpeg"  # payload = ""（下载源在 ffmpeg_setup 里）
 FIX_DOWNLOAD = "download_model"   # payload = 模型 key（spec_by_key 能解析）
 FIX_INSTALL_ENGINE = "install_engine"  # payload = ""（清单在 deps_manager 里）
 FIX_OPEN_URL = "open_url"         # payload = 要打开的网址
 FIX_NAVIGATE = "navigate"         # payload = 目标对话框标识（如 "models"）
 FIX_NONE = "none"
 
-#: 能在应用内**真正自动修好**的 fix 种类（「一键修复环境」只收这两类）：
+#: 能在应用内**真正自动修好**的 fix 种类（「一键修复环境」只收这三类）：
+#: - ``install_ffmpeg``：下载完整 FFmpeg 构建（ffmpeg_setup）；
 #: - ``install_engine``：装 / 重装转写引擎（deps_manager 把 wheel 解压到 deps/）；
 #: - ``download_model``：下载转写 / 语义模型（model_manager 用 curl 下载）。
 #: 其余（open_url / navigate / none）只能引导——一键修复不承诺「全都能修」。
-AUTO_FIX_KINDS: tuple[str, ...] = (FIX_INSTALL_ENGINE, FIX_DOWNLOAD)
+AUTO_FIX_KINDS: tuple[str, ...] = (
+    FIX_INSTALL_FFMPEG,
+    FIX_INSTALL_ENGINE,
+    FIX_DOWNLOAD,
+)
 
 
 @dataclass(frozen=True)
@@ -90,8 +99,8 @@ class EnvFix:
     """一条可执行的补救动作。
 
     ``kind`` 决定界面怎么处理，也决定"这条到底能不能在应用内修好"：只有
-    :data:`FIX_DOWNLOAD` 与 :data:`FIX_INSTALL_ENGINE` 会真的动手装，
-    其余都是引导。
+    :data:`FIX_INSTALL_FFMPEG`、:data:`FIX_DOWNLOAD` 与
+    :data:`FIX_INSTALL_ENGINE` 会真的动手装，其余都是引导。
     """
 
     kind: str
@@ -188,11 +197,7 @@ def _check_ffmpeg() -> EnvCheckItem:
             level=LEVEL_BLOCK,
             summary="未找到 ffmpeg / ffprobe，导入与导出都不可用",
             detail=str(exc),
-            fix=EnvFix(
-                kind=FIX_OPEN_URL,
-                label="打开下载页",
-                payload="https://www.gyan.dev/ffmpeg/builds/",
-            ),
+            fix=EnvFix(kind=FIX_INSTALL_FFMPEG, label="下载并配置 FFmpeg"),
         )
     except Exception as exc:  # noqa: BLE001 - 自检不该因单项失败而中断
         return EnvCheckItem(
@@ -216,11 +221,7 @@ def _check_ffmpeg() -> EnvCheckItem:
             level=LEVEL_WARN,
             summary=f"缺少编码器：{'、'.join(missing)}，精确导出不可用",
             detail=detail,
-            fix=EnvFix(
-                kind=FIX_OPEN_URL,
-                label="打开下载页",
-                payload="https://www.gyan.dev/ffmpeg/builds/",
-            ),
+            fix=EnvFix(kind=FIX_INSTALL_FFMPEG, label="下载完整构建"),
         )
     return EnvCheckItem(
         key="ffmpeg", label="FFmpeg 工具链", level=LEVEL_OK,

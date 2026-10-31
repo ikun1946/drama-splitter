@@ -1,8 +1,8 @@
 """「一键修复环境」的计划与执行：只修真能修的、顺序固定、失败如实汇报。
 
 后端的能力边界由 tests/test_env_check.py 钉死；这里盯 env_repair 自己的三件事：
-1) ``repair_steps`` 只收 auto_fixable 的项，且按「引擎 → 转写模型 → 语义模型」
-   排序（乱序注入也要排对）；
+1) ``repair_steps`` 只收 auto_fixable 的项，且按「FFmpeg → 引擎 → 转写模型 →
+   语义模型」排序（乱序注入也要排对）；
 2) ``execute_repair`` 逐步执行、每步结果进 summary，回调按约定触发；
 3) 失败不静默、不阻塞后续独立步骤；取消立即停住剩余步骤。
 """
@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 from app.core.deps_manager import DepsInstallResult
+from app.core.ffmpeg_setup import FfmpegInstallResult
 from app.core.env_check import (
     FIX_DOWNLOAD,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_FFMPEG,
     FIX_NAVIGATE,
     FIX_OPEN_URL,
     LEVEL_BLOCK,
@@ -104,6 +106,33 @@ class TestRepairPlan:
         assert [s.payload for s in plan] == ["", "whisper:small", "llm:2B:Q4_K_M"]
         assert [s.item_key for s in plan] == ["asr_engine", "whisper_model", "llm_model"]
 
+    def test_ffmpeg_comes_before_engine_and_models(self):
+        report = _report(
+            _item(
+                "llm_model",
+                LEVEL_WARN,
+                EnvFix(FIX_DOWNLOAD, "下载语义模型", "llm:2B:Q4_K_M"),
+                required=False,
+            ),
+            _item(
+                "asr_engine",
+                LEVEL_BLOCK,
+                EnvFix(FIX_INSTALL_ENGINE, "安装转写引擎", ""),
+            ),
+            _item(
+                "ffmpeg",
+                LEVEL_BLOCK,
+                EnvFix(FIX_INSTALL_FFMPEG, "下载并配置 FFmpeg", ""),
+            ),
+        )
+        plan = repair_steps(report)
+        assert [s.kind for s in plan] == [
+            FIX_INSTALL_FFMPEG,
+            FIX_INSTALL_ENGINE,
+            FIX_DOWNLOAD,
+        ]
+        assert [s.item_key for s in plan] == ["ffmpeg", "asr_engine", "llm_model"]
+
     def test_healthy_report_has_empty_plan(self):
         assert repair_steps(_report(_item("ffmpeg", LEVEL_OK))) == ()
 
@@ -111,9 +140,13 @@ class TestRepairPlan:
         ok_item = _item("ffmpeg", LEVEL_OK)
         url_item = _item("x", LEVEL_WARN, EnvFix(FIX_OPEN_URL, "打开", "https://x"))
         dl_item = _item("y", LEVEL_BLOCK, EnvFix(FIX_DOWNLOAD, "下载", "llm:2B:Q4_K_M"))
+        ffmpeg_item = _item(
+            "z", LEVEL_BLOCK, EnvFix(FIX_INSTALL_FFMPEG, "下载并配置 FFmpeg", "")
+        )
         assert not ok_item.auto_fixable
         assert not url_item.auto_fixable
         assert dl_item.auto_fixable
+        assert ffmpeg_item.auto_fixable
 
 
 def _fake_install(*, ok=True, cancelled=False, message="引擎安装完成", calls=None):
@@ -153,7 +186,41 @@ def _fake_download(*, ok=True, cancelled=False, message="下载完成", calls=No
     return fake
 
 
+def _fake_ffmpeg(*, ok=True, cancelled=False, message="FFmpeg 已配置", calls=None):
+    def fake(*, on_progress=None, cancel_check=None, urls=None):
+        if calls is not None:
+            calls.append("ffmpeg")
+        if on_progress is not None:
+            on_progress(10, 100)
+        return FfmpegInstallResult(
+            ok=ok,
+            cancelled=cancelled,
+            message=message,
+            downloaded_bytes=10,
+        )
+
+    return fake
+
+
 class TestExecuteRepair:
+    def test_ffmpeg_step_runs_and_reports(self, monkeypatch, tmp_path):
+        calls = []
+        monkeypatch.setattr(
+            "app.core.ffmpeg_setup.install_ffmpeg", _fake_ffmpeg(calls=calls)
+        )
+        plan = (
+            RepairStep(
+                kind=FIX_INSTALL_FFMPEG,
+                payload="",
+                label="下载并配置 FFmpeg",
+                item_key="ffmpeg",
+            ),
+        )
+        summary = execute_repair(plan, models_root=tmp_path)
+        assert calls == ["ffmpeg"]
+        assert summary.results[0].ok
+        assert "FFmpeg 已配置" in summary.results[0].message
+
     def test_all_steps_succeed(self, monkeypatch, tmp_path):
         monkeypatch.setattr("app.core.deps_manager.install_deps", _fake_install())
         monkeypatch.setattr("app.core.model_manager.download_model", _fake_download())

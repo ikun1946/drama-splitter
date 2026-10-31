@@ -5,18 +5,19 @@
 - ``env_check`` 只读：给出报告，并如实标注每一项是「应用内可修」还是
   「只能引导」；
 - 本模块负责动手：:func:`repair_steps` 把报告中的可修项排成一个有序计划，
-  :func:`execute_repair` 逐步执行——装 / 重装转写引擎、下载缺失的模型。
+  :func:`execute_repair` 逐步执行——配置 FFmpeg、装 / 重装转写引擎、下载缺失的模型。
 
-计划只收两类动作
+计划只收三类动作
 ----------------
-``env_check.AUTO_FIX_KINDS``（安装转写引擎、下载模型）。FFmpeg、可选 Python
+``env_check.AUTO_FIX_KINDS``（配置 FFmpeg、安装转写引擎、下载模型）。可选 Python
 包、llama-cpp 轮子这些「应用内装不了」的项不出现在计划里——界面继续用单项
 按钮给指引。「一键修复」承诺的是「把能自动修的修掉」，不是「什么都能修」。
 
 执行顺序
 --------
-1. 转写引擎（faster-whisper 依赖）→ 2. 转写模型（whisper-*）→ 3. 语义模型
-（llm:*）。报告本身按此顺序产出，这里再显式排一次序，防止调用方乱序注入。
+1. FFmpeg（导入/导出的前提）→ 2. 转写引擎（faster-whisper 依赖）→ 3. 转写模型
+（whisper-*）→ 4. 语义模型（llm:*）。报告本身按此顺序产出，这里再显式排一次序，
+防止调用方乱序注入。
 
 失败与取消
 ----------
@@ -31,7 +32,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .env_check import FIX_DOWNLOAD, FIX_INSTALL_ENGINE, EnvReport
+from .env_check import (
+    FIX_DOWNLOAD,
+    FIX_INSTALL_ENGINE,
+    FIX_INSTALL_FFMPEG,
+    EnvReport,
+)
 
 __all__ = [
     "RepairStep",
@@ -115,19 +121,21 @@ class RepairSummary:
 
 
 def _order(step: RepairStep) -> tuple[int, str]:
-    """步骤排序键：引擎最前，转写模型其次，其余模型最后。"""
-    if step.kind == FIX_INSTALL_ENGINE:
+    """步骤排序键：FFmpeg 最前，引擎其次，转写模型再次，其余模型最后。"""
+    if step.kind == FIX_INSTALL_FFMPEG:
         return (0, step.payload)
-    if step.payload.startswith("whisper:"):
+    if step.kind == FIX_INSTALL_ENGINE:
         return (1, step.payload)
-    return (2, step.payload)
+    if step.payload.startswith("whisper:"):
+        return (2, step.payload)
+    return (3, step.payload)
 
 
 def repair_steps(report: EnvReport) -> tuple[RepairStep, ...]:
     """从自检报告提取「能自动修」的项，按执行顺序排好。
 
-    只收 ``item.auto_fixable`` 的项（装引擎 / 下模型）；打开网页、跳转、
-    纯告知这些都不在计划里——它们由界面逐项给指引。
+    只收 ``item.auto_fixable`` 的项（配置 FFmpeg / 装引擎 / 下模型）；打开网页、
+    跳转、纯告知这些都不在计划里——它们由界面逐项给指引。
     """
     plan: list[RepairStep] = []
     for item in report.items:
@@ -198,6 +206,7 @@ def execute_repair(
     """
     from .app_config import default_models_root
     from .deps_manager import install_deps
+    from .ffmpeg_setup import install_ffmpeg
     from .model_manager import DEFAULT_ENDPOINT, download_model, spec_by_key
 
     step_list = list(steps)
@@ -238,7 +247,17 @@ def execute_repair(
         message = ""
         try:
             result = None
-            if step.kind == FIX_INSTALL_ENGINE:
+            if step.kind == FIX_INSTALL_FFMPEG:
+                ffmpeg_progress = (
+                    (lambda done, tot: relay_progress(done, tot, "FFmpeg", 1, 1))
+                    if on_progress is not None
+                    else None
+                )
+                result = install_ffmpeg(
+                    on_progress=ffmpeg_progress,
+                    cancel_check=stopping,
+                )
+            elif step.kind == FIX_INSTALL_ENGINE:
                 result = install_deps(
                     deps_root=deps_root,
                     on_progress=relay_progress if on_progress is not None else None,

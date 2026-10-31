@@ -89,7 +89,12 @@ def _search_fallback(name: str) -> Path | None:
     for base in _FALLBACK_DIRS:
         if not base.exists():
             continue
-        # WinGet 包目录结构为 <base>/<pkg>/<ver>/bin/<exe>
+        # 两种布局都要认：
+        #   便携版  <base>/<exe>（如 C:\ffmpeg\bin\ffmpeg.exe）
+        #   WinGet  <base>/<pkg>/<ver>/bin/<exe>
+        direct = base / exe
+        if direct.exists():
+            return direct
         try:
             for candidate in base.glob(f"**/bin/{exe}"):
                 return candidate
@@ -98,11 +103,33 @@ def _search_fallback(name: str) -> Path | None:
     return None
 
 
+def _configured_dir() -> Path | None:
+    """读取用户在首次运行向导里手选的 FFmpeg 目录。"""
+    try:
+        from .app_config import AppConfig
+
+        raw = AppConfig.load().ffmpeg_dir
+    except Exception:  # noqa: BLE001 - 配置读不出来只应降级，不该阻断定位
+        return None
+    return Path(raw) if raw else None
+
+
+def _managed_bin() -> Path | None:
+    """应用内自动下载的 FFmpeg 目录：<app_dir>/ffmpeg/bin。"""
+    try:
+        from .app_config import app_dir
+
+        return app_dir() / "ffmpeg" / "bin"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def locate_ffmpeg(explicit_dir: str | Path | None = None) -> FfmpegBinaries:
     """定位 FFmpeg 工具链。
 
-    查找顺序：显式目录 → 环境变量 DRAMA_FFMPEG_DIR → PATH → 已知安装位置。
-    全部失败时抛 FfmpegNotFound，由界面提示用户指定目录。
+    查找顺序：显式目录 → 环境变量 DRAMA_FFMPEG_DIR → 配置里的手选目录 →
+    应用内自动安装目录（<app_dir>/ffmpeg/bin）→ PATH → 已知安装位置。
+    全部失败时抛 FfmpegNotFound，由首次运行向导或环境自检引导配置。
     """
     candidate_dirs: list[Path] = []
     if explicit_dir:
@@ -110,6 +137,12 @@ def locate_ffmpeg(explicit_dir: str | Path | None = None) -> FfmpegBinaries:
     env_dir = os.environ.get("DRAMA_FFMPEG_DIR")
     if env_dir:
         candidate_dirs.append(Path(env_dir))
+    configured = _configured_dir()
+    if configured is not None:
+        candidate_dirs.append(configured)
+    managed = _managed_bin()
+    if managed is not None:
+        candidate_dirs.append(managed)
 
     for directory in candidate_dirs:
         ffmpeg = directory / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
@@ -124,7 +157,8 @@ def locate_ffmpeg(explicit_dir: str | Path | None = None) -> FfmpegBinaries:
 
     raise FfmpegNotFound(
         "未找到 ffmpeg / ffprobe。请安装 FFmpeg 并加入 PATH，"
-        "或设置环境变量 DRAMA_FFMPEG_DIR 指向其 bin 目录。"
+        "或设置环境变量 DRAMA_FFMPEG_DIR 指向其 bin 目录；"
+        "也可以重新启动程序，让首次运行向导自动下载。"
     )
 
 

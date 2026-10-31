@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from ...core.env_check import (
     FIX_DOWNLOAD,
     FIX_INSTALL_ENGINE,
+    FIX_INSTALL_FFMPEG,
     FIX_NAVIGATE,
     FIX_OPEN_URL,
     LEVEL_BLOCK,
@@ -96,8 +97,12 @@ class _ItemRow(QFrame):
         self.btn_fix: QPushButton | None = None
         if item.fix is not None and item.fix.kind != "none" and item.fix.label:
             self.btn_fix = QPushButton(item.fix.label)
-            if item.fix.kind in (FIX_DOWNLOAD, FIX_INSTALL_ENGINE):
-                # 这两种是**真的会在应用内动手装东西**的，样式给足分量
+            if item.fix.kind in (
+                FIX_INSTALL_FFMPEG,
+                FIX_DOWNLOAD,
+                FIX_INSTALL_ENGINE,
+            ):
+                # 这几种是**真的会在应用内动手装东西**的，样式给足分量
                 self.btn_fix.setProperty("role", "primary")
             else:
                 self.btn_fix.setProperty("role", "mini")
@@ -122,6 +127,8 @@ class EnvCheckDialog(DialogShell):
     download_requested = Signal(str)
     #: 用户点了"安装转写引擎"（应用内下载运行期依赖）
     install_engine_requested = Signal()
+    #: 用户点了"下载并配置 FFmpeg"（应用内下载完整构建）
+    install_ffmpeg_requested = Signal()
     #: 用户点了"打开网页"类修复（payload = URL）
     open_url_requested = Signal(str)
     #: 用户点了"跳到某处"类修复（payload = 目标标识）
@@ -293,7 +300,9 @@ class EnvCheckDialog(DialogShell):
         return "环境不可用：缺少必需组件 —— " + "、".join(bad)
 
     def _on_fix_requested(self, kind: str, payload: str) -> None:
-        if kind == FIX_DOWNLOAD:
+        if kind == FIX_INSTALL_FFMPEG:
+            self.install_ffmpeg_requested.emit()
+        elif kind == FIX_DOWNLOAD:
             self.download_requested.emit(payload)
         elif kind == FIX_INSTALL_ENGINE:
             self.install_engine_requested.emit()

@@ -1141,6 +1141,35 @@ class EnvCheckWorker(BaseWorker):
         self.checked.emit(report)
 
 
+class FfmpegSetupWorker(BaseWorker):
+    """首次运行的 FFmpeg 自动配置（下载 → 解压 → 校验）。
+
+    为什么后台：约 115 MB 下载加解压，同步会冻住界面。可取消——取消时保留
+    ``.part``，下次重试续传。真正的逻辑在 ``app.core.ffmpeg_setup``，本类只做
+    线程与信号适配。
+    """
+
+    progress = Signal(int, int)   # 已下载字节, 总字节（0 = 未知）
+    finished_with = Signal(object)  # FfmpegInstallResult
+
+    def work(self) -> None:  # noqa: D102
+        from app.core.ffmpeg_setup import FfmpegInstallResult, install_ffmpeg
+
+        try:
+            result = install_ffmpeg(
+                on_progress=lambda done, total: self.progress.emit(done, total),
+                cancel_check=lambda: self.cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 - 线程内异常必须变成可读结果
+            result = FfmpegInstallResult(ok=False, message=f"配置过程异常：{exc}")
+        if result.cancelled:
+            self.finish_cancelled()
+        elif not result.ok:
+            self._last_error = result.message
+            self._state = "failed"
+        self.finished_with.emit(result)
+
+
 class DepsInstallWorker(BaseWorker):
     """在应用内安装语音转写引擎（下载 wheel 到 exe 同级的 deps/）。
 

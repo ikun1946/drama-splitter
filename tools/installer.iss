@@ -21,7 +21,8 @@
 ; ---------------------
 ; 1) 体积：GPL 全量构建里 ffmpeg.exe + ffprobe.exe 各约 194 MB；
 ; 2) 许可：GPLv2+ 二进制随安装包对外分发，会让整个分发物承担 GPL 义务。
-; 改为安装时检测，缺失则给出明确的下一步（见 [Code] 段的 CurStepChanged）。
+; 改为安装时检测 + 首次启动自动下载（app/core/ffmpeg_setup.py），安装器只负责
+; 在缺失时把这件事说清楚（见 [Code] 段的 CurStepChanged）。
 ;
 ; FFprobe 是必需的，ffplay 是可选的（只用于预览播放出声，见 ffmpeg.py 第 61 行），
 ; 所以提示里只要求前两个。
@@ -29,13 +30,13 @@
 [Setup]
 AppId={{8F3C2A17-6D94-4E2B-9C51-7A0D3E68B412}
 AppName=AI 短剧智能分集器
-AppVersion=1.0.32
-AppVerName=AI 短剧智能分集器 1.0.32
+AppVersion=1.0.33
+AppVerName=AI 短剧智能分集器 1.0.33
 AppPublisher=ikun1946
 AppPublisherURL=https://github.com/ikun1946/drama-splitter
 AppSupportURL=https://github.com/ikun1946/drama-splitter/issues
 AppUpdatesURL=https://github.com/ikun1946/drama-splitter/releases
-VersionInfoVersion=1.0.32.0
+VersionInfoVersion=1.0.33.0
 VersionInfoDescription=AI 短剧智能分集器 安装程序
 
 ; 按用户安装，免管理员
@@ -54,7 +55,7 @@ CloseApplications=yes
 CloseApplicationsFilter=drama-splitter.exe
 
 OutputDir=..\dist
-OutputBaseFilename=drama-splitter-1.0.32-setup
+OutputBaseFilename=drama-splitter-1.0.33-setup
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -84,6 +85,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; _internal 只放随包程序与运行库；config.json / models / cache / deps 都在
 ; 它的上一级，删除这里不会碰用户数据。
 Type: filesandordirs; Name: "{app}\_internal"
+
+[UninstallDelete]
+; 首次运行自动下载的 FFmpeg（约 0.5 GB）。它不在 [Files] 清单里，不显式登记
+; 卸载器就不会删；而它完全可从上游重建，留着只是白占空间。用户手选的外部
+; FFmpeg 目录不在 {app} 下，不会被这里碰到。
+Type: filesandordirs; Name: "{app}\ffmpeg"
 
 [Files]
 ; onedir 打包产物（204 个文件）。ignoreversion：PyInstaller 每次构建时间戳都变，
@@ -116,18 +123,18 @@ end;
 
 // 安装后检测 FFmpeg。
 //
-// 判据是「用户装完能不能直接干活」，不是「程序能不能启动」：程序缺 FFmpeg 照样
-// 能开窗口（启动时只弹一次警告），但导入、导出、镜头检测全部不可用。所以要在
-// 安装向导里就把这件事说清楚，而不是让人等到第一次导入失败。
+// 应用现在会在**首次启动时自动下载并配置** FFmpeg（见 app/core/ffmpeg_setup.py），
+// 所以这里只提示、不再要求用户自己装。安装向导最后一步默认勾选「启动程序」，
+// 启动后向导会立即开始下载；离线或想复用已有安装时，也可以在手选窗口里指路。
 
 const
   FFmpegHint =
     '未检测到 FFmpeg。' + #13#10 + #13#10 +
-    '导入、导出与镜头检测都依赖它，缺少时相关功能不可用。' + #13#10 + #13#10 +
-    '两种方式任选其一：' + #13#10 +
-    '  1. 装好后把 FFmpeg 的 bin 目录加入系统 PATH；' + #13#10 +
-    '  2. 或设环境变量 DRAMA_FFMPEG_DIR 指向其 bin 目录。' + #13#10 + #13#10 +
-    '下载地址：https://www.gyan.dev/ffmpeg/builds/' + #13#10 + #13#10 +
+    '导入、导出与镜头检测都依赖它。首次启动会弹出配置向导并自动下载' + #13#10 +
+    '（约 115–200 MB，放到程序目录，无需手动安装或改 PATH）。' + #13#10 + #13#10 +
+    '如果已经装过 FFmpeg，可在向导里直接选择 ffmpeg.exe；' + #13#10 +
+    '也可以沿用环境变量 DRAMA_FFMPEG_DIR 指向其 bin 目录。' + #13#10 + #13#10 +
+    '下载源：https://www.gyan.dev/ffmpeg/builds/' + #13#10 + #13#10 +
     '本程序需要 ffmpeg.exe 与 ffprobe.exe（ffplay 可选，仅用于预览播放出声）。';
 
 const
@@ -173,8 +180,10 @@ end;
 
 function FFmpegAvailable: Boolean;
 begin
-  // 优先级与 app/core/ffmpeg.py 的探测顺序一致：先 exe 同级，再 PATH。
+  // 与应用内探测顺序一致：先看随包/自动下载的目录，再看 PATH。
+  // 首次运行自动下载落在 {app}\ffmpeg\bin，覆盖升级后不应再提示缺失。
   Result := FileInDir(ExpandConstant('{app}'), 'ffmpeg.exe')
+            or FileInDir(ExpandConstant('{app}\ffmpeg\bin'), 'ffmpeg.exe')
             or PATHHasFFmpeg(GetEnv('PATH'));
 end;
 

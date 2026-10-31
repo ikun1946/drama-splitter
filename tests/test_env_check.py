@@ -2,8 +2,8 @@
 
 三条要钉死的约定：
 1. 报告能正确汇总严重度（取最严重者）、能正确判断"是否可用"（无 required-block）；
-2. **只有模型能在应用内一键修复**——`fix.kind == "download_model"` 仅出现在
-   模型类条目上；缺 Python 包（尤其 faster-whisper）绝不能给出下载修复；
+2. **应用内可修的动作只有三类**——`install_ffmpeg` / `install_engine` /
+   `download_model`；缺 Python 包（尤其 faster-whisper）绝不能给出下载修复；
 3. 检测是**只读**的：跑一遍不得创建/修改任何文件（修复必须由用户点按钮触发）。
 """
 
@@ -17,6 +17,7 @@ import pytest  # noqa: E402
 
 from app.core.env_check import (  # noqa: E402
     FIX_DOWNLOAD,
+    FIX_INSTALL_FFMPEG,
     LEVEL_BLOCK,
     LEVEL_OK,
     LEVEL_WARN,
@@ -192,7 +193,7 @@ class TestLlmStackFix:
 
 
 class TestFfmpegDegradation:
-    def test_missing_ffmpeg_blocks_and_offers_url(self, monkeypatch):
+    def test_missing_ffmpeg_blocks_and_offers_install(self, monkeypatch):
         from app.core import env_check as ec
         from app.core.ffmpeg import FfmpegNotFound
 
@@ -203,7 +204,8 @@ class TestFfmpegDegradation:
         report = ec.check_environment()
         item = report.by_key("ffmpeg")
         assert item.level == LEVEL_BLOCK
-        assert item.fix is not None and item.fix.kind == "open_url"
+        assert item.fix is not None and item.fix.kind == FIX_INSTALL_FFMPEG
+        assert item.auto_fixable
         assert report.usable is False, "FFmpeg 缺失应判为不可用"
 
 

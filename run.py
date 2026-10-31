@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 #     OutputBaseFilename
 # 这些副本全由 tests/test_version.py 逐条盯着（历史上 run.py 与 pyproject.toml
 # 漂移过 1.0.0 vs 0.1.0，installer.iss 的版本号也无人校验过）。
-VERSION = "1.0.32"
+VERSION = "1.0.33"
 
 
 def _print_version() -> int:
@@ -411,7 +411,7 @@ def main() -> int:
     if "--deps-report" in sys.argv:
         return _deps_report()
 
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
     app = QApplication(sys.argv)
     app.setApplicationName("AI 短剧智能分集器")
@@ -421,6 +421,49 @@ def main() -> int:
     from app.gui.branding import apply_app_icon
 
     apply_app_icon(app)
+
+    # 首次运行向导出现在 MainWindow 之前；先把用户上次的主题应用上，
+    # 否则对话框会退回系统默认样式（QSS 的 role 属性都不生效）。
+    from app.core.app_config import AppConfig
+    from app.gui.theme import apply_theme
+
+    apply_theme(mode=AppConfig.load().theme)
+
+    # FFmpeg 必须在这里就绪：StageView 构造时就要创建 FrameDecoder，缺工具链
+    # 会让 MainWindow 直接抛异常。首次运行先弹配置向导并自动下载，成功后再建窗。
+    from app.core.ffmpeg import FfmpegNotFound, check_encoders, locate_ffmpeg
+
+    try:
+        binaries = locate_ffmpeg()
+    except FfmpegNotFound:
+        try:
+            from app.gui.dialogs import FfmpegSetupDialog
+
+            setup = FfmpegSetupDialog()
+            accepted = setup.exec() == QDialog.DialogCode.Accepted
+        except Exception:  # noqa: BLE001 - 向导本身出错也要给可读提示
+            QMessageBox.critical(
+                None,
+                "启动失败",
+                "无法打开 FFmpeg 配置向导：\n\n" + traceback.format_exc(limit=3),
+            )
+            return 1
+        if not accepted:
+            return 0
+        try:
+            binaries = locate_ffmpeg()
+        except FfmpegNotFound as exc:
+            QMessageBox.critical(
+                None,
+                "配置未完成",
+                f"{exc}\n\n程序需要 FFmpeg 才能启动。",
+            )
+            return 1
+    except Exception as exc:  # noqa: BLE001 - 定位失败也要给可读提示，而不是裸 traceback
+        QMessageBox.critical(None, "启动失败", f"检测 FFmpeg 时出错：\n\n{exc}")
+        return 1
+
+    check_encoders(binaries)
 
     try:
         from app.gui.main_window import MainWindow
@@ -433,30 +476,17 @@ def main() -> int:
         return 1
 
     window = MainWindow()
-
-    # 启动即检查 FFmpeg：这是整个工具的前提，缺失时不要等到用户点了导入才报错
-    try:
-        from app.core.ffmpeg import check_encoders, locate_ffmpeg
-
-        binaries = locate_ffmpeg()
-        check_encoders(binaries)
-        window.state.binaries = binaries
-        missing = [
-            name for name in ("libx264", "aac") if name not in binaries.encoders
-        ]
-        if missing:
-            QMessageBox.warning(
-                window,
-                "编码器缺失",
-                "当前 FFmpeg 缺少以下编码器，精确导出不可用：\n"
-                + "、".join(missing),
-            )
-    except Exception as exc:  # noqa: BLE001
+    window.state.binaries = binaries
+    missing = [
+        name for name in ("libx264", "aac") if name not in binaries.encoders
+    ]
+    if missing:
         QMessageBox.warning(
             window,
-            "未找到 FFmpeg",
-            f"{exc}\n\n导入与导出功能需要 FFmpeg，请先安装并加入 PATH，"
-            "或设置环境变量 DRAMA_FFMPEG_DIR 指向其 bin 目录。",
+            "编码器缺失",
+            "当前 FFmpeg 缺少以下编码器，精确导出不可用：\n"
+            + "、".join(missing)
+            + "\n\n可在「帮助 → 环境自检」里下载完整构建。",
         )
 
     window.show()

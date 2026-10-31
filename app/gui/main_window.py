@@ -23,6 +23,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QMainWindow,
     QVBoxLayout,
@@ -318,6 +319,7 @@ class MainWindow(QMainWindow):
         self.env_check_dialog.recheck_requested.connect(self._start_env_check)
         self.env_check_dialog.download_requested.connect(self._on_env_fix_download)
         self.env_check_dialog.install_engine_requested.connect(self._on_env_install_engine)
+        self.env_check_dialog.install_ffmpeg_requested.connect(self._on_env_install_ffmpeg)
         self.env_check_dialog.open_url_requested.connect(self._on_env_fix_open_url)
         self.env_check_dialog.navigate_requested.connect(self._on_env_fix_navigate)
         self.env_check_dialog.repair_requested.connect(self._on_env_repair)
@@ -402,6 +404,29 @@ class MainWindow(QMainWindow):
             message.warning(self, "安装未完成", result.message or "未知原因")
 
     # ---- 一键修复环境 ----------------------------------------------------
+
+    def _on_env_install_ffmpeg(self) -> None:
+        """自检里的「下载并配置 FFmpeg」：复用首次运行向导。"""
+        from .dialogs import FfmpegSetupDialog
+
+        dialog = FfmpegSetupDialog(self, config=self.config)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # 自动下载成功后 ffmpeg_setup 会把磁盘上的 ffmpeg_dir 清空；同步回内存，
+        # 免得后续保存配置时把旧的手选目录又写回去。
+        self.config.ffmpeg_dir = AppConfig.load().ffmpeg_dir
+        try:
+            from ..core.ffmpeg import check_encoders, locate_ffmpeg
+
+            binaries = locate_ffmpeg()
+            check_encoders(binaries)
+            self.state.binaries = binaries
+            self.bottom.set_hint(f"FFmpeg 已配置：{binaries.ffmpeg}")
+        except Exception as exc:  # noqa: BLE001 - 配置后仍不可用要如实告知
+            from .widgets import message
+
+            message.warning(self, "FFmpeg 仍不可用", str(exc))
+        self._start_env_check()
 
     def _on_env_repair(self) -> None:
         """「一键修复」：按自检报告的计划装引擎、下模型（串行后台任务）。

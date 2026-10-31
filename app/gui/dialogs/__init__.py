@@ -12,6 +12,7 @@ from __future__ import annotations
 from .base import DialogShell
 from .env_check_dialog import EnvCheckDialog
 from .export_dialog import ExportDialog
+from .ffmpeg_setup import FfmpegSetupDialog
 from .model_dialog import ModelDialog
 from .model_setup_dialog import ModelSetupDialog
 from .settings_dialog import SettingsDialog
@@ -21,6 +22,7 @@ __all__ = [
     "DialogShell",
     "EnvCheckDialog",
     "ExportDialog",
+    "FfmpegSetupDialog",
     "ModelDialog",
     "ModelSetupDialog",
     "SettingsDialog",
