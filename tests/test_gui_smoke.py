@@ -908,6 +908,133 @@ class TestPlayPauseToggle:
             window.workbench.refresh()
 
 
+class TestTimelineZoom:
+    """中栏缩放条：按钮 / 快捷键 → 时间轴视窗 → 缩放条文案，整条链路。
+
+    缩放条本身不持视窗状态，这里在真实媒体与方案上确认它显示的是时间轴的
+    真值，而不是自己另算一份。
+    """
+
+    @staticmethod
+    def _bind(window, binaries, assets):
+        from app.core.plan import BoundaryPlan
+
+        window.state.reset_media()
+        media = probe_media(binaries, assets["cfr"])
+        window.state.media = media
+        window.state.binaries = binaries
+        window.state.plans = [
+            BoundaryPlan.uniform(4, media.video_time_base, media.duration_ticks())
+        ]
+        window.state.plan_cursor = 0
+        window.workbench.refresh()
+        return window.workbench.stage_view
+
+    @staticmethod
+    def _clean(window):
+        window.workbench.stage_view.player.stop()
+        window.state.reset_media()
+        window.workbench.refresh()
+
+    def test_zoom_bar_sits_below_the_timeline(self, window):
+        stage = window.workbench.stage_view
+        widgets = [
+            stage.layout().itemAt(index).widget()
+            for index in range(stage.layout().count())
+        ]
+        assert widgets == [stage.preview, stage.timeline, stage.zoom_bar]
+
+    def test_zoom_in_button_narrows_view_and_fit_restores(
+        self, window, binaries, assets
+    ):
+        stage = self._bind(window, binaries, assets)
+        try:
+            timeline, bar = stage.timeline, stage.zoom_bar
+            total = Fraction(window.state.media.timeline_duration)
+            assert not timeline.is_zoomed(), "前置：绑定新片后应是全片适应"
+            assert bar.percent_label.text() == "100%"
+
+            bar.btn_zoom_in.click()
+
+            assert timeline.is_zoomed(), "点「+」后时间轴应进入放大状态"
+            assert timeline.visible_span() < total
+            assert bar.percent_label.text() == "150%", "一级放大是 1.5 倍"
+            assert bar.range_label.text().startswith("可见")
+
+            bar.btn_fit.click()
+
+            assert not timeline.is_zoomed(), "「适应」应回到全片"
+            assert bar.percent_label.text() == "100%"
+            assert bar.range_label.text().startswith("全片")
+        finally:
+            self._clean(window)
+
+    def test_zoom_shortcuts_are_scoped_to_the_stage(self, window, binaries, assets):
+        stage = self._bind(window, binaries, assets)
+        try:
+            shortcuts = {}
+            for shortcut in stage._zoom_shortcuts:
+                assert (
+                    shortcut.context()
+                    == Qt.ShortcutContext.WidgetWithChildrenShortcut
+                ), "缩放快捷键只在中栏内生效，不能抢全局"
+                shortcuts[shortcut.key().toString()] = shortcut
+            assert set(shortcuts) == {"Ctrl+=", "Ctrl++", "Ctrl+-", "Ctrl+0"}
+
+            shortcuts["Ctrl+="].activated.emit()
+            assert stage.timeline.is_zoomed(), "Ctrl+= 应等同「+」"
+
+            shortcuts["Ctrl+0"].activated.emit()
+            assert not stage.timeline.is_zoomed(), "Ctrl+0 应等同「适应」"
+        finally:
+            self._clean(window)
+
+    def test_goto_reveals_playhead_when_zoomed(self, window, binaries, assets):
+        stage = self._bind(window, binaries, assets)
+        try:
+            timeline = stage.timeline
+            timeline.zoom_to(Fraction(0), Fraction(10))
+            target = Fraction(100)
+            start, span = timeline.visible_start(), timeline.visible_span()
+            assert not (start <= target <= start + span), "前置：目标在视窗外"
+
+            stage.goto(target)
+
+            start, span = timeline.visible_start(), timeline.visible_span()
+            assert start <= stage.position <= start + span, (
+                "放大后跳转应把视窗一起带过去，播放头不能停在视窗外"
+            )
+        finally:
+            self._clean(window)
+
+    def test_playback_drives_follow_mode(self, window):
+        stage = window.workbench.stage_view
+        stage.player.playing_changed.emit(True)
+        try:
+            assert stage.timeline._follow_playhead is True, "播放时应跟随播放头"
+        finally:
+            stage.player.playing_changed.emit(False)
+        assert stage.timeline._follow_playhead is False, "暂停后不再抢镜头"
+
+    def test_transport_and_empty_stage_disable_the_zoom_bar(
+        self, window, binaries, assets
+    ):
+        stage = self._bind(window, binaries, assets)
+        try:
+            assert stage.zoom_bar.isEnabled()
+            stage.set_transport_enabled(False)
+            assert not stage.zoom_bar.isEnabled(), "播放控制置灰时缩放条也应置灰"
+            stage.set_transport_enabled(True)
+            assert stage.zoom_bar.isEnabled()
+        finally:
+            self._clean(window)
+        # refresh() 在空态下不会碰舞台，这里显式走一次无媒体分支（与
+        # 「重新分析」清空方案时的调用一致）。
+        stage.set_project()
+        assert not stage.zoom_bar.isEnabled(), "无媒体时缩放条应禁用"
+        assert stage.zoom_bar.percent_label.text() == "100%"
+
+
 class TestSettingsAutoFill:
     """设置表单：派生目标值只读并实时反算。
 

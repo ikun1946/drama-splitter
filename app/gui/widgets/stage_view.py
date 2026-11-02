@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from fractions import Fraction
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ...core.timebase import format_timecode
@@ -24,6 +25,7 @@ from ..state import ProjectState
 from . import message
 from .media_preview import MediaPreview
 from .timeline import TimelineRuler
+from .timeline_zoom import TimelineZoomBar
 
 __all__ = ["StageView"]
 
@@ -67,12 +69,16 @@ class StageView(QWidget):
         # 中栏是自适应宽度，预览给一个能看清切点画面的最小高度
         self.preview.view.setMinimumHeight(240)
         self.timeline = TimelineRuler()
+        # 缩放条跟在时间轴下方而不是上方：它描述的是时间轴可见范围，贴在一起
+        # 才读得出从属关系。
+        self.zoom_bar = TimelineZoomBar()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(8)
         layout.addWidget(self.preview, 1)
         layout.addWidget(self.timeline)
+        layout.addWidget(self.zoom_bar)
 
         # ---- 播放控制接线（原先散在审核页，现统一在这里） ----
         # 「播放」键兼作「暂停」键：文案由 player.playing_changed 驱动
@@ -89,6 +95,9 @@ class StageView(QWidget):
         self.player.frame_ready.connect(self.preview.set_image)
         self.player.position_changed.connect(self._on_position)
         self.player.playing_changed.connect(self.preview.set_playing)
+        # 播放时视窗跟着播放头走，暂停后立刻停手：否则暂停状态下翻看别处会被
+        # 跟随逻辑拽回播放头，"暂停不抢镜头"。
+        self.player.playing_changed.connect(self.timeline.set_follow_playhead)
         self.player.playback_finished.connect(self._on_playback_finished)
         self.player.error.connect(lambda text: message.warning(self, "播放失败", text))
         # 拖动取帧走后台线程：同步取一帧要 ~168ms，拖时间轴时会把 GUI 线程
@@ -100,6 +109,14 @@ class StageView(QWidget):
         self.timeline.scrub_requested.connect(self._on_scrub)
         self.timeline.episode_activated.connect(self._on_timeline_episode)
         self.timeline.boundary_move_requested.connect(self.boundary_move_requested)
+
+        # 缩放条只发请求，视窗仍由时间轴持有；时间轴反过来把视窗变化推回缩放条，
+        # 滚轮缩放与中键平移也会走到这里，两条路径的文案不会各说一套。
+        self.zoom_bar.zoom_in_requested.connect(self.timeline.zoom_in)
+        self.zoom_bar.zoom_out_requested.connect(self.timeline.zoom_out)
+        self.zoom_bar.fit_requested.connect(self.timeline.fit_all)
+        self.timeline.view_changed.connect(self._sync_zoom_bar)
+        self._install_zoom_shortcuts()
 
     # ---- 项目绑定 ------------------------------------------------------
 
@@ -114,6 +131,9 @@ class StageView(QWidget):
             self.scrubber.stop()        # 后台取帧线程也要停，否则它还在读旧文件
             self.preview.clear("尚未选择源文件")
             self.timeline.set_project(None, None, {}, None)
+            # 没有素材就没有"可见范围"可谈：置灰而不是显示一条 0–0 的假范围。
+            self.zoom_bar.setEnabled(False)
+            self._sync_zoom_bar()
             return
         if self._bound_media is not media:
             # 换了源片（每次导入/打开项目都是新的媒体对象）：播放头必须回到
@@ -150,11 +170,15 @@ class StageView(QWidget):
         if video is None:
             # 只有音轨的素材没有画面可解，如实说明而不是报"解码失败"
             self.preview.clear("源文件没有视频轨")
-            return
-        # 换源/重建后立刻把当前帧画出来。否则画面区还停在上一状态（导入后
-        # 是「尚未选择源文件」的占位文字），要等用户点「下一帧」「−1s」或
-        # 拖时间轴触发 goto() 才会出图——看起来像"导入后没有画面"。
-        self.goto(self.position)
+        else:
+            # 换源/重建后立刻把当前帧画出来。否则画面区还停在上一状态（导入后
+            # 是「尚未选择源文件」的占位文字），要等用户点「下一帧」「−1s」或
+            # 拖时间轴触发 goto() 才会出图——看起来像"导入后没有画面"。
+            self.goto(self.position)
+        # 换片后时间轴已回到全片适应；缩放条按这个新视窗重排一次，
+        # 否则会保留上一部片子的百分比与置灰状态。
+        self.zoom_bar.setEnabled(True)
+        self._sync_zoom_bar()
 
     def _sync_preview_resolution(self) -> None:
         """把预览解码宽度对齐到画面区实际需要的物理像素。
@@ -174,7 +198,42 @@ class StageView(QWidget):
     def refresh_theme(self) -> None:
         """主题切换后自绘控件需要重绘（时间轴静态层带主题色）。"""
         self.timeline.invalidate_static()
+        self.zoom_bar.update()
         self.preview.update()
+
+    def _install_zoom_shortcuts(self) -> None:
+        """中栏内生效的缩放快捷键，与缩放条 tooltip 的说明保持一致。
+
+        用 ``WidgetWithChildrenShortcut`` 而不是应用级快捷键：主窗口还有别的
+        页签与对话框，全局注册会在别处抢走 Ctrl+0 / Ctrl+= 这类常用组合。
+        """
+        bindings = (
+            ("Ctrl+=", self.timeline.zoom_in),
+            ("Ctrl++", self.timeline.zoom_in),
+            ("Ctrl+-", self.timeline.zoom_out),
+            ("Ctrl+0", self.timeline.fit_all),
+        )
+        self._zoom_shortcuts: list[QShortcut] = []
+        for sequence, slot in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
+            self._zoom_shortcuts.append(shortcut)
+
+    def _sync_zoom_bar(self, *_ignored) -> None:
+        """把时间轴当前视窗推给缩放条（也是 ``view_changed`` 的槽）。
+
+        总长取自媒体而不是时间轴：无媒体时时间轴的 0 与"未绑定"是两回事，
+        这里需要显式给出 0，缩放条才会走整条置灰的分支。
+        """
+        media = self.state.media
+        total = float(media.timeline_duration) if media is not None else 0.0
+        self.zoom_bar.set_view(
+            float(self.timeline.visible_start()),
+            float(self.timeline.visible_span()),
+            total,
+            self.timeline.is_zoomed(),
+        )
 
     def set_transport_enabled(self, enabled: bool) -> None:
         for button in (
@@ -190,6 +249,9 @@ class StageView(QWidget):
         ):
             button.setEnabled(enabled)
         self.timeline.setEnabled(enabled)
+        # 缩放条也属于播放/定位控制：分析进行中整块置灰，避免视窗在重建期间
+        # 被改来改去。
+        self.zoom_bar.setEnabled(enabled)
 
     def set_selected_episode(self, index: int) -> None:
         self.current_episode = index
@@ -207,6 +269,9 @@ class StageView(QWidget):
         target = Fraction(seconds).limit_denominator(1_000_000)
         target = max(Fraction(0), min(target, media.timeline_duration))
         _, snapped = media.snap_to_frame(target)
+        # 放大后从左侧点集/步进/切点跳转，目标可能落在视窗外：先把视窗挪过去
+        # 再落定播放头，否则播放头会停在看不见的位置，时间轴与画面各说一段。
+        self.timeline.reveal(snapped)
         self._set_position(snapped)
         self.player.set_range(float(snapped))
         try:

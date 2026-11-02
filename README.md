@@ -55,8 +55,10 @@ QSS 里最容易失控：圆角处露底、深浅两套难同步。
 **轻量时间轴**（`app/gui/widgets/timeline.py`）：整片时长条 + 集分段（圆角 + 2px 缝，
 段宽够时居中写集号、窄段省略；已导出的集右上角一枚圆点）+ 切点标记（锁定实心 /
 异常标红）+ 播放头，可直接拖动切点（松手先吸附到帧起点再换算 ticks）、点击跳转与
-选集。不做帧缩略图。绘制分静态层（缓存 QPixmap，仅尺寸/主题/方案/选中集变化才重建）
-与动态层（只重绘播放头），播放时每帧刷新不会重建整条。
+选集。支持滚轮按光标位置缩放、Shift+滚轮/中键拖动平移、双击集分段放大到该集、
+播放时自动跟随播放头，底部一条缩放条显示可见范围与放大比例。不做帧缩略图。
+绘制分静态层（缓存 QPixmap，仅尺寸/DPR/主题/方案/选中集/视窗变化才重建）与
+动态层（只重绘播放头），播放时每帧刷新不会重建整条。
 
 截图由 `tools/screenshot_gui.py` 离屏渲染真实界面得到，预览区显示的是 FFmpeg
 解出的**真实解码帧**（可见测试素材自带的帧号条码）。
@@ -464,9 +466,9 @@ dist/drama-splitter/
 | §15 硬件编码器探测 | `app/core/ffmpeg.py` | 完成 |
 | § 任务恢复（项目快照）+ §五十五/五十六 保存 / 打开 / 自动保存 | `app/gui/state.py`、`app/gui/main_window.py` | 完成 |
 | §37 导出前置检查（未审核切点不禁止：继续导出 / 返回审核） | `app/gui/panes/export_form.py::export_precheck` | 完成 |
-| §19（自定）轻量时间轴：切点标记 / 锁定 / 播放头 / 拖拽改切点 | `app/gui/widgets/timeline.py` | 完成（不含帧缩略图） |
+| §19（自定）轻量时间轴：切点标记 / 锁定 / 播放头 / 拖拽改切点 | `app/gui/widgets/timeline.py` | 完成（不含帧缩略图；支持缩放 / 平移） |
 | § 四阶段状态机（空态 / 就绪 / 分析中 / 审核） | `app/gui/stage.py` | 完成 |
-| §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航、F11 全屏/Esc 关闭） | `app/gui/main_window.py::_install_shortcuts` | 完成 |
+| §54 快捷键（空格/←→/Ctrl+S/O/E、回车确认、N/P 问题巡航、F11 全屏/Esc 关闭、Ctrl+= / Ctrl+- / Ctrl+0 时间轴缩放 / 适应） | `app/gui/main_window.py::_install_shortcuts`、`app/gui/widgets/stage_view.py::_install_zoom_shortcuts` | 完成 |
 | §15 打包与部署自检 | `tools/build_package.py` + `run.py --self-check` | 完成 |
 
 已知限制（不静默蒙混，都在界面上如实说明）：
@@ -665,6 +667,7 @@ app/gui/           界面（PySide6-Essentials）
     base.py            外壳与「自动化里不许 exec()」的约定
   widgets/           通用控件
     timeline.py        轻量时间轴（静态层缓存 + 播放头局部重绘）
+    timeline_zoom.py   时间轴缩放条（− / 适应 / +，可见范围与百分比）
     stage_view.py      中栏舞台（预览 + 时间轴 + 播放控制）
     inspector.py       右侧常驻检查器（问题 / 建议 / 日志）
     bottom_bar.py      底栏（阶段文案 + 进度 + 提示 + 主动作）

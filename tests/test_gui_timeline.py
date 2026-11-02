@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6.QtWidgets", reason="未安装 PySide6，跳过界面测试")
 
-from PySide6.QtCore import QPoint, QPointF  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -373,3 +373,219 @@ class TestPlayheadBubble:
         assert rect.top() <= ruler.BUBBLE_TOP
         assert rect.height() >= ruler.BUBBLE_TOP + ruler.BUBBLE_HEIGHT
         assert rect.width() >= ruler.BUBBLE_MAX_WIDTH, "气泡比播放头宽，脏矩形也要跟着变宽"
+
+
+class _WheelEvent:
+    """只实现 wheelEvent 用到的接口，避免构造真实的 QWheelEvent。"""
+
+    def __init__(self, x: float, delta: int = 120,
+                 modifiers=Qt.KeyboardModifier.NoModifier) -> None:
+        self._point = QPointF(x, 30.0)
+        self._delta = QPoint(0, delta)
+        self._modifiers = modifiers
+        self.accepted = False
+
+    def position(self) -> QPointF:
+        return self._point
+
+    def angleDelta(self) -> QPoint:      # noqa: N802 - Qt 命名
+        return self._delta
+
+    def modifiers(self):
+        return self._modifiers
+
+    def accept(self) -> None:
+        self.accepted = True
+
+
+class TestZoom:
+    """视窗模型：缩放只改静态层，播放头照旧走增量刷新。"""
+
+    def test_zoom_by_keeps_anchor_under_same_x(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        anchor = Fraction(60)
+        x_before = ruler._x_from_seconds(anchor)
+
+        ruler.zoom_by(2, anchor_seconds=anchor)
+
+        assert ruler.is_zoomed()
+        assert ruler.visible_start() == Fraction(30)
+        assert ruler.visible_span() == Fraction(60)
+        assert ruler._x_from_seconds(anchor) == pytest.approx(x_before)
+
+    def test_zoom_by_defaults_to_playhead_anchor(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.set_playhead(Fraction(60))
+
+        ruler.zoom_by(2)
+
+        assert ruler.visible_start() == Fraction(30)
+        assert ruler.visible_span() == Fraction(60)
+
+    def test_zoom_in_clamps_to_minimum_span(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        for _ in range(20):
+            ruler.zoom_in()
+
+        assert ruler.visible_span() == Fraction(2)
+        assert ruler.visible_start() >= 0
+        assert ruler.visible_start() + ruler.visible_span() <= Fraction(120)
+
+    def test_zoom_out_returns_to_full_view(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_to(Fraction(40), Fraction(60))
+        assert ruler.is_zoomed()
+
+        for _ in range(20):
+            ruler.zoom_out()
+
+        assert ruler.visible_start() == Fraction(0)
+        assert ruler.visible_span() == Fraction(120)
+        assert not ruler.is_zoomed()
+
+    def test_round_trip_stays_exact_after_zoom(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_by(2, anchor_seconds=Fraction(60))       # 30–90s
+        for seconds in (
+            Fraction(30), Fraction(75, 2), Fraction(45),
+            Fraction(60), Fraction(75), Fraction(90),
+        ):
+            x = ruler._x_from_seconds(seconds)
+            assert ruler._seconds_from_x(x) == seconds
+
+    def test_pan_clamps_at_both_ends(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_by(2, anchor_seconds=Fraction(60))       # 30–90s
+
+        ruler.pan(1000)
+        assert ruler.visible_start() == Fraction(60)
+        assert ruler.visible_span() == Fraction(60)
+
+        ruler.pan(-1000)
+        assert ruler.visible_start() == Fraction(0)
+
+        ruler.pan(Fraction(10))
+        assert ruler.visible_start() == Fraction(10)
+
+    def test_zoom_to_adds_padding_and_fit_all_restores(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+
+        ruler.zoom_to(Fraction(30), Fraction(60))
+        assert ruler.visible_start() == Fraction(144, 5)     # 30 - 4% × 30s
+        assert ruler.visible_span() == Fraction(162, 5)      # 30 × 1.08
+
+        ruler.fit_all()
+        assert ruler.visible_start() == Fraction(0)
+        assert ruler.visible_span() == Fraction(120)
+        assert not ruler.is_zoomed()
+
+    def test_view_change_rebuilds_once_then_playhead_is_free(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        _paint(ruler)
+        baseline = ruler._static_rebuild_count
+
+        ruler.zoom_to(Fraction(30), Fraction(90))
+        _paint(ruler)
+        assert ruler._static_rebuild_count == baseline + 1
+
+        for step in range(1000):
+            ruler.set_playhead(Fraction(step % 121))
+
+        _paint(ruler)
+        assert ruler._static_rebuild_count == baseline + 1, (
+            "缩放后播放头移动不应重建静态层"
+        )
+
+    def test_reveal_keeps_inside_and_centers_outside(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_to(Fraction(20), Fraction(40))
+        view = (ruler.visible_start(), ruler.visible_span())
+
+        ruler.reveal(Fraction(30))                          # 视窗中心：不动
+        assert (ruler.visible_start(), ruler.visible_span()) == view
+
+        ruler.reveal(Fraction(100))
+        assert ruler.visible_start() == Fraction(100) - view[1] / 2
+        assert ruler.visible_span() == view[1]
+
+    def test_follow_playhead_pages_when_out_of_view(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.set_follow_playhead(True)
+        ruler.zoom_to(Fraction(40), Fraction(60))
+        span = ruler.visible_span()
+
+        ruler.set_playhead(Fraction(90))
+        assert ruler.visible_start() == Fraction(90) - span / 2
+
+        moved = ruler.visible_start()
+        ruler.set_playhead(Fraction(90) + span / 4)          # 仍在视窗内
+        assert ruler.visible_start() == moved
+
+    def test_playhead_rect_is_none_outside_view(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_to(Fraction(40), Fraction(60))           # 39.2–60.8s
+
+        ruler.set_playhead(Fraction(10))
+        assert ruler._playhead_rect() is None
+
+        ruler.set_playhead(Fraction(50))
+        assert ruler._playhead_rect() is not None
+
+    def test_double_click_episode_zooms_to_it(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        x = ruler._x_from_seconds(Fraction(45))             # 第 2 集 30–60s
+
+        ruler.mouseDoubleClickEvent(_Event(x))
+
+        assert ruler.visible_start() == Fraction(144, 5)
+        assert ruler.visible_span() == Fraction(162, 5)
+
+    def test_wheel_zooms_around_cursor(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        anchor = Fraction(60)
+        x = ruler._x_from_seconds(anchor)
+        event = _WheelEvent(x)
+
+        ruler.wheelEvent(event)
+
+        assert event.accepted
+        assert ruler.visible_span() == Fraction(100)        # 120 / 1.2
+        assert ruler.visible_start() == Fraction(10)
+        assert ruler._x_from_seconds(anchor) == pytest.approx(x)
+
+    def test_shift_wheel_pans_by_fifteen_percent(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_by(2, anchor_seconds=Fraction(60))       # 30–90s，跨度 60
+        event = _WheelEvent(
+            400, delta=-120, modifiers=Qt.KeyboardModifier.ShiftModifier
+        )
+
+        ruler.wheelEvent(event)
+
+        assert event.accepted
+        assert ruler.visible_start() == Fraction(39)        # 30 + 60 × 15%
+        assert ruler.visible_span() == Fraction(60)
+
+    def test_view_changed_emits_only_on_real_change(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        changes: list[tuple[float, float]] = []
+        ruler.view_changed.connect(lambda start, span: changes.append((start, span)))
+
+        ruler.zoom_to(Fraction(30), Fraction(60))
+        assert len(changes) == 1
+
+        ruler.zoom_to(Fraction(30), Fraction(60))           # 同一个视窗
+        assert len(changes) == 1
+
+        ruler.fit_all()
+        assert len(changes) == 2
+
+    def test_set_project_resets_to_full_view(self, ruler):
+        ruler.set_project(_Media(), _plan(), {}, 1)
+        ruler.zoom_to(Fraction(30), Fraction(60))
+
+        ruler.set_project(_Media(), _plan(), {}, 1)
+
+        assert not ruler.is_zoomed()
+        assert ruler.visible_start() == Fraction(0)
+        assert ruler.visible_span() == Fraction(120)
